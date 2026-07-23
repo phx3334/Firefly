@@ -3,6 +3,7 @@ import { onMount, tick } from "svelte";
 import ClientPagination from "@/components/common/ClientPagination.svelte";
 import { formatTimezoneOffset } from "@/utils/date-utils";
 import { fetchMemos } from "@/utils/memos-adapter";
+import { localDynamics } from "@/data/dynamics";
 import { registerDynamicGallery } from "./dynamic-gallery";
 import { registerDynamicInlineComments } from "./dynamic-inline-comments";
 
@@ -170,7 +171,7 @@ function createItem(entry: DynamicData) {
 			time.textContent = new Intl.DateTimeFormat(
 				document.documentElement.lang || undefined,
 				{
-					timeZone: "UTC",
+					timeZone: timezone || "UTC",
 					year: "numeric",
 					month: "2-digit",
 					day: "2-digit",
@@ -273,9 +274,7 @@ onMount(() => {
 			if (memos?.enable) {
 				entries = await fetchMemos(memos.apiUrl, { parent: memos.parent });
 			} else {
-				const response = await fetch(source);
-				if (!response.ok) throw new Error(`HTTP ${response.status}`);
-				entries = (await response.json()) as DynamicData[];
+				entries = localDynamics as DynamicData[];
 			}
 			// 更新页面计数
 			const countEl = document.querySelector("[data-dynamic-page-count]");

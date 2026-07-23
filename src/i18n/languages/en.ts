@@ -210,6 +210,8 @@ export const en: Translation = {
 	[Key.animeTypeChinese]: "Chinese Animation",
 	[Key.animeTypeDrama]: "Drama",
 	[Key.animeTypeConcert]: "Concert",
+	[Key.animeTypeFav]: "Favorite",
+	[Key.animeFavorites]: "Favorites",
 
 	// Pagination
 	[Key.paginationFirst]: "First",

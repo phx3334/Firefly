@@ -210,6 +210,8 @@ export const ko: Translation = {
 	[Key.animeTypeChinese]: "중국 애니메이션",
 	[Key.animeTypeDrama]: "드라마",
 	[Key.animeTypeConcert]: "콘서트",
+	[Key.animeTypeFav]: "즐겨찾기",
+	[Key.animeFavorites]: "즐겨찾기",
 
 	// Pagination
 	[Key.paginationFirst]: "처음",

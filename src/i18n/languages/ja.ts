@@ -210,6 +210,8 @@ export const ja: Translation = {
 	[Key.animeTypeChinese]: "中国アニメ",
 	[Key.animeTypeDrama]: "ドラマ",
 	[Key.animeTypeConcert]: "コンサート",
+	[Key.animeTypeFav]: "お気に入り",
+	[Key.animeFavorites]: "お気に入り",
 
 	// ページネーション
 	[Key.paginationFirst]: "最初",

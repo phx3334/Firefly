@@ -206,6 +206,8 @@ export const zh_CN: Translation = {
 	[Key.animeTypeChinese]: "国创",
 	[Key.animeTypeDrama]: "电视剧",
 	[Key.animeTypeConcert]: "演唱会",
+	[Key.animeTypeFav]: "收藏",
+	[Key.animeFavorites]: "收藏",
 
 	// 分页
 	[Key.paginationFirst]: "首页",

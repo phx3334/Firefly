@@ -118,11 +118,11 @@ if (TMDB_API_KEY && TMDB_LIST_ID) {
 	}
 }
 
-// 2. Bilibili 数据（type=1 追番 + type=2 追剧）
+// 2. Bilibili 数据（type=1 追番）
 let bilibiliItems: BilibiliItem[] = [];
 if (BILIBILI_UID) {
 	try {
-		console.log(`[Anime] Fetching Bilibili list for UID: ${BILIBILI_UID}...`);
+		console.log(`[Anime] Fetching Bilibili 追番 for UID: ${BILIBILI_UID}...`);
 		const ps = 30;
 
 		/** 获取指定类型的全部追番数据 */
@@ -159,17 +159,66 @@ if (BILIBILI_UID) {
 			return items;
 		}
 
-		// 并发获取追番和追剧
-		const [animeItems, dramaItems] = await Promise.all([
-			fetchBilibiliByType(1),
-			fetchBilibiliByType(2),
-		]);
-		bilibiliItems = [...animeItems, ...dramaItems];
-		console.log(
-			`[Anime] Fetched ${bilibiliItems.length} items from Bilibili (anime: ${animeItems.length}, drama: ${dramaItems.length}).`,
-		);
+		// 仅获取追番（type=1）
+		bilibiliItems = await fetchBilibiliByType(1);
+		console.log(`[Anime] Fetched ${bilibiliItems.length} 追番 items from Bilibili.`);
 	} catch (e) {
 		console.error("[Anime] Bilibili fetch error:", e);
+	}
+}
+
+// 3. Bilibili 收藏（默认收藏夹）
+interface BilibiliFavItem {
+	id: number;
+	title: string;
+	cover?: string;
+	intro?: string;
+	link?: string;
+	bvid?: string;
+	upper?: { name?: string };
+	pubtime?: number; // 发布时间（Unix 秒），顶层字段
+	cnt_info?: { play?: number };
+}
+// B 站部分接口需要基础请求头，否则易触发风控（-412）
+const BILI_HEADERS: Record<string, string> = {
+	"User-Agent":
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	Referer: "https://www.bilibili.com",
+};
+let favItems: BilibiliFavItem[] = [];
+if (BILIBILI_UID) {
+	try {
+		console.log(`[Anime] Fetching Bilibili 默认收藏夹 for UID: ${BILIBILI_UID}...`);
+		// 获取收藏夹列表：data[0] 为“TA创建的收藏夹”分组，其 mediaListResponse.list[0] 即默认收藏夹
+		const folderRes = await fetch(
+			`https://api.bilibili.com/x/v3/fav/folder/space?pn=1&ps=20&up_mid=${BILIBILI_UID}&vn=1`,
+			{ headers: BILI_HEADERS },
+		);
+		const folderJson = await folderRes.json();
+		const defaultFolder = folderJson?.data?.[0]?.mediaListResponse?.list?.[0];
+		if (defaultFolder?.id) {
+			const mediaId = defaultFolder.id;
+			const ps = 20;
+			// 用 has_more 循环翻页，避免依赖不存在的 count 字段导致只抓第一页
+			let pn = 1;
+			let hasMore = true;
+			while (hasMore && pn <= 50) {
+				const res = await fetch(
+					`https://api.bilibili.com/x/v3/fav/resource/list?media_id=${mediaId}&pn=${pn}&ps=${ps}&order=mtime`,
+					{ headers: BILI_HEADERS },
+				);
+				const j = await res.json();
+				if (j.code !== 0 || !j.data?.medias?.length) break;
+				favItems.push(...j.data.medias);
+				hasMore = j.data.has_more === true;
+				pn++;
+			}
+			console.log(`[Anime] Fetched ${favItems.length} 收藏 items from Bilibili.`);
+		} else {
+			console.warn("[Anime] 未找到默认收藏夹:", folderJson);
+		}
+	} catch (e) {
+		console.error("[Anime] Fav fetch error:", e);
 	}
 }
 
@@ -214,6 +263,7 @@ if (bilibiliItems.length > 0) {
 		overview: item.evaluate || item.brief || "",
 		link: `https://www.bilibili.com/bangumi/play/ss${item.season_id}`,
 		epStatus: item.new_ep?.index_show || "",
+		category: "anime" as const,
 	}));
 
 	// 去重：Bilibili 优先（带进度信息）
@@ -221,6 +271,30 @@ if (bilibiliItems.length > 0) {
 	animeList = animeList.filter((item) => !bilibiliTitles.has(item.title));
 	animeList = [...animeList, ...bilibiliMapped];
 }
+
+// 标准化 Bilibili 收藏 数据
+const favList: StandardizedAnime[] = favItems.map((item) => ({
+	id: item.id,
+	title: item.title,
+	originalTitle: item.title,
+	poster: item.cover ? item.cover.replace("http://", "https://") : null,
+	type: "tv",
+	season_type: 8, // 8=收藏
+	source: "bilibili" as const,
+	rating: 0,
+	date: item.pubtime
+		? new Date(item.pubtime * 1000).toISOString().slice(0, 10)
+		: "",
+	overview: item.intro || "",
+	link: item.bvid
+		? `https://www.bilibili.com/video/${item.bvid}`
+		: (item.link || ""),
+	epStatus: item.upper?.name ? `UP ${item.upper.name}` : "",
+	category: "fav" as const,
+}));
+
+// 合并追番与收藏，传入前端组件
+const allItems: StandardizedAnime[] = [...animeList, ...favList];
 
 // 统计数据
 const totalCount = animeList.length;
@@ -337,7 +411,7 @@ const isConfigured = !!(BILIBILI_UID || (TMDB_API_KEY && TMDB_LIST_ID));
             {/* 番剧网格（Svelte 交互组件） */}
             <AnimeGrid
               client:load
-              items={animeList}
+              items={allItems}
               bilibiliAverageRating={bilibiliAverageRating}
             />
           </>

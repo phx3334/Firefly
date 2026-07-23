@@ -12,7 +12,7 @@
     "type-check": "tsc --noEmit --isolatedDeclarations",
     "new-dynamic": "tsx scripts/new-dynamic.js",
     "new-d": "tsx scripts/new-dynamic.js",
-    "new-post": "node scripts/new-post.js",
+    "new-post": "tsx scripts/new-post.js",
     "format": "biome format --write ./src",
     "lint": "biome check --write ./src",
     "preinstall": "npx only-allow pnpm",

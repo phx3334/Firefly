@@ -90,11 +90,12 @@ async function fetchCategory(
 		const resp = await fetch(url, { headers: { Accept: "application/json" } });
 		if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 		const data = await resp.json();
-		const batch: UserSubjectCollection[] = data.data || [];
-		if (batch.length > 0) {
+		const rawBatch: UserSubjectCollection[] = data.data || [];
+		if (rawBatch.length > 0) {
+			const batch = rawBatch;
 			allItems.push(...batch);
 			offset += limit;
-			if (batch.length < limit) break;
+			if (rawBatch.length < limit) break;
 			await new Promise((r) => setTimeout(r, delay));
 		} else {
 			break;

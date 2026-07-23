@@ -7,6 +7,22 @@ import { i18n } from "@/i18n/translation";
 import MainGridLayout from "@/layouts/MainGridLayout.astro";
 import { getAlbumCover, scanAlbumPhotos } from "@/utils/gallery-utils";
 
+// 相册 date 留空时，用站点时区（默认北京时间）的当天日期兜底，
+// 确保创建时间正确反映，不依赖手动填写，也不受构建机时区影响。
+function todayBeijing(): string {
+	const tz = siteConfig.timezone || "Asia/Shanghai";
+	const p = new Intl.DateTimeFormat("en-CA", {
+		timeZone: tz,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hourCycle: "h23",
+	}).formatToParts(new Date());
+	const o: Record<string, string> = {};
+	for (const x of p) if (x.type !== "literal") o[x.type] = x.value;
+	return `${o.year}-${o.month}-${o.day}`;
+}
+
 // 检查页面是否启用
 if (!siteConfig.pages.gallery) {
 	return Astro.redirect("/404/");
@@ -97,11 +113,12 @@ const allTags = [...new Set(albums.flatMap((a) => a.tags || []))].sort();
                 name={album.name}
                 cover={album.cover}
                 description={album.description}
-                date={album.date}
+                date={album.date ?? todayBeijing()}
                 location={album.location}
                 tags={album.tags}
                 photoCount={album.photoCount}
                 encrypted={!!album.password}
+                featured={album.featured}
               />
             ))}
           </div>

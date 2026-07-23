@@ -16,6 +16,10 @@ interface Props {
 
 let { items, bilibiliAverageRating, itemsPerPage = 24 }: Props = $props();
 
+// 一级分类：追番 / 收藏
+type Category = "anime" | "fav";
+let activeCategory = $state<Category>("anime");
+
 // 状态
 let searchQuery = $state("");
 let activeFilter = $state(
@@ -41,12 +45,24 @@ const SEASON_TYPE_I18N: Record<number, I18nKey> = {
 	4: I18nKey.animeTypeChinese,
 	5: I18nKey.animeTypeDrama,
 	7: I18nKey.animeTypeConcert,
+	8: I18nKey.animeTypeFav,
 };
 
-// 动态生成筛选项：从数据中提取实际存在的 season_type
+// 分类计数
+let categoryCounts = $derived(() => ({
+	anime: items.filter((i) => (i.category || "anime") === "anime").length,
+	fav: items.filter((i) => i.category === "fav").length,
+}));
+
+// 当前分类下的项目
+let categoryItems = $derived(() =>
+	items.filter((i) => (i.category || "anime") === activeCategory),
+);
+
+// 动态生成筛选项：从当前分类数据中提取实际存在的 season_type
 let filterOptions = $derived(() => {
 	const typeMap = new Map<number, number>();
-	for (const item of items) {
+	for (const item of categoryItems()) {
 		const st = item.season_type || 1;
 		typeMap.set(st, (typeMap.get(st) || 0) + 1);
 	}
@@ -62,7 +78,7 @@ let filterOptions = $derived(() => {
 
 // 筛选和排序后的数据
 let filteredItems = $derived(() => {
-	let result = [...items];
+	let result = [...categoryItems()];
 
 	// 搜索过滤
 	if (searchQuery.trim()) {
@@ -125,6 +141,15 @@ function setSort(sort: typeof sortBy) {
 	resetPage();
 }
 
+function setCategory(cat: string) {
+	activeCategory = cat as Category;
+	// 切换分类时重置筛选/搜索/排序/分页
+	activeFilter = "";
+	searchQuery = "";
+	sortBy = "rating-desc";
+	currentPage = 1;
+}
+
 function goToPage(page: number) {
 	currentPage = page;
 }
@@ -139,6 +164,16 @@ function closeDetail() {
 </script>
 
 <div class="anime-grid">
+	<!-- 一级分类：追番 / 收藏 -->
+	<TabNav
+		tabs={[
+			{ id: "anime", name: i18n(I18nKey.anime), count: categoryCounts().anime },
+			{ id: "fav", name: i18n(I18nKey.animeFavorites), count: categoryCounts().fav },
+		]}
+		activeTab={activeCategory}
+		onTabChange={setCategory}
+	/>
+
 	<!-- 工具栏 -->
 	<div class="mb-6 flex flex-col gap-3">
 		<!-- 搜索和排序 -->
@@ -202,4 +237,3 @@ function closeDetail() {
 
 <!-- 详情弹窗 -->
 <AnimeDetailModal anime={selectedAnime} onclose={closeDetail} />
-

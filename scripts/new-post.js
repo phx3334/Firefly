@@ -1,59 +1,57 @@
-/* This is a script to create a new post markdown file with front-matter */
+/* 新建一篇文章 markdown。
+ *
+ * published 通过 scripts/time-utils.ts 生成：
+ * - 统一使用站点时区（默认 Asia/Shanghai / 北京时间）
+ * - 冻结在创建那一刻
+ * - 写成带时区偏移的 ISO 字符串（如 2026-07-24T02:21:00+08:00），
+ *   这样 z.date() 解析出来是正确的绝对时刻，显示不会错一天。
+ *
+ * 用法: pnpm new-post -- <文件名>
+ */
+import fs from "fs";
+import path from "path";
+import { nowIsoString } from "./time-utils.ts";
 
-import fs from "fs"
-import path from "path"
-
-function getDate() {
-  const today = new Date()
-  const year = today.getFullYear()
-  const month = String(today.getMonth() + 1).padStart(2, "0")
-  const day = String(today.getDate()).padStart(2, "0")
-
-  return `${year}-${month}-${day}`
-}
-
-const args = process.argv.slice(2)
+const args = process.argv.slice(2);
 
 if (args.length === 0) {
-  console.error(`Error: No filename argument provided
-Usage: npm run new-post -- <filename>`)
-  process.exit(1) // Terminate the script and return error code 1
+	console.error(`Error: No filename argument provided
+Usage: pnpm new-post -- <filename>`);
+	process.exit(1);
 }
 
-let fileName = args[0]
+let fileName = args[0];
 
-// Add .md extension if not present
-const fileExtensionRegex = /\.(md|mdx)$/i
+const fileExtensionRegex = /\.(md|mdx)$/i;
 if (!fileExtensionRegex.test(fileName)) {
-  fileName += ".md"
+	fileName += ".md";
 }
 
-const targetDir = "./src/content/posts/"
-const fullPath = path.join(targetDir, fileName)
+const targetDir = "./src/content/posts/";
+const fullPath = path.join(targetDir, fileName);
 
 if (fs.existsSync(fullPath)) {
-  console.error(`Error: File ${fullPath} already exists `)
-  process.exit(1)
+	console.error(`Error: File ${fullPath} already exists `);
+	process.exit(1);
 }
 
-// recursive mode creates multi-level directories
-const dirPath = path.dirname(fullPath)
+const dirPath = path.dirname(fullPath);
 if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true })
+	fs.mkdirSync(dirPath, { recursive: true });
 }
 
 const content = `---
 title: ${args[0]}
-published: ${getDate()}
+published: ${nowIsoString()}
 description: ''
 image: ''
 tags: []
 category: ''
-draft: false 
+draft: false
 lang: ''
 ---
-`
+`;
 
-fs.writeFileSync(path.join(targetDir, fileName), content)
+fs.writeFileSync(path.join(targetDir, fileName), content);
 
-console.log(`Post ${fullPath} created`)
+console.log(`Post ${fullPath} created`);

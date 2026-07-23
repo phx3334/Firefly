@@ -207,6 +207,8 @@ enum I18nKey {
 	animeTypeChinese = "animeTypeChinese",
 	animeTypeDrama = "animeTypeDrama",
 	animeTypeConcert = "animeTypeConcert",
+	animeTypeFav = "animeTypeFav",
+	animeFavorites = "animeFavorites",
 
 	// 分页
 	paginationFirst = "paginationFirst",

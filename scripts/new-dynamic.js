@@ -1,8 +1,14 @@
-/* Create a timestamped dynamic markdown file from command-line text. */
-
+/* 新建一条动态，直接写入 src/data/dynamics.ts（前端硬编码数据源）。
+ *
+ * 创建时间通过 scripts/time-utils.ts 生成：
+ * - 统一使用站点时区（默认 Asia/Shanghai / 北京时间）
+ * - 冻结在创建那一刻，不会随时间自增
+ *
+ * 用法: pnpm new-dynamic <内容>
+ */
 import fs from "node:fs";
 import path from "node:path";
-import { siteConfig } from "../src/config/siteConfig.ts";
+import { nowUtcMs, getLocalParts } from "./time-utils.ts";
 
 const content = process.argv.slice(2).join(" ").trim();
 
@@ -13,42 +19,33 @@ if (!content) {
 	process.exit(1);
 }
 
-const now = new Date();
-const pad = (value) => String(value).padStart(2, "0");
-const timezone = siteConfig.timezone || "Asia/Shanghai";
-const dateParts = new Intl.DateTimeFormat("en-CA", {
-	timeZone: timezone,
-	year: "numeric",
-	month: "2-digit",
-	day: "2-digit",
-	hour: "2-digit",
-	minute: "2-digit",
-	second: "2-digit",
-	hourCycle: "h23",
-})
-	.formatToParts(now)
-	.reduce((parts, part) => {
-		if (part.type !== "literal") parts[part.type] = part.value;
-		return parts;
-	}, {});
-const year = dateParts.year;
-const month = dateParts.month;
-const day = dateParts.day;
-const hours = dateParts.hour;
-const minutes = dateParts.minute;
-const seconds = dateParts.second;
-const timestamp = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-const fileName = `${year}-${month}-${day}-${hours}${minutes}${seconds}.md`;
-const targetDir = path.resolve("src/content/dynamic");
-const fullPath = path.join(targetDir, fileName);
+const parts = getLocalParts();
+const id = `local-${parts.year}-${parts.month}-${parts.day}-${parts.hour}${parts.minute}${parts.second}`;
+const published = nowUtcMs();
+const file = path.resolve("src/data/dynamics.ts");
+const raw = fs.readFileSync(file, "utf-8");
 
-fs.mkdirSync(targetDir, { recursive: true });
+const entry = `	{
+		id: ${JSON.stringify(id)},
+		// ${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} (${"site timezone"})
+		published: ${published},
+		html: ${JSON.stringify(content)},
+		images: [],
+		searchText: ${JSON.stringify(content)},
+		pinned: false,
+	},
+`;
 
-if (fs.existsSync(fullPath)) {
-	console.error(`Error: File ${fullPath} already exists`);
+// 插到数组结束的 "];" 之前
+const marker = "];";
+const idx = raw.lastIndexOf(marker);
+if (idx === -1) {
+	console.error(`Error: cannot find array end in ${file}`);
 	process.exit(1);
 }
+const next = raw.slice(0, idx) + entry + raw.slice(idx);
+fs.writeFileSync(file, next);
 
-fs.writeFileSync(fullPath, `---\npublished: ${timestamp}\n---\n\n${content}\n`);
-
-console.log(`Dynamic ${fullPath} created`);
+console.log(
+	`Dynamic added: ${id} (${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second})`,
+);

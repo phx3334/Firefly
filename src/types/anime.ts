@@ -14,4 +14,5 @@ export interface StandardizedAnime {
 	overview: string; // 剧情简介
 	link: string; // 详情/播放链接
 	epStatus: string | undefined; // 集数状态（仅 Bilibili 数据有此字段）
+	category?: "anime" | "fav"; // 数据分类：anime=追番，fav=收藏
 }

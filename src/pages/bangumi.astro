@@ -110,14 +110,15 @@ async function fetchBangumiData(username: string, subjectType: number) {
 		}
 
 		const data = (await response.json()) as UserSubjectCollectionResponse;
-		const currentBatch = data.data || [];
+		const rawBatch = data.data || [];
 
-		if (currentBatch.length > 0) {
+		if (rawBatch.length > 0) {
+			const currentBatch = rawBatch;
 			allData = allData.concat(currentBatch);
 			offset += limit;
 
 			// 如果本次获取的数据少于limit，说明已经是最后一页
-			if (currentBatch.length < limit) {
+			if (rawBatch.length < limit) {
 				hasMore = false;
 			}
 		} else {

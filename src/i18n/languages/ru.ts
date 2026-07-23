@@ -211,6 +211,8 @@ export const ru: Translation = {
 	[Key.animeTypeChinese]: "Китайское аниме",
 	[Key.animeTypeDrama]: "Сериал",
 	[Key.animeTypeConcert]: "Концерт",
+	[Key.animeTypeFav]: "Избранное",
+	[Key.animeFavorites]: "Избранное",
 
 	// Пагинация
 	[Key.paginationFirst]: "Первая",

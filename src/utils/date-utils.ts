@@ -62,7 +62,7 @@ export function formatDateI18nWithTime(dateInput: Date | string): string {
 export function formatDynamicDate(dateInput: Date | string): string {
 	const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
 	const parts = new Intl.DateTimeFormat("en-CA", {
-		timeZone: "UTC",
+		timeZone: siteConfig.timezone || "UTC",
 		year: "numeric",
 		month: "2-digit",
 		day: "2-digit",

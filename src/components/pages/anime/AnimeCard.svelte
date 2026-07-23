@@ -28,6 +28,7 @@ const SEASON_TYPE_I18N: Record<number, I18nKey> = {
 	4: I18nKey.animeTypeChinese,
 	5: I18nKey.animeTypeDrama,
 	7: I18nKey.animeTypeConcert,
+	8: I18nKey.animeTypeFav,
 };
 
 const SEASON_TYPE_COLORS: Record<number, string> = {
@@ -37,6 +38,7 @@ const SEASON_TYPE_COLORS: Record<number, string> = {
 	4: "bg-orange-500",
 	5: "bg-pink-500",
 	7: "bg-yellow-500",
+	8: "bg-rose-500",
 };
 
 function getTypeLabel(seasonType: number): string {

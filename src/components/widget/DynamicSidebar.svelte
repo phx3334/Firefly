@@ -1,15 +1,14 @@
 <script lang="ts">
 /**
- * 侧边栏动态组件 - 从 API 获取数据
- * 支持自定义 API 地址，方便接入第三方后端
+ * 侧边栏动态组件 - 使用前端硬编码的动态数据
  */
 import I18nKey from "@i18n/i18nKey";
 import { i18n } from "@i18n/translation";
 import { onMount } from "svelte";
 import { formatDynamicDate } from "@/utils/date-utils";
-import { fetchWithDedup } from "@/utils/fetch-dedup";
 import { fetchMemos } from "@/utils/memos-adapter";
 import { url } from "@/utils/url-utils";
+import { localDynamics } from "@/data/dynamics";
 
 interface DynamicEntry {
 	id: string;
@@ -45,7 +44,7 @@ onMount(async () => {
 		if (memos?.enable) {
 			data = await fetchMemos(memos.apiUrl, { parent: memos.parent });
 		} else {
-			data = await fetchWithDedup(apiUrl);
+			data = localDynamics as DynamicEntry[];
 		}
 
 		totalCount = data.length;
