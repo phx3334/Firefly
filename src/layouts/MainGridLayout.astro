@@ -847,6 +847,7 @@ const hasMultipleImages =
                     id="swup-container"
                     class="transition-main"
                     data-current-post-category={postCategory || ""}
+                    data-pagefind-ignore={isPostPage ? undefined : true}
                 >
                 {/* 携带网格布局类名，用于JS更新父容器 */}
                 <div id="grid-class-carrier" data-grid-class={gridCols} class="hidden"></div>
