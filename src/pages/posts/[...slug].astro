@@ -1,7 +1,6 @@
 ---
 import { render } from "astro:content";
 import * as path from "node:path";
-import Comment from "@components/comment/index.astro";
 import Markdown from "@components/common/Markdown.astro";
 import EncryptedPost from "@components/features/EncryptedPost.astro";
 import KatexManager from "@components/features/KatexManager.astro";
@@ -212,9 +211,6 @@ const relatedPosts = await getRelatedPosts(entry, 5);
       <!-- title -->
       <div class="relative onload-animation">
         <div
-          data-pagefind-body
-          data-pagefind-weight="10"
-          data-pagefind-meta="title"
           class="transition w-full block font-bold mb-3
                     text-3xl md:text-[2.25rem]/[2.75rem]
                     text-black/90 dark:text-white/90
@@ -543,7 +539,4 @@ const relatedPosts = await getRelatedPosts(entry, 5);
   </div>
 
   <RecommendedPost relatedPosts={relatedPosts} currentPostId={entry.id} />
-
-  <!-- 评论 -->
-  {entry.data.comment && !entry.data.password && <Comment post={entry} />}
 </MainGridLayout>
