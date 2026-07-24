@@ -1,6 +1,5 @@
 ---
 import { getEntry, render } from "astro:content";
-import Comment from "@components/comment/index.astro";
 import Markdown from "@components/common/Markdown.astro";
 import { Icon } from "astro-icon/components";
 import {
@@ -189,12 +188,6 @@ const description =
     </div>
   )}
 
-  <!-- 评论区 -->
-  {isCommentEnabled && (
-    <div class="mt-4">
-      <Comment post={friendsPost} customPath="/friends/" />
-    </div>
-  )}
 
   <script slot="head" is:inline>
     if (!customElements.get("friend-filter")) {

@@ -33,7 +33,6 @@ Firefly 项目中所有可复用组件的集中管理。组件按照功能和职
 页面导航和用户交互功能组件。
 
 **导航控件**
-- `BackToComment.astro` - 返回评论区按钮
 - `BackToHome.astro` - 返回主页按钮
 - `BackToTop.astro` - 返回顶部按钮
 - `FloatingControls.astro` - 右下角悬浮控件容器

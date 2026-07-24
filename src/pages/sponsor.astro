@@ -1,5 +1,4 @@
 ---
-import Comment from "@components/comment/index.astro";
 import { Icon } from "astro-icon/components";
 import { commentConfig, siteConfig, sponsorConfig } from "@/config";
 import I18nKey from "@/i18n/i18nKey";
@@ -185,12 +184,6 @@ function getQrLqipProps(qrCode: string) {
           </div>
         )}
       </div>
-    </div>
-  )}
-  <!-- 评论区 -->
-  {isCommentEnabled && (
-    <div class="mt-4">
-      <Comment customPath="/sponsor/" title="sponsor"  />
     </div>
   )}
 </MainGridLayout>
