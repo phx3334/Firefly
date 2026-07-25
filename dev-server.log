@@ -1507,3 +1507,5 @@ LaTeX-incompatible input and strict mode is set to 'warn': LaTeX's accent \. wor
 [2m19:17:45[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
 [2m19:17:47[22m [34m[watch][39m /src/styles/main.css
 [2m19:17:47[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m21:28:03[22m [34m[watch][39m src/config/siteConfig.ts
+[2m21:28:03[22m [34m[watch][39m src/config/siteConfig.ts
