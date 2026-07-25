@@ -4,38 +4,22 @@ import { i18n } from "@i18n/translation";
 import { navigateToPage } from "@utils/navigation-utils";
 import { onMount } from "svelte";
 import Icon from "@/components/common/Icon.svelte";
-import type { SearchResult } from "@/global";
-import { url as formatUrl, getSearchUrl } from "@/utils/url-utils";
+import { getSearchUrl } from "@/utils/url-utils";
+import {
+	loadSearchIndex,
+	searchPosts,
+	highlight,
+	buildSnippet,
+	type SearchPost,
+} from "@/utils/search-client";
 
-// --- State ---
 let keywordDesktop = "";
 let keywordMobile = "";
-let result: SearchResult[] = [];
+let result: { url: string; titleHtml: string; snippetHtml: string }[] = [];
 let isSearching = false;
 let initialized = false;
-let debounceTimer: NodeJS.Timeout;
-
-// --- Mocks for Dev Mode ---
-const fakeResult: SearchResult[] = [
-	{
-		url: formatUrl("/"),
-		meta: { title: "This Is a Fake Search Result" },
-		excerpt:
-			"Because Pagefind cannot work in the <mark>dev</mark> environment.",
-	},
-	{
-		url: formatUrl("/"),
-		meta: { title: "If You Want to Test the Search" },
-		excerpt: "Try running <mark>npm build && npm preview</mark> instead.",
-	},
-];
-
-// --- UI Logic ---
-const togglePanel = () => {
-	document
-		.getElementById("search-panel")
-		?.classList.toggle("float-panel-closed");
-};
+let index: SearchPost[] = [];
+let debounceTimer: ReturnType<typeof setTimeout>;
 
 const setPanelVisibility = (show: boolean, isDesktop: boolean): void => {
 	const panel = document.getElementById("search-panel");
@@ -51,193 +35,161 @@ const setPanelVisibility = (show: boolean, isDesktop: boolean): void => {
 };
 
 const closeSearchPanel = (): void => {
-	document.getElementById("search-panel")?.classList.add("float-panel-closed");
+	document
+		.getElementById("search-panel")
+		?.classList.add("float-panel-closed");
 	keywordDesktop = "";
 	keywordMobile = "";
 	result = [];
 };
 
-const handleResultClick = (event: Event, url: string): void => {
+const handleResultClick = (event: Event, target: string): void => {
 	event.preventDefault();
 	closeSearchPanel();
-	navigateToPage(url);
+	navigateToPage(target);
 };
 
-// --- Core Search Logic ---
-const search = async (keyword: string, isDesktop: boolean): Promise<void> => {
-	if (!keyword) {
+const runSearch = (keyword: string, isDesktop: boolean): void => {
+	if (!keyword.trim()) {
 		setPanelVisibility(false, isDesktop);
 		result = [];
 		return;
 	}
-	if (!initialized) return;
-
 	isSearching = true;
-
 	clearTimeout(debounceTimer);
-	debounceTimer = setTimeout(async () => {
-		try {
-			let searchResults: SearchResult[] = [];
-
-			if (import.meta.env.PROD && window.pagefind) {
-				const response = await window.pagefind.search(keyword);
-				searchResults = await Promise.all(
-					response.results.map((item) => item.data()),
-				);
-			} else if (import.meta.env.DEV) {
-				searchResults = fakeResult;
-			}
-
-			result = searchResults;
-			setPanelVisibility(true, isDesktop);
-		} catch (error) {
-			console.error("Search error:", error);
-			result = [];
-			setPanelVisibility(false, isDesktop);
-		} finally {
-			isSearching = false;
-		}
-	}, 300); // 300ms debounce
+	debounceTimer = setTimeout(() => {
+		const posts = searchPosts(index, keyword);
+		result = posts.slice(0, 5).map((p) => ({
+			url: p.url,
+			titleHtml: highlight(p.title, keyword),
+			snippetHtml: buildSnippet(p.content, keyword),
+		}));
+		isSearching = false;
+		setPanelVisibility(true, isDesktop);
+	}, 300);
 };
 
-// --- Initialization onMount ---
-onMount(() => {
-	const initializePagefind = () => {
-		initialized = true;
-		if (keywordDesktop) search(keywordDesktop, true);
-		if (keywordMobile) search(keywordMobile, false);
-	};
-
-	if (import.meta.env.DEV) {
-		console.log("Pagefind mock enabled in development mode.");
-		initializePagefind();
-	} else {
-		if (window.pagefind) {
-			// If script already loaded
-			initializePagefind();
-		} else {
-			// Listen for the event
-			document.addEventListener("pagefindready", initializePagefind, {
-				once: true,
-			});
-			document.addEventListener("pagefindloaderror", initializePagefind, {
-				once: true,
-			});
-		}
-	}
+onMount(async () => {
+	index = await loadSearchIndex();
+	initialized = true;
+	if (keywordDesktop) runSearch(keywordDesktop, true);
+	if (keywordMobile) runSearch(keywordMobile, false);
 });
 
-// --- Reactive Statements ---
-$: if (initialized && (keywordDesktop || keywordDesktop === "")) {
-	search(keywordDesktop, true);
-}
-$: if (initialized && (keywordMobile || keywordMobile === "")) {
-	search(keywordMobile, false);
-}
+$: if (initialized) runSearch(keywordDesktop, true);
+$: if (initialized) runSearch(keywordMobile, false);
 </script>
 
-<!-- search bar for desktop view -->
-<div id="search-bar" class="hidden lg:flex transition-all items-center h-11 mr-2 rounded-lg
-      bg-black/4 hover:bg-black/6 focus-within:bg-black/6
-      dark:bg-white/5 dark:hover:bg-white/10 dark:focus-within:bg-white/10
-">
-    <Icon icon="material-symbols:search"
-          class="absolute text-[1.25rem] pointer-events-none ml-3 transition my-auto text-black/30 dark:text-white/30"></Icon>
-    <input placeholder="{i18n(I18nKey.search)}" bind:value={keywordDesktop}
-           on:focus={() => search(keywordDesktop, true)}
-           class="transition-all pl-10 text-sm bg-transparent outline-0
-         h-full w-40 active:w-60 focus:w-60 text-black/50 dark:text-white/50"
-    >
+<!-- 桌面端搜索框 -->
+<div class="panel-search-container relative hidden xl:flex">
+	<div class="relative">
+		<input
+			type="text"
+			class="w-40 rounded-full border-0 bg-(--card-divider) py-1.5 pl-9 pr-3 text-sm text-(--text) transition-all duration-200 hover:w-52 focus:w-60 focus:outline-none focus:ring-2 focus:ring-(--primary)"
+			placeholder={i18n(I18nKey.search)}
+			bind:value={keywordDesktop}
+		/>
+		<Icon
+			class="absolute left-3 top-1/2 -translate-y-1/2 text-(--text-muted)"
+			icon="fa-solid fa-search"
+			size="0.9rem"
+		/>
+	</div>
 </div>
 
-<!-- toggle btn for phone/tablet view -->
-<button on:click={togglePanel} aria-label="Search Panel" id="search-switch"
-        class="btn-plain scale-animation lg:hidden! rounded-lg w-9 h-9 md:w-11 md:h-11 active:scale-90">
-    <Icon icon="material-symbols:search" class="text-[1.25rem]"></Icon>
+<!-- 移动端搜索按钮 -->
+<button
+	class="xl:hidden cursor-pointer"
+	aria-label="搜索"
+	on:click={() => {
+		const panel = document.getElementById("search-panel");
+		if (panel?.classList.contains("float-panel-closed")) {
+			panel.classList.remove("float-panel-closed");
+			const input = document.getElementById(
+				"mobile-search-input",
+			) as HTMLInputElement | null;
+			input?.focus();
+		} else {
+			panel?.classList.add("float-panel-closed");
+		}
+	}}
+>
+	<Icon icon="fa-solid fa-search" size="1.1rem" />
 </button>
 
-<!-- search panel -->
-<div id="search-panel" class="float-panel float-panel-closed search-panel absolute md:w-120
-top-20 left-4 md:left-[unset] right-4 shadow-2xl rounded-2xl p-2">
+<div
+	id="search-panel"
+	class="float-panel-closed fixed left-1/2 top-24 z-50 max-h-[70vh] w-[90vw] max-w-[600px] -translate-x-1/2 overflow-y-auto rounded-2xl border border-(--card-border) bg-(--card-bg) p-4 shadow-2xl"
+>
+	<!-- 移动端搜索输入 -->
+	<div class="relative mb-3 xl:hidden">
+		<input
+			id="mobile-search-input"
+			type="text"
+			class="w-full rounded-full border-0 bg-(--card-divider) py-2 pl-9 pr-3 text-sm text-(--text) focus:outline-none focus:ring-2 focus:ring-(--primary)"
+			placeholder={i18n(I18nKey.search)}
+			bind:value={keywordMobile}
+		/>
+		<Icon
+			class="absolute left-3 top-1/2 -translate-y-1/2 text-(--text-muted)"
+			icon="fa-solid fa-search"
+			size="0.9rem"
+		/>
+	</div>
 
-    <!-- search bar inside panel for phone/tablet -->
-    <div id="search-bar-inside" class="flex relative lg:hidden transition-all items-center h-11 rounded-xl
-      bg-black/4 hover:bg-black/6 focus-within:bg-black/6
-      dark:bg-white/5 dark:hover:bg-white/10 dark:focus-within:bg-white/10
-  ">
-        <Icon icon="material-symbols:search"
-              class="absolute text-[1.25rem] pointer-events-none ml-3 transition my-auto text-black/30 dark:text-white/30"></Icon>
-        <input placeholder={i18n(I18nKey.search)} bind:value={keywordMobile}
-               class="pl-10 absolute inset-0 text-sm bg-transparent outline-0
-               focus:w-60 text-black/50 dark:text-white/50"
-        >
-    </div>
-
-    <!-- search results -->
-    {#if isSearching}
-        <div class="transition first-of-type:mt-2 lg:first-of-type:mt-0 block rounded-xl text-lg px-3 py-2 text-50">
-            {i18n(I18nKey.searchLoading)}
-        </div>
-    {:else if result.length > 0}
-        {#each result.slice(0, 5) as item}
-            <a href={item.url}
-               on:click={(e) => handleResultClick(e, item.url)}
-               class="transition first-of-type:mt-2 lg:first-of-type:mt-0 group block
-           rounded-xl text-lg px-3 py-2 hover:bg-(--btn-plain-bg-hover) active:bg-(--btn-plain-bg-active)">
-                <div class="transition text-90 inline-flex font-bold group-hover:text-(--primary)">
-                    {@html item.meta.title}
-                    <Icon icon="fa7-solid:chevron-right"
-                          class="transition text-[0.75rem] translate-x-1 my-auto text-(--primary)"></Icon>
-                </div>
-                {#if item.excerpt.includes('<mark>')}
-                    <div class="transition text-sm text-50" style="display: flex; align-items: flex-start; margin-top: 0.1rem">
-                        <div>
-                            {@html item.excerpt}
-                        </div>
-                    </div>
-                {/if}
-
-                {#if item.content && item.content.includes('<mark>')}
-                    <div class="transition text-sm text-30" style="display: flex; align-items: flex-start; margin-top: 0.1rem">
-                        <span style="display: inline-block; background-color: var(--btn-plain-bg-active); color: var(--primary); padding: 0.1em 0.4em; border-radius: 5px; font-size: 0.75em; font-weight: 600; margin-right: 0.5em; shrink: 0;">
-                            {i18n(I18nKey.searchContent)}
-                        </span>
-                        <div>
-                            {@html item.content}
-                        </div>
-                    </div>
-                {/if}
-            </a>
-        {/each}
-        {#if result.length > 5}
-            <a href={getSearchUrl(keywordDesktop || keywordMobile)}
-               on:click={(e) => handleResultClick(e, getSearchUrl(keywordDesktop || keywordMobile))}
-               class="transition first-of-type:mt-2 lg:first-of-type:mt-0 group block rounded-xl text-lg px-3 py-2 hover:bg-(--btn-plain-bg-hover) active:bg-(--btn-plain-bg-active) text-(--primary) font-bold text-center">
-                <span class="inline-flex items-center">
-                    {i18n(I18nKey.searchViewMore).replace('{count}', (result.length - 5).toString())}
-                    <Icon icon="fa7-solid:arrow-right" class="transition text-[0.75rem] ml-1"></Icon>
-                </span>
-            </a>
-        {/if}
-    {:else if result.length === 0}
-        <div class="transition first-of-type:mt-2 lg:first-of-type:mt-0 block rounded-xl text-lg px-3 py-2 text-50">
-            {i18n(I18nKey.searchNoResults)}
-        </div>
-    {:else if keywordDesktop || keywordMobile}
-        <div class="transition first-of-type:mt-2 lg:first-of-type:mt-0 block rounded-xl text-lg px-3 py-2 text-50">
-            {i18n(I18nKey.searchTypeSomething)}
-        </div>
-    {/if}
+	{#if isSearching}
+		<div class="px-2 py-6 text-center text-sm text-(--text-muted)">
+			{i18n(I18nKey.searchLoading)}
+		</div>
+	{:else if result.length > 0}
+		{#each result as item}
+			<a
+				href={item.url}
+				on:click={(e) => handleResultClick(e, item.url)}
+				class="flex flex-col gap-1 rounded-xl px-3 py-3 transition-colors hover:bg-(--card-divider)"
+			>
+				<div
+					class="flex items-center gap-2 font-bold text-(--text) group-hover:text-(--primary)"
+				>
+					{@html item.titleHtml}
+					<Icon
+						class="text-(--text-muted)"
+						icon="fa-solid fa-arrow-right"
+						size="0.8rem"
+					/>
+				</div>
+				{#if item.snippetHtml.includes("<mark>")}
+					<div
+						class="line-clamp-2 text-sm text-(--text-muted)"
+					>
+						{@html item.snippetHtml}
+					</div>
+				{/if}
+			</a>
+		{/each}
+		{#if result.length > 5}
+			<a
+				href={getSearchUrl(keywordDesktop || keywordMobile)}
+				on:click={(e) => {
+					e.preventDefault();
+					closeSearchPanel();
+					navigateToPage(getSearchUrl(keywordDesktop || keywordMobile));
+				}}
+				class="block px-3 pt-2 text-center text-sm text-(--primary) hover:underline"
+			>
+				{i18n(I18nKey.searchViewMore).replace(
+					"{count}",
+					String(result.length - 5),
+				)}
+			</a>
+		{/if}
+	{:else if keywordDesktop || keywordMobile}
+		<div class="px-2 py-6 text-center text-sm text-(--text-muted)">
+			{i18n(I18nKey.searchNoResults)}
+		</div>
+	{:else}
+		<div class="px-2 py-6 text-center text-sm text-(--text-muted)">
+			{i18n(I18nKey.searchTypeSomething)}
+		</div>
+	{/if}
 </div>
-
-<style>
-    input:focus {
-        outline: 0;
-    }
-
-    .search-panel {
-        max-height: calc(100vh - 100px);
-        overflow-y: auto;
-    }
-</style>
-

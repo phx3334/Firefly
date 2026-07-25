@@ -1,191 +1,121 @@
 <script lang="ts">
 import I18nKey from "@i18n/i18nKey";
 import { i18n } from "@i18n/translation";
+import { navigateToPage } from "@utils/navigation-utils";
 import { onMount } from "svelte";
 import Icon from "@/components/common/Icon.svelte";
-import type { SearchResult } from "@/global";
-import { url as formatUrl } from "@/utils/url-utils";
+import {
+	loadSearchIndex,
+	searchPosts,
+	highlight,
+	buildSnippet,
+	type SearchPost,
+} from "@/utils/search-client";
 
-// --- Props ---
-export let title = i18n(I18nKey.search);
-export let description = "";
+export let keyword: string = "";
 
-// --- State ---
-let keyword = "";
-let results: SearchResult[] = [];
+let results: { url: string; titleHtml: string; excerptHtml: string }[] = [];
 let isSearching = false;
 let initialized = false;
+let index: SearchPost[] = [];
 
-// 在客户端获取 URL 参数
-const getInitialKeyword = (): string => {
-	if (typeof window !== "undefined") {
-		const searchParams = new URLSearchParams(window.location.search);
-		return searchParams.get("q") || "";
-	}
-	return "";
-};
-
-// --- Mocks for Dev Mode ---
-const fakeResult: SearchResult[] = [
-	{
-		url: formatUrl("/"),
-		meta: { title: "Dev Mode Search Result 1" },
-		excerpt: "This is a <mark>mock</mark> result for development.",
-	},
-	{
-		url: formatUrl("/"),
-		meta: { title: "Dev Mode Search Result 2" },
-		excerpt: "Pagefind only works in <mark>production</mark> build.",
-	},
-];
-
-// --- Core Search Logic ---
-const search = async () => {
-	if (!initialized || !keyword.trim()) {
+const search = async (): Promise<void> => {
+	if (!keyword.trim()) {
 		results = [];
 		return;
 	}
 	isSearching = true;
+	const posts = searchPosts(index, keyword);
+	results = posts.map((p) => ({
+		url: p.url,
+		titleHtml: highlight(p.title, keyword),
+		excerptHtml: buildSnippet(p.content, keyword),
+	}));
+	isSearching = false;
+};
 
-	try {
-		if (import.meta.env.PROD && window.pagefind) {
-			const response = await window.pagefind.search(keyword);
-			const rawResults = await Promise.all(
-				response.results.map((item) => item.data()),
-			);
-			results = rawResults;
-		} else if (import.meta.env.DEV) {
-			// 开发模式下的模拟结果
-			results = fakeResult.filter(
-				(item) =>
-					item.excerpt.toLowerCase().includes(keyword.toLowerCase()) ||
-					item.meta.title.toLowerCase().includes(keyword.toLowerCase()),
-			);
-		}
-	} catch (error) {
-		console.error("Search error:", error);
-		results = [];
-	} finally {
-		isSearching = false;
+const handleResultClick = (event: Event, target: string): void => {
+	event.preventDefault();
+	navigateToPage(target);
+};
+
+// 监听 URL 中的 q 参数变化（前进/后退）
+const handlePopState = (): void => {
+	const url = new URL(window.location.href);
+	const q = url.searchParams.get("q") ?? "";
+	if (q !== keyword) {
+		keyword = q;
+		search();
 	}
 };
 
-// --- Initialization onMount ---
-onMount(() => {
-	const initialize = async () => {
-		initialized = true;
-
-		// 从 URL 获取初始关键词
-		const initialKeyword = getInitialKeyword();
-		if (initialKeyword) {
-			keyword = initialKeyword;
-		}
-
-		// 如果有关键词，自动执行搜索
-		if (keyword.trim()) {
-			await search();
-		}
-	};
-
-	// 开发环境直接初始化
-	if (import.meta.env.DEV) {
-		initialize();
-	} else {
-		// 生产环境等待 Pagefind 加载
-		if (window.pagefind) {
-			initialize();
-		} else {
-			document.addEventListener("pagefindready", initialize, {
-				once: true,
-			});
-		}
-	}
+onMount(async () => {
+	index = await loadSearchIndex();
+	initialized = true;
+	await search();
+	window.addEventListener("popstate", handlePopState);
+	return () => window.removeEventListener("popstate", handlePopState);
 });
 
-let debounceTimer: NodeJS.Timeout;
-const handleInput = () => {
-	clearTimeout(debounceTimer);
-	debounceTimer = setTimeout(() => {
-		search();
-	}, 300);
-};
+$: if (initialized && keyword !== undefined) {
+	// 关键字变化时更新 URL 并搜索
+	const url = new URL(window.location.href);
+	if (keyword.trim()) {
+		url.searchParams.set("q", keyword);
+	} else {
+		url.searchParams.delete("q");
+	}
+	window.history.replaceState({}, "", url);
+	search();
+}
 </script>
 
-<div class="card-base px-6 py-6 md:px-9 md:py-6 mb-4 rounded-(--radius-large)">
-    <!-- Title Section -->
-    <div class="mb-4">
-        <div class="flex items-center gap-3 mb-3">
-            <div class="h-8 w-8 rounded-lg bg-(--primary) flex items-center justify-center text-white dark:text-black/70">
-                <Icon icon="material-symbols:search" class="text-[1.5rem]"></Icon>
-            </div>
-            <div class="text-3xl font-bold text-90">
-                {title}
-            </div>
-        </div>
-        {#if description}
-            <p class="text-base text-50 leading-relaxed">
-                {description}
-            </p>
-        {/if}
-    </div>
+<div class="flex flex-col gap-6">
+	<div class="relative">
+		<input
+			type="text"
+			class="w-full rounded-full border border-(--card-border) bg-(--card-bg) py-3 pl-11 pr-4 text-(--text) focus:outline-none focus:ring-2 focus:ring-(--primary)"
+			placeholder={i18n(I18nKey.searchTypeSomething)}
+			bind:value={keyword}
+		/>
+		<Icon
+			class="absolute left-4 top-1/2 -translate-y-1/2 text-(--text-muted)"
+			icon="fa-solid fa-search"
+			size="1rem"
+		/>
+	</div>
 
-    <!-- Search Bar -->
-    <div class="relative flex">
-        <div class="relative flex-1">
-            <div class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
-                <Icon icon="material-symbols:search" class="text-2xl text-50" />
-            </div>
-            <input
-                type="text"
-                class="block w-full p-4 pl-10 text-sm bg-transparent border border-black/10 dark:border-white/10 rounded-lg focus:ring-2 focus:ring-(--primary) focus:border-(--primary) hover:border-black/20 dark:hover:border-white/20 text-75 placeholder:opacity-50 transition-colors outline-hidden"
-                placeholder={i18n(I18nKey.search)}
-                bind:value={keyword}
-                on:input={handleInput}
-            >
-        </div>
-    </div>
+	<div class="text-sm text-(--text-muted)">
+		{#if isSearching}
+			{i18n(I18nKey.searchLoading)}
+		{:else if keyword.trim() && results.length > 0}
+			{i18n(I18nKey.searchSummary)} {results.length}
+		{:else if keyword.trim()}
+			{i18n(I18nKey.searchNoResults)}
+		{/if}
+	</div>
+
+	<div class="flex flex-col gap-3">
+		{#each results as result}
+			<a
+				href={result.url}
+				on:click={(e) => handleResultClick(e, result.url)}
+				class="flex flex-col gap-2 rounded-xl border border-(--card-border) bg-(--card-bg) p-4 transition-colors hover:border-(--primary)"
+			>
+				<div class="flex items-center gap-2 text-lg font-bold text-(--text)">
+					{@html result.titleHtml}
+					<Icon
+						class="text-(--text-muted)"
+						icon="fa-solid fa-arrow-right"
+						size="0.9rem"
+					/>
+				</div>
+				{#if result.excerptHtml.includes("<mark>")}
+					<div class="line-clamp-3 text-sm text-(--text-muted)">
+						{@html result.excerptHtml}
+					</div>
+				{/if}
+			</a>
+		{/each}
+	</div>
 </div>
-
-<div class="grid grid-cols-1 gap-4">
-    <!-- Results Area -->
-    <div>
-        {#if isSearching}
-            <div class="flex justify-center py-10">
-                <Icon icon="svg-spinners:ring-resize" class="text-4xl text-(--primary)" />
-            </div>
-        {:else if results.length > 0}
-            <div class="space-y-4">
-                {#each results as result}
-                    <div class="card-base p-6 block rounded-(--radius-large)">
-                        <a href={result.url} class="block group">
-                            <h5 class="mb-2 text-2xl font-bold tracking-tight text-90 group-hover:text-(--primary) transition-colors">
-                                {@html result.meta.title}
-                            </h5>
-                            <p class="font-normal text-75">
-                                {@html result.excerpt}
-                            </p>
-                        </a>
-                    </div>
-                {/each}
-            </div>
-        {:else if keyword}
-            <div class="card-base p-10 text-center text-50 rounded-(--radius-large)">
-                {i18n(I18nKey.searchNoResults)}
-            </div>
-        {:else}
-             <div class="card-base p-10 text-center text-50 rounded-(--radius-large)">
-                {i18n(I18nKey.searchTypeSomething)}
-            </div>
-        {/if}
-    </div>
-</div>
-
-<style>
-    /* 关键字高亮效果 - 主题色 */
-    :global(mark) {
-        background: transparent;
-        color: var(--primary);
-        font-weight: 600;
-        padding: 0 0.1em;
-    }
-</style>
