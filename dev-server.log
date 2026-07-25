@@ -1,0 +1,138 @@
+
+> firefly@6.14.5 dev C:\Users\victor\Downloads\blog\Firefly
+> astro dev
+
+[2m16:32:51[22m [34m[vite][39m connected.
+[2m16:32:53[22m [34m[types][39m Generated [2m3ms[22m
+[2m16:32:53[22m [34m[vite][39m connected.
+[2m16:32:54[22m [34m[content][39m Syncing content
+[2m16:32:54[22m [34m[content][39m Synced content
+[42m[1m astro [22m[49m [32mv7.0.7[39m [2mready in[22m 9112 [2mms[22m
+[2m┃[22m Local    [36mhttp://localhost:4321/[39m
+[2m┃[22m Network  [2muse --host to expose[22m
+[2m16:32:54[22m [32mwatching for file changes...[39m
+16:33:02 [vite-plugin-svelte] src/components/controls/Search.svelte:164:6 Avoid using autofocus
+https://svelte.dev/e/a11y_autofocus
+[2m16:33:06[22m [34m[200][39m /posts/post1/ [2m1920ms[22m
+[2m16:33:06[22m [34m[200][39m /posts/post1/ [2m1919ms[22m
+[2m16:33:06[22m [34m[200][39m /posts/post1/ [2m1919ms[22m
+[2m16:33:06[22m [34m[watch][39m post.html
+[2m16:33:06[22m [34m[watch][39m post.html
+[2m16:33:13[22m [34m[200][39m /posts/post1/ [2m40ms[22m
+[2m16:33:13[22m [34m[watch][39m post.html
+[2m16:34:44[22m [34m[200][39m / [2m113ms[22m
+[2m16:34:45[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+16:34:45 [vite-plugin-svelte] src/components/controls/Search.svelte:164:6 Avoid using autofocus
+https://svelte.dev/e/a11y_autofocus
+[2m16:34:46[22m [34m[200][39m / [2m19ms[22m
+[2m16:34:50[22m [34m[200][39m /posts/post1/ [2m21ms[22m
+[2m16:34:57[22m [34m[200][39m /_image/ [2m396ms[22m
+[2m16:35:08[22m [34m[200][39m /tags/ [2m95ms[22m
+[2m16:35:09[22m [34m[200][39m /categories/计算机技术/ [2m77ms[22m
+[2m16:35:15[22m [34m[200][39m /about/ [2m96ms[22m
+[2m16:38:13[22m [34m[200][39m /categories/ [2m97ms[22m
+[2m16:42:27[22m [34m[watch][39m /src/styles/main.css
+[2m16:42:27[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m16:42:28[22m [34m[200][39m /posts/post1/ [2m517ms[22m
+[2m16:42:28[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:42:28[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:42:29[22m [34m[200][39m /posts/post1/ [2m18ms[22m
+[2m16:42:31[22m [34m[watch][39m /src/styles/main.css
+[2m16:42:31[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m16:42:32[22m [34m[200][39m /posts/post1/ [2m220ms[22m
+[2m16:42:32[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:42:32[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:42:32[22m [34m[200][39m /posts/post1/ [2m17ms[22m
+[2m16:42:33[22m [34m[watch][39m /src/styles/main.css
+[2m16:42:33[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m16:42:34[22m [34m[200][39m /posts/post1/ [2m196ms[22m
+[2m16:42:34[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:42:34[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:42:34[22m [34m[200][39m /posts/post1/ [2m21ms[22m
+[2m16:42:40[22m [34m[watch][39m /src/styles/main.css
+[2m16:42:40[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m16:42:42[22m [34m[watch][39m /src/styles/main.css
+[2m16:42:42[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m16:42:42[22m [34m[200][39m /posts/post1/ [2m897ms[22m
+[2m16:42:42[22m [34m[200][39m /posts/post1/ [2m96ms[22m
+[2m16:42:43[22m [34m[200][39m /api/allPostMeta.json [2m14ms[22m
+[2m16:42:43[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:42:43[22m [34m[watch][39m /src/styles/main.css
+[2m16:42:43[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m16:42:44[22m [34m[200][39m /posts/post1/ [2m224ms[22m
+[2m16:42:44[22m [34m[200][39m /posts/post1/ [2m18ms[22m
+[2m16:42:44[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:42:44[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:42:45[22m [34m[200][39m /posts/post1/ [2m16ms[22m
+[2m16:42:58[22m [34m[watch][39m /src/styles/main.css
+[2m16:42:58[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m16:43:00[22m [34m[200][39m /posts/post1/ [2m200ms[22m
+[2m16:43:00[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:43:00[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:43:00[22m [34m[200][39m /posts/post1/ [2m17ms[22m
+[2m16:43:09[22m [34m[watch][39m src/pages/posts/[...slug].astro
+[2m16:43:10[22m [34m[200][39m /posts/post1/ [2m121ms[22m
+[2m16:43:10[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:43:10[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:43:11[22m [34m[200][39m /posts/post1/ [2m18ms[22m
+[2m16:43:25[22m [34m[watch][39m src/pages/posts/[...slug].astro
+[2m16:43:27[22m [34m[200][39m /posts/post1/ [2m106ms[22m
+[2m16:43:27[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:43:27[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:43:28[22m [34m[200][39m /posts/post1/ [2m16ms[22m
+[2m16:43:44[22m [34m[watch][39m src/pages/posts/[...slug].astro
+[2m16:43:45[22m [34m[200][39m /posts/post1/ [2m118ms[22m
+[2m16:43:45[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:43:45[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:43:46[22m [34m[200][39m /posts/post1/ [2m17ms[22m
+[2m16:43:48[22m [34m[watch][39m /src/components/layout/DropdownMenu.astro?astro&type=style&index=0&lang.css, /src/components/layout/NavMenuPanel.astro?astro&type=style&index=0&lang.css, /src/layouts/Layout.astro?astro&type=style&index=0&lang.css, /src/styles/main.css
+[2m16:44:01[22m [34m[200][39m /posts/post1/ [2m111ms[22m
+[2m16:44:01[22m [34m[vite][39m program reload
+[2m16:44:01[22m [34m[watch][39m post.html
+[31m[1m16:44:01[22m [ERROR] [vite][39m An error happened during full reload
+Failed to load url astro:server-app.js (resolved id: astro:server-app.js). Does the file exist?
+Error: Failed to load url astro:server-app.js (resolved id: astro:server-app.js). Does the file exist?
+    at loadAndTransform (file:///C:/Users/victor/Downloads/blog/Firefly/node_modules/.pnpm/vite@8.1.0_@types+node@25.9.1_esbuild@0.28.1_jiti@2.7.0_stylus@0.64.0_terser@5.46.0_tsx@4.23.0_yaml@2.9.0/node_modules/vite/dist/node/chunks/node.js:19714:31)
+[2m16:44:04[22m [34m[200][39m /posts/post1/ [2m140ms[22m
+[2m16:44:05[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:44:05[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:44:06[22m [34m[200][39m /posts/post1/ [2m19ms[22m
+[2m16:45:20[22m [34m[watch][39m post.html
+[2m16:45:20[22m [34m[200][39m /posts/post1/ [2m23ms[22m
+[2m16:45:21[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:45:21[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:45:22[22m [34m[200][39m /posts/post1/ [2m19ms[22m
+[2m16:45:34[22m [34m[200][39m / [2m100ms[22m
+[2m16:45:34[22m [34m[200][39m /api/allPostMeta.json [2m1ms[22m
+[2m16:45:34[22m [34m[200][39m / [2m11ms[22m
+[2m16:45:35[22m [34m[200][39m /posts/post1/ [2m17ms[22m
+[2m16:45:35[22m [34m[200][39m /categories/计算机技术/ [2m107ms[22m
+[2m16:45:42[22m [34m[200][39m /tags/ [2m81ms[22m
+[2m16:48:14[22m [34m[200][39m /dynamic/ [2m131ms[22m
+[2m16:48:14[22m [34m[200][39m /dynamic/ [2m14ms[22m
+[2m16:48:14[22m [34m[200][39m /gallery/ [2m97ms[22m
+[2m16:48:15[22m [34m[200][39m /_image/ [2m23ms[22m
+[2m16:48:20[22m [34m[200][39m /about/ [2m83ms[22m
+[2m16:51:15[22m [34m[watch][39m src/config/profileConfig.ts
+[2m16:51:16[22m [34m[200][39m /dynamic/ [2m33ms[22m
+[2m16:51:16[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:51:17[22m [34m[200][39m /dynamic/ [2m12ms[22m
+[2m16:51:21[22m [34m[200][39m /about/ [2m17ms[22m
+[2m16:51:22[22m [34m[200][39m / [2m15ms[22m
+[2m16:51:24[22m [34m[200][39m /categories/计算机技术/ [2m13ms[22m
+[2m16:51:25[22m [34m[200][39m /gallery/ [2m15ms[22m
+[Anime] Fetching Bilibili 追番 for UID: 3546572805638200...
+[2m16:51:25[22m [34m[200][39m /bangumi/ [2m100ms[22m
+[Anime] Fetched 24 追番 items from Bilibili.
+[Anime] Fetching Bilibili 默认收藏夹 for UID: 3546572805638200...
+[2m16:51:26[22m [34m[200][39m /posts/post1/ [2m43ms[22m
+[Anime] Fetched 157 收藏 items from Bilibili.
+[2m16:51:27[22m [34m[200][39m /anime/ [2m1849ms[22m
+[31m[1m16:52:13[22m [ERROR] [glob-loader][39m Failed to reload post2.md: **posts → post2** data does not match collection schema.
+
+  **title**: **title**: Required
+  **published**: **published**: Required
+
+[2m16:52:13[22m [34m[200][39m / [2m21ms[22m
+[2m16:52:13[22m [34m[200][39m /api/allPostMeta.json [2m0ms[22m
+[2m16:52:14[22m [34m[200][39m / [2m11ms[22m

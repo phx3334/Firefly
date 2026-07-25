@@ -9,10 +9,10 @@ export const profileConfig: ProfileConfig = {
 	avatar: "assets/images/avatar.jpg",
 
 	// 名字
-	name: "Hoein Chrome",
+	name: "Kyouma",
 
 	// 个人签名
-	bio: "Hello, I'm Hoein Chrome",
+	bio: "Hello, I'm Kyouma",
 
 	// 链接配置
 	// 已经预装的图标集：fa7-brands，fa7-regular，fa7-solid，material-symbols，simple-icons

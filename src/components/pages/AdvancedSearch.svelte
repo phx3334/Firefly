@@ -29,7 +29,7 @@ const search = async (): Promise<void> => {
 	results = posts.map((p) => ({
 		url: p.url,
 		titleHtml: highlight(p.title, keyword),
-		excerptHtml: buildSnippet(p.content, keyword),
+		excerptHtml: buildSnippet(p.description + "\n" + p.content, keyword),
 	}));
 	isSearching = false;
 };
@@ -70,18 +70,17 @@ $: if (initialized && keyword !== undefined) {
 }
 </script>
 
-<div class="flex flex-col gap-6">
+<div class="search-panel flex flex-col gap-6">
 	<div class="relative">
 		<input
 			type="text"
-			class="w-full rounded-full border border-(--card-border) bg-(--card-bg) py-3 pl-11 pr-4 text-(--text) focus:outline-none focus:ring-2 focus:ring-(--primary)"
+			class="w-full rounded-lg bg-zinc-500/30 py-3 pl-11 pr-4 text-white placeholder:text-white/70 focus:outline-none focus:ring-2 focus:ring-(--primary)"
 			placeholder={i18n(I18nKey.searchTypeSomething)}
 			bind:value={keyword}
 		/>
 		<Icon
-			class="absolute left-4 top-1/2 -translate-y-1/2 text-(--text-muted)"
-			icon="fa-solid fa-search"
-			size="1rem"
+			class="absolute left-4 top-1/2 -translate-y-1/2 text-white/80"
+			icon="material-symbols:search"
 		/>
 	</div>
 
@@ -90,28 +89,24 @@ $: if (initialized && keyword !== undefined) {
 			{i18n(I18nKey.searchLoading)}
 		{:else if keyword.trim() && results.length > 0}
 			{i18n(I18nKey.searchSummary)} {results.length}
-		{:else if keyword.trim()}
-			{i18n(I18nKey.searchNoResults)}
-		{/if}
+			{:else if keyword.trim()}
+				<span class="search-no-results">{i18n(I18nKey.searchNoResults)}</span>
+			{/if}
 	</div>
 
-	<div class="flex flex-col gap-3">
+	<div class="search-panel flex flex-col gap-3">
 		{#each results as result}
 			<a
 				href={result.url}
 				on:click={(e) => handleResultClick(e, result.url)}
-				class="flex flex-col gap-2 rounded-xl border border-(--card-border) bg-(--card-bg) p-4 transition-colors hover:border-(--primary)"
+				class="flex flex-col gap-2 rounded-xl border border-white/10 bg-black/40 p-4 transition-colors hover:border-(--primary)"
 			>
-				<div class="flex items-center gap-2 text-lg font-bold text-(--text)">
-					{@html result.titleHtml}
-					<Icon
-						class="text-(--text-muted)"
-						icon="fa-solid fa-arrow-right"
-						size="0.9rem"
-					/>
+				<div class="search-result-title flex items-center gap-2 text-lg font-bold">
+					<span>{@html result.titleHtml}</span>
+					<Icon icon="fa7-solid:arrow-right" class="shrink-0" />
 				</div>
 				{#if result.excerptHtml.includes("<mark>")}
-					<div class="line-clamp-3 text-sm text-(--text-muted)">
+					<div class="line-clamp-3 text-sm text-white/60">
 						{@html result.excerptHtml}
 					</div>
 				{/if}

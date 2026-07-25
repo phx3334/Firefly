@@ -137,12 +137,23 @@ function initialActive(categoryName: string): {
     const pathname = currentUrl.pathname.replace(/\/$/, "");
     const homePath = (bar.getAttribute("data-home-path") || "/").replace(/\/$/, "");
     const isHome = pathname === homePath || pathname === "" || pathname === "/";
-    const isCategories = pathname === "/categories";
+    const categoriesBase = "/categories";
+    const isCategories = pathname === categoriesBase;
+
+    let activeCategory = currentUrl.searchParams.get("category") || "";
+    if (!activeCategory && pathname.startsWith(categoriesBase + "/")) {
+      const seg = pathname.slice(categoriesBase.length + 1);
+      try {
+        activeCategory = decodeURIComponent(seg);
+      } catch {
+        activeCategory = seg;
+      }
+    }
 
     return {
       isHome,
       isCategories,
-      activeCategory: currentUrl.searchParams.get("category") || "",
+      activeCategory,
       hasTag: currentUrl.searchParams.has("tag"),
       hasUncategorized: currentUrl.searchParams.has("uncategorized"),
     };

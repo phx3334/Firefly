@@ -4,6 +4,7 @@
 export interface SearchPost {
 	url: string;
 	title: string;
+	description: string;
 	tags: string[];
 	date: string;
 	excerpt: string;
@@ -34,6 +35,8 @@ export function searchPosts(index: SearchPost[], keyword: string): SearchPost[] 
 	return index.filter((post) => {
 		const haystack = (
 			post.title +
+			" " +
+			post.description +
 			" " +
 			post.tags.join(" ") +
 			" " +

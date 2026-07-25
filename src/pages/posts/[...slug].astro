@@ -10,8 +10,10 @@ import { i18n } from "@i18n/translation";
 import MainGridLayout from "@layouts/MainGridLayout.astro";
 import { getRelatedPosts, getSortedPosts } from "@utils/content-utils";
 import {
+	getCategoryUrl,
 	getFileDirFromPath,
 	getPostUrlBySlug,
+	getTagUrl,
 	removeFileExtension,
 } from "@utils/url-utils";
 import { Icon } from "astro-icon/components";
@@ -161,88 +163,91 @@ const relatedPosts = await getRelatedPosts(entry, 5);
         {},
       ]}
     >
-      <!-- word count and reading time -->
-      <div
-        class="flex flex-row text-black/30 dark:text-white/30 gap-5 mb-3 transition onload-animation"
-      >
-        <div class="flex flex-row items-center">
-          <div
-            class="transition h-6 w-6 rounded-md bg-black/5 dark:bg-white/10 text-black/50 dark:text-white/50 flex items-center justify-center mr-2"
-          >
-            <Icon is:inline name="material-symbols:notes-rounded" />
-          </div>
-          <div class="text-sm">
-            {remarkPluginFrontmatter.words}
-            {" " + i18n(I18nKey.wordsCount)}
-          </div>
-        </div>
-        <div class="flex flex-row items-center">
-          <div
-            class="transition h-6 w-6 rounded-md bg-black/5 dark:bg-white/10 text-black/50 dark:text-white/50 flex items-center justify-center mr-2"
-          >
-            <Icon is:inline name="material-symbols:schedule-outline-rounded" />
-          </div>
-          <div class="text-sm">
-            {remarkPluginFrontmatter.minutes}
-            {
-              " " +
-                i18n(
-                  remarkPluginFrontmatter.minutes === 1
-                    ? I18nKey.minuteCount
-                    : I18nKey.minutesCount
-                )
-            }
-          </div>
-        </div>
-        {entry.data.password && (
-          <div class="flex flex-row items-center">
+      <!-- 仅当文章没有封面图时，才在封面之上展示文字版标题与元数据；有封面时统一移到封面覆盖层上 -->
+      {
+        !(processedImage && coverImageConfig.enableInPost) && (
+          <>
+            <!-- word count and reading time -->
             <div
-              class="transition h-6 w-6 rounded-md bg-black/5 dark:bg-white/10 text-black/50 dark:text-white/50 flex items-center justify-center mr-2"
+              class="flex flex-row text-black/30 dark:text-white/30 gap-5 mb-3 transition onload-animation"
             >
-              <Icon is:inline name="material-symbols:lock-outline" />
+              <div class="flex flex-row items-center">
+                <div
+                  class="transition h-6 w-6 rounded-md bg-black/5 dark:bg-white/10 text-black/50 dark:text-white/50 flex items-center justify-center mr-2"
+                >
+                  <Icon is:inline name="material-symbols:notes-rounded" />
+                </div>
+                <div class="text-sm">
+                  {remarkPluginFrontmatter.words}
+                  {" " + i18n(I18nKey.wordsCount)}
+                </div>
+              </div>
+              <div class="flex flex-row items-center">
+                <div
+                  class="transition h-6 w-6 rounded-md bg-black/5 dark:bg-white/10 text-black/50 dark:text-white/50 flex items-center justify-center mr-2"
+                >
+                  <Icon is:inline name="material-symbols:schedule-outline-rounded" />
+                </div>
+                <div class="text-sm">
+                  {remarkPluginFrontmatter.minutes}
+                  {
+                    " " +
+                      i18n(
+                        remarkPluginFrontmatter.minutes === 1
+                          ? I18nKey.minuteCount
+                          : I18nKey.minutesCount
+                      )
+                  }
+                </div>
+              </div>
+              {entry.data.password && (
+                <div class="flex flex-row items-center">
+                  <div
+                    class="transition h-6 w-6 rounded-md bg-black/5 dark:bg-white/10 text-black/50 dark:text-white/50 flex items-center justify-center mr-2"
+                  >
+                    <Icon is:inline name="material-symbols:lock-outline" />
+                  </div>
+                  <div class="text-sm">
+                    {i18n(I18nKey.postEncrypted)}
+                  </div>
+                </div>
+              )}
             </div>
-            <div class="text-sm">
-              {i18n(I18nKey.postEncrypted)}
+
+            <!-- title -->
+            <div class="relative onload-animation">
+              <div
+                class="transition w-full block font-bold mb-3
+                      text-3xl md:text-[2.25rem]/[2.75rem]
+                      text-black/90 dark:text-white/90
+                      md:before:w-1 before:h-5 before:rounded-md before:bg-(--primary)
+                      before:absolute before:top-3 before:-left-4.5"
+              >
+                {entry.data.title}
+              </div>
             </div>
-          </div>
-        )}
-      </div>
 
-      <!-- title -->
-      <div class="relative onload-animation">
-        <div
-          class="transition w-full block font-bold mb-3
-                    text-3xl md:text-[2.25rem]/[2.75rem]
-                    text-black/90 dark:text-white/90
-                    md:before:w-1 before:h-5 before:rounded-md before:bg-(--primary)
-                    before:absolute before:top-3 before:-left-4.5"
-        >
-          {entry.data.title}
-        </div>
-      </div>
-
-      <!-- metadata -->
-      <div class="onload-animation">
-        <PostMetadata
-          className="mb-5"
-          published={entry.data.published}
-          updated={entry.data.updated}
-          tags={entry.data.tags}
-          category={entry.data.category || undefined}
-          id={entry.id}
-        />
-        {
-          !processedImage && (
-            <div class="border-(--line-divider) border-dashed border-b mt-3 mb-5" />
-          )
-        }
-      </div>
+            <!-- metadata -->
+            <div class="onload-animation">
+              <PostMetadata
+                className="mb-5"
+                published={entry.data.published}
+                updated={entry.data.updated}
+                tags={entry.data.tags}
+                category={entry.data.category || undefined}
+                id={entry.id}
+              />
+              <div class="border-(--line-divider) border-dashed border-b mt-3 mb-5" />
+            </div>
+          </>
+        )
+      }
 
       <!-- always show cover as long as it has one -->
 
       {
         processedImage && coverImageConfig.enableInPost && (
-          <div style="margin-top:1rem;">
+          <div style="margin-top:1rem;" class="relative">
             <CoverImage
               id="post-cover"
               src={processedImage}
@@ -251,6 +256,71 @@ const relatedPosts = await getRelatedPosts(entry, 5);
               preview={false}
               apiUrls={apiUrls}
             />
+            <!-- 封面元数据覆盖层：在封面图上叠加标题与元数据（分类/标签可点击） -->
+            <div class="post-cover-meta-overlay absolute inset-0 z-30 flex flex-col justify-between rounded-xl p-5 md:p-7 pointer-events-none">
+              <div class="post-cover-meta-scrim absolute inset-0 rounded-xl"></div>
+
+              <!-- 右上角：字数 / 阅读时长 -->
+              <div class="relative z-10 flex justify-end">
+                <div class="post-cover-badge flex items-center gap-3 rounded-full bg-black/45 px-3.5 py-1.5 text-white/90 text-xs md:text-sm backdrop-blur-sm">
+                  <span class="inline-flex items-center gap-1">
+                    <Icon is:inline name="material-symbols:ink-pen-outline-rounded" class="text-[1.05em]" />
+                    <span>
+                      {remarkPluginFrontmatter.words} {i18n(remarkPluginFrontmatter.words === 1 ? I18nKey.wordCount : I18nKey.wordsCount)}
+                    </span>
+                  </span>
+                  <span class="h-3 w-px bg-white/40"></span>
+                  <span class="inline-flex items-center gap-1">
+                    <Icon is:inline name="material-symbols:schedule-outline-rounded" class="text-[1.05em]" />
+                    <span>
+                      {remarkPluginFrontmatter.minutes} {i18n(remarkPluginFrontmatter.minutes === 1 ? I18nKey.minuteCount : I18nKey.minutesCount)}
+                    </span>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 左下：标题 + 元数据（分类/标签保持链接属性） -->
+              <div class="relative z-10 flex flex-col gap-2">
+                <h1 class="post-cover-title text-xl md:text-3xl font-bold text-white leading-snug drop-shadow-[0_2px_8px_rgba(0,0,0,0.6)]">
+                  {entry.data.title}
+                </h1>
+                <div class="post-cover-meta-list pointer-events-auto flex flex-wrap items-center gap-x-4 gap-y-1.5 text-white/90 text-xs md:text-sm">
+                  <span class="inline-flex items-center gap-1.5">
+                    <Icon is:inline name="material-symbols:calendar-month-outline-rounded" class="text-[1.05em]" />
+                    <span>{i18n(I18nKey.publishedAt)} {formatDateToYYYYMMDD(entry.data.published)}</span>
+                  </span>
+                  {entry.data.category && (
+                    <span class="inline-flex items-center gap-1.5">
+                      <Icon is:inline name="material-symbols:folder-open" class="text-[1.05em]" />
+                      <a
+                        href={getCategoryUrl(entry.data.category)}
+                        class="post-cover-link transition hover:text-(--primary)"
+                      >
+                        {entry.data.category}
+                      </a>
+                    </span>
+                  )}
+                  {entry.data.tags && entry.data.tags.length > 0 && (
+                    <span class="inline-flex items-center gap-1.5">
+                      <Icon is:inline name="material-symbols:label-outline" class="text-[1.05em]" />
+                      <span class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        {entry.data.tags.map((tag, i) => (
+                          <>
+                            {i > 0 && <span class="text-white/50">/</span>}
+                            <a
+                              href={getTagUrl(tag)}
+                              class="post-cover-link transition hover:text-(--primary)"
+                            >
+                              {tag.trim()}
+                            </a>
+                          </>
+                        ))}
+                      </span>
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         )
       }

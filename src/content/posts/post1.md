@@ -23,7 +23,7 @@ ls -l
 cat a.txt
 #过滤字符,-i不区分大小写，-v反向选择,-r递归搜索过滤，-E匹配正则
 grep
-#以:为分隔符，打印a.txt第8行第一列,NF为当前行的列数量。，$0所有列，规则还有例如/error/匹配包含 "error" 的行，$1 ~ /^192/	第 1 列以 "192" 开头，$1 !~ /root/	第 1 列不包含 "root"
+#以:为分隔符，打印a.txt第8行第一列,NF为当前行的列数量。，$0所有列，规则还有例如/error/匹配包含 "error" 的行，$1 ~ /^192/	第 1 列以 "192" 开头，$1 !~ /root/	第 1 列不包含 "root"。默认分隔符是空格。
 awk -F: 'NR==8{print $1}' a.txt
 # 将每行的第一个 old 替换为 new
 sed 's/old/new/' file.txt
@@ -77,6 +77,16 @@ md5sum after.iso
 ln -s a.txt a1.txt
 # 创建硬链接
 ln a.txt a2.txt
+#不会新建子 Shell，直接在当前 Shell 里执行。因此，脚本里所有操作都会立刻影响你当前的 Shell 环境。
+source a.sh
+#新建一个子 Shell 来执行脚本。脚本里定义的环境变量、切换的目录，在脚本执行完后不会影响你当前的 Shell。
+./a.sh
+#修改默认创建文件的权限为666
+umask 666
+#特殊文件权限
+#SUID	4	以文件所有者身份执行	无意义
+#SGID	2	以文件所属组身份执行	新建文件继承父目录的组
+#Sticky	1	无意义	               只有文件所有者和 root 能删除文件
 ```
 ### 1.3 用户和组管理
 ```bash
@@ -110,6 +120,7 @@ usermod -aG group user
 gpasswd -d 用户名 组名
 # 退出用户
 exit
+
 ```
 ### 1.4 网络管理
 ```bash
@@ -204,6 +215,28 @@ mkfs.ext4 /dev/sdb1
 # 挂载
 mount /dev/sdb1 /mnt/data
 ```
+### 1.6 shell脚本相关的命令操作
+```bash
+# 查看当前用户的环境变量
+env
+#查看当前用户的所有变量
+set
+#"$PATH"是弱引用,会直接判定为PATH这个变量的值,'$PATH'是强引用，直接判定为$PATH。`cat a.txt`可以直接解析出命令所展示的内容。
+
+#仅仅让a变为全局变量，就是该终端的所有子shell进程也可以使用该变量。
+export a
+```
+### 1.7文件下载
+# 查看网页
+curl https://example.com
+# 下载文件（保持原名）
+curl -O https://example.com/file.tar.gz
+# 下载并改名
+curl -o myfile.tar.gz https://example.com/file.tar.gz
+# 下载文件
+wget https://example.com/file.tar.gz
+
+
 ## 2. 常见配置文件
 
 ### 2.1 用户和组管理配置文件
@@ -223,4 +256,43 @@ mount /dev/sdb1 /mnt/data
 ```bash
 #挂载配置文件，永久挂载。
 /etc/fstab
+```
+### 2.3系统及个人用户配置文件
+```bash
+#登录 Shell (系统级)为所有用户设置环境变量、公共程序路径（PATH）。通常还会调用 profile.d 里的脚本。
+/etc/profile
+#登录 Shell (用户级)为你自己设置环境变量、个人程序路径。一般不写别名。
+~/.profile
+#所有用户	交互式 Shell 的全局配置文件	非登录交互式 Shell 直接执行；登录交互式 Shell 被 /etc/profile 间接调用
+/etc/bashrc
+#仅当前用户	交互式 Shell 的配置文件	非登录交互式 Shell 直接执行；登录交互式 Shell 被 ~/.profile 间接调用
+~/.bashrc
+```
+### apt源相关配置文件
+```bash
+# 告诉 APT 去哪找软件
+/etc/apt/sources.list
+# 附加源配置目录，用来存放第三方软件源，和主配置文件 sources.list 一起生效。
+/etc/apt/sources.list.d/
+# 包名、版本、依赖、下载路径、校验和（apt update就是从sources.list和sources.list.d里面更新各种元数据到lists里面）
+/var/lib/apt/lists/
+#下载的 .deb 安装包(可以通过apt clean删除)
+/var/cache/apt/archives/	
+
+sources.list           → 配置仓库地址
+       ↓ apt update
+/var/lib/apt/lists/    → 下载索引（知道有什么包、依赖、下载路径）
+       ↓ apt install
+/var/cache/apt/archives/ → 下载 .deb 包 → 安装
+
+#apt install 过程
+#① 读 /var/lib/apt/lists/ 中的索引
+#② 找到目标包，解析 Depends 字段，递归构建依赖树
+#③ 对比 /var/lib/dpkg/status（已安装列表）
+#④ 展示要安装/升级的包，等待确认
+#⑤ 检查 /var/cache/apt/archives/ 是否已有 .deb
+#    有且校验通过 → 跳过下载
+#    没有或损坏 → 从仓库下载
+#⑥ 下载 .deb 到 /var/cache/apt/archives/
+#⑦ 调用 dpkg 解包 → 执行脚本 → 更新数据库
 ```

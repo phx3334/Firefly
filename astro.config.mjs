@@ -106,6 +106,11 @@ export default defineConfig({
 
 	adapter,
 
+	// 关闭 Astro 开发工具栏（页面底部的 Menu / Inspect / Audit / Settings）
+	devToolbar: {
+		enabled: false,
+	},
+
 	// 图像优化配置
 	image: {
 		// 全局响应式布局
