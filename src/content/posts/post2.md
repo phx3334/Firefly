@@ -120,6 +120,14 @@ touch log_$$.txt
 sleep 20 &
 echo $!
 ```
+### 1.6管道符
+```bash
+#xargs把标准输入转换成命令行参数，解决"参数太多"和"管道不能传参"的问题
+# ✅ xargs 把 stdin 变成 rm 的参数
+ls *.log | xargs rm    # 删除所有 .log 文件
+# 删除查找到的文件
+find . -name "*.tmp" | xargs rm
+```
 
 
 ## 2. 正则表达式

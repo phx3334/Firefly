@@ -21,20 +21,6 @@ ls -a
 ls -l
 #查看文件内容
 cat a.txt
-#过滤字符,-i不区分大小写，-v反向选择,-r递归搜索过滤，-E匹配正则
-grep
-#以:为分隔符，打印a.txt第8行第一列,NF为当前行的列数量。，$0所有列，规则还有例如/error/匹配包含 "error" 的行，$1 ~ /^192/	第 1 列以 "192" 开头，$1 !~ /root/	第 1 列不包含 "root"。默认分隔符是空格。
-awk -F: 'NR==8{print $1}' a.txt
-# 将每行的第一个 old 替换为 new
-sed 's/old/new/' file.txt
-# 将每行所有 old 替换为 new
-sed 's/old/new/g' file.txt
-# 删除包含 error 的行
-sed '/error/d' file.txt
-# 只打印第 5 行
-sed -n '5p' file.txt
-# 直接修改文件（备份原文件）
-sed -i.bak 's/old/new/g' file.txt
 ```
 ### 1.2 文件操作
 ```bash
@@ -87,6 +73,31 @@ umask 666
 #SUID	4	以文件所有者身份执行	无意义
 #SGID	2	以文件所属组身份执行	新建文件继承父目录的组
 #Sticky	1	无意义	               只有文件所有者和 root 能删除文件
+
+#过滤字符,-i不区分大小写，-v反向选择,-r递归搜索过滤，-E匹配正则
+grep
+#以:为分隔符，打印a.txt第8行第一列,NF为当前行的列数量。，$0所有列，规则还有例如/error/匹配包含 "error" 的行，$1 ~ /^192/	第 1 列以 "192" 开头，$1 !~ /root/	第 1 列不包含 "root"。默认分隔符是空格。
+awk -F: 'NR==8{print $1}' a.txt
+# 将每行的第一个 old 替换为 new
+sed 's/old/new/' file.txt
+# 将每行所有 old 替换为 new
+sed 's/old/new/g' file.txt
+# 删除包含 error 的行
+sed '/error/d' file.txt
+# 只打印第 5 行
+sed -n '5p' file.txt
+# 直接修改文件（备份原文件）
+sed -i.bak 's/old/new/g' file.txt
+# 默认升序
+sort file.txt
+# 降序
+sort -r file.txt
+# ⚠️ 只能去重相邻的重复行，一般先 sort
+# 去重
+sort file.txt | uniq
+# 去重 + 统计次数
+sort file.txt | uniq -c
+
 ```
 ### 1.3 用户和组管理
 ```bash
