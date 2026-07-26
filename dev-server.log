@@ -1510,3 +1510,164 @@ LaTeX-incompatible input and strict mode is set to 'warn': LaTeX's accent \. wor
 [2m21:28:03[22m [34m[watch][39m src/config/siteConfig.ts
 [2m21:28:03[22m [34m[watch][39m src/config/siteConfig.ts
 [2m21:32:20[22m [34m[glob-loader][39m Reloaded data from [32mpost2.md[39m
+[2m20:09:04[22m [34m[200][39m / [2m245ms[22m
+[2m20:09:04[22m [34m[watch][39m home.html
+[2m20:09:04[22m [34m[watch][39m home.html
+[2m20:09:44[22m [34m[watch][39m /src/styles/main.css
+[2m20:09:44[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:06[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:10[22m [34m[watch][39m src/config/siteConfig.ts
+[2m20:10:15[22m [34m[watch][39m src/components/widget/SiteInfo.astro
+[2m20:10:22[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:22[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:26[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:26[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:28[22m [34m[200][39m /posts/post1/ [2m559ms[22m
+[2m20:10:28[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:28[22m [34m[watch][39m post.html
+[2m20:10:28[22m [34m[watch][39m post.html
+[2m20:10:28[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:29[22m [34m[watch][39m post.html
+[2m20:10:31[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:31[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:36[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:36[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:38[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:38[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:40[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:40[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:43[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:43[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:10:54[22m [34m[watch][39m /src/styles/main.css
+[2m20:10:54[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:11:06[22m [34m[watch][39m home.html
+[2m20:11:06[22m [34m[watch][39m post.html
+[2m20:12:31[22m [34m[watch][39m /src/styles/main.css
+[2m20:12:31[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:13:17[22m [34m[watch][39m /src/styles/main.css
+[2m20:13:17[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:13:23[22m [34m[watch][39m /src/styles/main.css
+[2m20:13:23[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:13:27[22m [34m[watch][39m /src/styles/main.css
+[2m20:13:27[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:13:29[22m [34m[watch][39m /src/styles/main.css
+[2m20:13:29[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:13:35[22m [34m[watch][39m /src/styles/main.css
+[2m20:13:35[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:13:42[22m [34m[watch][39m /src/styles/main.css
+[2m20:13:42[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:13:45[22m [34m[watch][39m /src/styles/main.css
+[2m20:13:45[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:14:09[22m [34m[watch][39m /src/styles/main.css
+[2m20:14:09[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:14:35[22m [34m[watch][39m /src/styles/main.css
+[2m20:14:35[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:14:39[22m [34m[watch][39m /src/styles/main.css
+[2m20:14:39[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:14:42[22m [34m[watch][39m /src/styles/main.css
+[2m20:14:42[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:14:46[22m [34m[watch][39m /src/styles/main.css
+[2m20:14:46[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:14:50[22m [34m[watch][39m /src/styles/main.css
+[2m20:14:50[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:14:55[22m [34m[watch][39m /src/styles/main.css
+[2m20:14:55[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:16:04[22m [34m[watch][39m /src/styles/main.css
+[2m20:16:04[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:16:08[22m [34m[watch][39m /src/styles/main.css
+[2m20:16:08[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:16:15[22m [34m[watch][39m /src/styles/main.css
+[2m20:16:15[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:16:17[22m [34m[watch][39m /src/styles/main.css
+[2m20:16:18[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:16:54[22m [34m[watch][39m /src/styles/main.css
+[2m20:16:54[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:16:55[22m [34m[watch][39m /src/styles/main.css
+[2m20:16:55[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:17:02[22m [34m[watch][39m /src/styles/main.css
+[2m20:17:02[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:17:04[22m [34m[watch][39m /src/styles/main.css
+[2m20:17:04[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:18:44[22m [34m[watch][39m /src/styles/main.css
+[2m20:18:44[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:18:49[22m [34m[watch][39m /src/styles/main.css
+[2m20:18:49[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:18:54[22m [34m[watch][39m /src/styles/main.css
+[2m20:18:55[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:19:01[22m [34m[watch][39m /src/styles/main.css
+[2m20:19:01[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:19:04[22m [34m[watch][39m /src/styles/main.css
+[2m20:19:04[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:19:50[22m [34m[watch][39m /src/styles/main.css
+[2m20:19:50[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:19:56[22m [34m[watch][39m /src/styles/main.css
+[2m20:19:56[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:19:59[22m [34m[watch][39m /src/styles/main.css
+[2m20:19:59[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:20:00[22m [34m[watch][39m /src/styles/main.css
+[2m20:20:00[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:20:02[22m [34m[watch][39m /src/styles/main.css
+[2m20:20:02[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:20:03[22m [34m[watch][39m /src/styles/main.css
+[2m20:20:03[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:20:10[22m [34m[watch][39m /src/styles/main.css
+[2m20:20:11[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:20:15[22m [34m[watch][39m /src/styles/main.css
+[2m20:20:15[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:20:17[22m [34m[watch][39m /src/styles/main.css
+[2m20:20:17[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:20:22[22m [34m[watch][39m /src/styles/main.css
+[2m20:20:22[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[2m20:21:36[22m [34m[watch][39m /src/styles/main.css
+[2m20:21:36[22m [34m[glob-loader][39m Reloaded data from [32mpost1.md[39m
+[31m[1m20:23:49[22m [ERROR] [glob-loader][39m Failed to reload post3.md: **posts → post3** data does not match collection schema.
+
+  **title**: **title**: Required
+  **published**: **published**: Required
+
+[2m20:23:51[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:23:57[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:23:58[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:03[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:05[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:14[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:20[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:23[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:26[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:29[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:36[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:55[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:24:58[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:25:08[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:25:13[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:25:17[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:25:18[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:25:24[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:25:38[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:01[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:03[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:06[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:09[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:10[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:12[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:16[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:18[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:32[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:34[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:46[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:47[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:44:59[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:45:01[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:46:04[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:02[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:18[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:20[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:21[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:24[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:27[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:39[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:43[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:54:56[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:57:14[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+[2m20:57:27[22m [34m[glob-loader][39m Reloaded data from [32mpost3.md[39m
+ ELIFECYCLE  Command failed with exit code 1.

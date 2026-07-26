@@ -21,6 +21,8 @@ ls -a
 ls -l
 #查看文件内容
 cat a.txt
+#实时跟踪新内容（日志监控）
+tail -f /var/log/nginx/access.log
 ```
 ### 1.2 文件操作
 ```bash
@@ -97,7 +99,8 @@ sort -r file.txt
 sort file.txt | uniq
 # 去重 + 统计次数
 sort file.txt | uniq -c
-
+#执行目录下具有执行权限的脚本
+run-parts /etc/cron.hourly
 ```
 ### 1.3 用户和组管理
 ```bash
@@ -197,6 +200,8 @@ top
 df
 #查看内存和交换分区使用情况（人类可读）
 free -h
+# 每秒刷新，共5次，查看系统整体性能：CPU、内存、I/O、进程。
+vmstat 1 5         
 #查看块设备分区结构
 lsblk
 # 磁盘初始化为物理卷
@@ -238,6 +243,7 @@ set
 export a
 ```
 ### 1.7文件下载
+```bash
 # 查看网页
 curl https://example.com
 # 下载文件（保持原名）
@@ -246,6 +252,7 @@ curl -O https://example.com/file.tar.gz
 curl -o myfile.tar.gz https://example.com/file.tar.gz
 # 下载文件
 wget https://example.com/file.tar.gz
+```
 
 
 ## 2. 常见配置文件
@@ -278,8 +285,10 @@ wget https://example.com/file.tar.gz
 /etc/bashrc
 #仅当前用户	交互式 Shell 的配置文件	非登录交互式 Shell 直接执行；登录交互式 Shell 被 ~/.profile 间接调用
 ~/.bashrc
+#进程打开的文件描述符
+/proc/PID/fd/
 ```
-### apt源相关配置文件
+### 2.4apt源相关配置文件
 ```bash
 # 告诉 APT 去哪找软件
 /etc/apt/sources.list
@@ -306,4 +315,11 @@ sources.list           → 配置仓库地址
 #    没有或损坏 → 从仓库下载
 #⑥ 下载 .deb 到 /var/cache/apt/archives/
 #⑦ 调用 dpkg 解包 → 执行脚本 → 更新数据库
+```
+## 2.5网络相关配置文件
+```bash
+#临时全局路由转发（所有网卡）
+echo 1 > /proc/sys/net/ipv4/ip_forward
+#只开启 eth1 的转发
+echo 1 > /proc/sys/net/ipv4/conf/eth1/forwarding
 ```

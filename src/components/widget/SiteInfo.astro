@@ -43,11 +43,13 @@ try {
 // Node 版本
 const nodeVersion = process.version;
 
-// pnpm 版本（从 npm_config_user_agent 解析）
-let pnpmVersion = "unknown";
+// pnpm 版本：优先使用配置中固定的 pnpmVersion，否则构建时从 npm_config_user_agent 自动探测
+let pnpmVersion = siteConfig.pnpmVersion
+	? `v${siteConfig.pnpmVersion.replace(/^v/, "")}`
+	: "unknown";
 const userAgent = process.env.npm_config_user_agent || "";
 const pnpmMatch = userAgent.match(/pnpm\/([\d.]+)/);
-if (pnpmMatch) {
+if (!siteConfig.pnpmVersion && pnpmMatch) {
 	pnpmVersion = `v${pnpmMatch[1]}`;
 }
 
