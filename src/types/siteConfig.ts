@@ -53,6 +53,9 @@ export type SiteConfig = {
 	// 站点开始日期，用于计算运行天数
 	siteStartDate?: string; // 格式: "YYYY-MM-DD"
 
+	// 站点信息中显示的 pnpm 版本（留空则构建时自动探测）
+	pnpmVersion?: string;
+
 	// 可选：站点时区，使用 IANA 时区标识，例如 "Asia/Shanghai"、"UTC"
 	timezone?: string;
 
