@@ -23,6 +23,8 @@ ls -l
 cat a.txt
 #实时跟踪新内容（日志监控）
 tail -f /var/log/nginx/access.log
+#分页查看
+less a.txt
 ```
 ### 1.2 文件操作
 ```bash
@@ -316,7 +318,7 @@ sources.list           → 配置仓库地址
 #⑥ 下载 .deb 到 /var/cache/apt/archives/
 #⑦ 调用 dpkg 解包 → 执行脚本 → 更新数据库
 ```
-## 2.5网络相关配置文件
+### 2.5网络相关配置文件
 ```bash
 #临时全局路由转发（所有网卡）
 echo 1 > /proc/sys/net/ipv4/ip_forward
