@@ -15,7 +15,6 @@ let cache: SearchPost[] | null = null;
 
 export async function loadSearchIndex(): Promise<SearchPost[]> {
 	if (cache) return cache;
-	cache = [];
 	try {
 		const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 		const res = await fetch(`${base}/api/search.json`);
@@ -25,7 +24,8 @@ export async function loadSearchIndex(): Promise<SearchPost[]> {
 	} catch (err) {
 		console.error("Failed to load search index:", err);
 	}
-	return cache;
+	// 失败时 cache 仍为 null，下次调用会重试，避免一次失败导致后续永久返回空数组
+	return cache ?? [];
 }
 
 export function searchPosts(index: SearchPost[], keyword: string): SearchPost[] {

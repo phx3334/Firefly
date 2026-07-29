@@ -49,10 +49,17 @@ const handlePopState = (): void => {
 	}
 };
 
-onMount(async () => {
-	index = await loadSearchIndex();
-	initialized = true;
-	await search();
+onMount(() => {
+	// static 部署时 SSR 无法获取 query（search.astro 在 build 时预渲染，
+	// keyword prop 为空），因此统一从客户端 URL 读取关键词，再由下方
+	// reactive 触发搜索；同时避免 onMount 返回 Promise 造成的类型错误。
+	const params = new URLSearchParams(window.location.search);
+	const q = params.get("q");
+	loadSearchIndex().then((data) => {
+		index = data;
+		if (q) keyword = q; // 设置关键词，触发下方 reactive 首次搜索
+		initialized = true;
+	});
 	window.addEventListener("popstate", handlePopState);
 	return () => window.removeEventListener("popstate", handlePopState);
 });

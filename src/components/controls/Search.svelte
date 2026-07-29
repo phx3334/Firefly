@@ -24,7 +24,7 @@ let mobileContainer: HTMLDivElement | undefined;
 let debounceTimer: ReturnType<typeof setTimeout>;
 
 const viewMoreLabel = (): string =>
-	i18n(I18nKey.searchViewMore).replace(/\s*[（(]\{count\}[^）)]*[）)]/, "");
+	i18n(I18nKey.searchViewMore).replace(/\s*[((]\{count\}[^))]*[))]/, "");
 
 const runSearch = (kw: string): void => {
 	if (!kw.trim()) {
@@ -80,12 +80,14 @@ const handleResultClick = (event: Event, target: string): void => {
 const goToSearchPage = (event: Event): void => {
 	event.preventDefault();
 	const q = keyword;
-	closePanel();
-	navigateToPage(getSearchUrl(q));
+	// 整页跳转到搜索结果页：避免 closePanel() 清空 keyword 触发 reactive 的
+	// history.replaceState 与 Swup 无刷新导航冲突，导致跳转异常；
+	// 同时整页跳转能让 /search 页的 AdvancedSearch 干净地重新初始化并读取 q。
+	// 不调用 closePanel()——页面即将卸载，状态无需手动清理。
+	window.location.href = getSearchUrl(q);
 };
 
-onMount(async () => {
-	index = await loadSearchIndex();
+onMount(() => {
 	const onDocClick = (e: MouseEvent): void => {
 		if (
 			!desktopContainer?.contains(e.target as Node) &&
@@ -95,6 +97,11 @@ onMount(async () => {
 		}
 	};
 	document.addEventListener("click", onDocClick);
+	// onMount 不能返回 Promise（否则 cleanup 被包成 Promise<() => void> 触发类型错误），
+	// 故索引用 .then 异步加载，cleanup 同步返回。
+	loadSearchIndex().then((data) => {
+		index = data;
+	});
 	return () => document.removeEventListener("click", onDocClick);
 });
 </script>

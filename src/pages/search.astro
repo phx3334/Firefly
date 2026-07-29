@@ -1,15 +1,218 @@
 ---
-import AdvancedSearch from "@components/pages/AdvancedSearch.svelte";
+import PostCard from "@/components/layout/PostCard.astro";
+import { getSortedPosts } from "@/utils/content-utils";
+import { getPostUrlBySlug } from "@/utils/url-utils";
+import MainGridLayout from "@/layouts/MainGridLayout.astro";
 import I18nKey from "@i18n/i18nKey";
 import { i18n } from "@i18n/translation";
-import MainGridLayout from "@layouts/MainGridLayout.astro";
+import { siteConfig } from "@/config";
 
-const query = Astro.url.searchParams.get("q") || "";
 const title = i18n(I18nKey.search);
+
+// 仅展示非草稿、非加密文章
+const allPosts = (await getSortedPosts()).filter(
+	(p) => !p.data.draft && !p.data.password,
+);
+
+// 将 Markdown 正文压缩为纯文本，供客户端按关键词过滤
+function stripMarkdown(md: string): string {
+	return (md || "")
+		.replace(/```[\s\S]*?```/g, " ")
+		.replace(/~~~[\s\S]*?~~~/g, " ")
+		.replace(/`[^`]*`/g, " ")
+		.replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+		.replace(/^#{1,6}\s+/gm, "")
+		.replace(/[*_~>]/g, " ")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase();
+}
+
+const pageSize = siteConfig.pagination.postsPerPage;
+
+// 每篇文章的检索文本（标题 + 描述 + 标签 + 分类 + 正文），与卡片顺序一一对应
+const searchIndex = allPosts.map((entry) =>
+	stripMarkdown(
+		entry.data.title +
+			" " +
+			(entry.data.description || "") +
+			" " +
+			(entry.data.tags || []).join(" ") +
+			" " +
+			(entry.data.category || "") +
+			" " +
+			(entry.body || ""),
+	),
+);
+
+let delay = 0;
+const interval = 50;
 ---
 
 <MainGridLayout title={title} description={""}>
-    <div class="min-h-[80vh]">
-        <AdvancedSearch client:load keyword={query} />
-    </div>
+	<div class="min-h-[80vh]">
+		<!-- 顶部信息条（无搜索框，搜索统一用导航栏） -->
+		<div id="search-info" class="mb-4 text-sm text-(--text-muted)"></div>
+
+		<!-- 文章列表：与首页同款 PostCard，list-mode 布局 -->
+		<div
+			id="search-results-container"
+			class="flex flex-col gap-4 md:gap-4 list-mode mb-4"
+			data-page-size={pageSize}
+		>
+			{
+				allPosts.map((entry, index) => (
+					<PostCard
+						entry={entry}
+						title={entry.data.title}
+						tags={entry.data.tags}
+						category={entry.data.category}
+						published={entry.data.published}
+						updated={entry.data.updated}
+						url={getPostUrlBySlug(entry.id)}
+						image={entry.data.image}
+						description={entry.data.description}
+						draft={entry.data.draft}
+						pinned={entry.data.pinned}
+						password={!!entry.data.password}
+						loading={index < 2 ? "eager" : "lazy"}
+						class="onload-animation post-card-item search-result-item"
+						style={`animation-delay: calc(var(--content-delay) + ${delay++ * interval}ms)`}
+					/>
+				))
+			}
+		</div>
+
+		<!-- 空状态 -->
+		<div id="search-empty" class="hidden py-16 text-center text-(--text-muted)">
+			{i18n(I18nKey.searchNoResults)}
+		</div>
+
+		<!-- 分页控件 -->
+		<div
+			id="search-pagination"
+			class="mt-2 flex flex-wrap items-center justify-center gap-2"
+		>
+		</div>
+	</div>
 </MainGridLayout>
+
+<script is:inline define:vars={{ searchIndex, pageSize }}>
+	(function () {
+		const container = document.getElementById("search-results-container");
+		const info = document.getElementById("search-info");
+		const pagination = document.getElementById("search-pagination");
+		const empty = document.getElementById("search-empty");
+		if (!container) return;
+
+		const items = Array.from(container.querySelectorAll(".post-card-item"));
+		let filtered = items.map((_, i) => i);
+		let currentPage = 1;
+
+		function getQ() {
+			return (new URLSearchParams(window.location.search).get("q") || "").trim();
+		}
+
+		function applyFilter() {
+			const q = getQ().toLowerCase();
+			const terms = q.split(/\s+/).filter(Boolean);
+			filtered = items
+				.map((_, i) => i)
+				.filter((i) => terms.every((t) => searchIndex[i].includes(t)));
+			currentPage = 1;
+			render();
+		}
+
+		function render() {
+			const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+			if (currentPage > totalPages) currentPage = totalPages;
+			const start = (currentPage - 1) * pageSize;
+			const pageSet = new Set(filtered.slice(start, start + pageSize));
+
+			items.forEach((item, i) => {
+				item.style.display = pageSet.has(i) ? "" : "none";
+			});
+
+			const q = getQ();
+			info.textContent = q
+				? `「${q}」 — ${filtered.length} 篇`
+				: `共 ${filtered.length} 篇`;
+
+			const hasResults = filtered.length > 0;
+			empty.classList.toggle("hidden", hasResults);
+			container.style.display = hasResults ? "" : "none";
+
+			renderPagination(totalPages);
+		}
+
+		function renderPagination(totalPages) {
+			pagination.innerHTML = "";
+			if (totalPages <= 1) return;
+
+			const makeBtn = (label, page, opts = {}) => {
+				const b = document.createElement("button");
+				b.textContent = label;
+				b.className = "search-page-btn";
+				if (opts.disabled) b.disabled = true;
+				if (opts.active) b.classList.add("active");
+				b.addEventListener("click", () => {
+					currentPage = page;
+					render();
+					window.scrollTo({ top: 0, behavior: "smooth" });
+				});
+				return b;
+			};
+
+			pagination.appendChild(
+				makeBtn("‹", currentPage - 1, { disabled: currentPage === 1 }),
+			);
+			for (let p = 1; p <= totalPages; p++) {
+				pagination.appendChild(
+					makeBtn(String(p), p, { active: p === currentPage }),
+				);
+			}
+			pagination.appendChild(
+				makeBtn("›", currentPage + 1, {
+					disabled: currentPage === totalPages,
+				}),
+			);
+		}
+
+		// 前进/后退时重新过滤
+		window.addEventListener("popstate", applyFilter);
+
+		// 初始化
+		applyFilter();
+	})();
+</script>
+
+<style>
+	.search-page-btn {
+		min-width: 2.25rem;
+		height: 2.25rem;
+		padding: 0 0.6rem;
+		border-radius: 0.6rem;
+		border: 1px solid var(--line-divider);
+		background: transparent;
+		color: var(--text-primary);
+		font-size: 0.9rem;
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+	.search-page-btn:hover:not(:disabled) {
+		background: var(--btn-regular-bg);
+		color: var(--btn-content);
+		border-color: var(--btn-regular-bg);
+	}
+	.search-page-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.search-page-btn.active {
+		background: var(--primary);
+		color: white;
+		border-color: var(--primary);
+	}
+</style>
