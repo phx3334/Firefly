@@ -175,6 +175,8 @@ nmcli con mod ens33 ipv4.addresses 192.168.1.100/24
 nmcli con mod ens33 ipv4.gateway 192.168.1.1
 # 修改 DNS
 nmcli con mod ens33 ipv4.dns "8.8.8.8 114.114.114.114"
+#-a显示所有连接和监听端口（all） -n不解析域名，直接显示 IP 和端口号（更快）
+netstat -an
 # 查看所有网卡ip地址
 ip addr
 # 查看网卡 ens33 的 IP 地址、MAC 等配置信息
