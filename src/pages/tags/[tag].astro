@@ -1,0 +1,88 @@
+---
+import type { GetStaticPaths } from "astro";
+import { Icon } from "astro-icon/components";
+import I18nKey from "@/i18n/i18nKey";
+import { i18n } from "@/i18n/translation";
+import PostCard from "@/components/layout/PostCard.astro";
+import MainGridLayout from "@/layouts/MainGridLayout.astro";
+import { getSortedPosts, getTagList } from "@/utils/content-utils";
+import { getPostUrlBySlug, url } from "@/utils/url-utils";
+
+export const getStaticPaths = (async () => {
+	const tags = await getTagList();
+	const allPosts = await getSortedPosts();
+
+	return tags.map((t) => {
+		const name = t.name.trim();
+		const posts = allPosts.filter((p) =>
+			p.data.tags.some((tag: string) => tag.trim() === name),
+		);
+		return {
+			params: { tag: encodeURIComponent(name) },
+			props: { tagName: name, posts, count: t.count },
+		};
+	});
+}) satisfies GetStaticPaths;
+
+interface Props {
+	tagName: string;
+	posts: Awaited<ReturnType<typeof getSortedPosts>>;
+	count: number;
+}
+
+const { tagName, posts, count } = Astro.props;
+---
+
+<MainGridLayout title={`#${tagName}`}>
+	<!-- 标签页头 -->
+	<div class="card-base px-8 py-6 mb-4 onload-animation">
+		<a
+			href={url("/tags/")}
+			class="inline-flex items-center gap-1 text-sm text-30 hover:text-(--primary) transition-colors mb-3"
+		>
+			<Icon is:inline name="material-symbols:chevron-left-rounded" class="text-lg" />
+			{i18n(I18nKey.tags)}
+		</a>
+		<div class="flex items-center gap-3">
+			<div class="shrink-0 w-12 h-12 rounded-xl bg-(--primary)/10 flex items-center justify-center">
+				<Icon is:inline name="material-symbols:tag-rounded" class="text-2xl text-(--primary)" />
+			</div>
+			<div>
+				<h1 class="text-2xl font-bold text-90">{tagName}</h1>
+				<p class="text-sm text-30 mt-0.5">{count} {i18n(I18nKey.postsCount)}</p>
+			</div>
+		</div>
+	</div>
+
+	<!-- 该标签的文章列表 -->
+	<div class="flex flex-col gap-4">
+		{posts.map((entry, index) => (
+			<PostCard
+				entry={entry}
+				title={entry.data.title}
+				tags={entry.data.tags}
+				category={entry.data.category}
+				published={entry.data.published}
+				updated={entry.data.updated}
+				url={getPostUrlBySlug(entry.id)}
+				image={entry.data.image}
+				description={entry.data.description}
+				draft={entry.data.draft}
+				pinned={entry.data.pinned}
+				password={!!entry.data.password}
+				class:list="onload-animation"
+				style={`animation-delay: calc(var(--content-delay) + ${index * 50}ms)`}
+			/>
+		))}
+	</div>
+
+	<!-- 空状态 -->
+	{
+		posts.length === 0 && (
+			<div class="card-base px-8 py-12 text-center">
+				<Icon is:inline name="material-symbols:tag-rounded" class="text-5xl text-30 mx-auto mb-4" />
+				<p class="text-30">{i18n(I18nKey.noData)}</p>
+			</div>
+		)
+	}
+</MainGridLayout>

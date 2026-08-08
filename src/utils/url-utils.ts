@@ -41,7 +41,7 @@ export function getPostUrlBySlug(slug: string): string {
 
 export function getTagUrl(tag: string): string {
 	if (!tag) return url("/tags/");
-	return url(`/tags/?tag=${encodeURIComponent(tag.trim())}`);
+	return url(`/tags/${encodeURIComponent(tag.trim())}/`);
 }
 
 export function getCategoryUrl(category: string | null): string {

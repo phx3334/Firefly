@@ -19,6 +19,7 @@ export const ko: Translation = {
 	[Key.categories]: "카테고리",
 	[Key.allCategories]: "모든 카테고리",
 	[Key.allTags]: "모든 태그",
+	[Key.postsTagged]: "태그: {tag}",
 	[Key.recentPosts]: "최근 게시글",
 	[Key.postList]: "게시글 목록",
 	[Key.tableOfContents]: "목차",

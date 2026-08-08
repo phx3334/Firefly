@@ -19,6 +19,7 @@ export const ru: Translation = {
 	[Key.categories]: "Категории",
 	[Key.allCategories]: "Все категории",
 	[Key.allTags]: "Все теги",
+	[Key.postsTagged]: "Тег: {tag}",
 	[Key.recentPosts]: "Последние посты",
 	[Key.postList]: "Список постов",
 	[Key.tableOfContents]: "Содержание",
