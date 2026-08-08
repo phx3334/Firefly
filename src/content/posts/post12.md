@@ -45,7 +45,7 @@ UNIX 进程关系 / 作业控制机制。一个会话 = 一组进程组，由会
 #include <unistd.h>
 #include <sys/mount.h>
  
-/* 定义一个给 clone 用的栈，栈大小1M */
+// 定义一个给 clone 用的栈，栈大小1M 
 #define STACK_SIZE (1024 * 1024) 
 static char container_stack[STACK_SIZE];
  
