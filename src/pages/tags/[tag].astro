@@ -18,7 +18,7 @@ export const getStaticPaths = (async () => {
 			p.data.tags.some((tag: string) => tag.trim() === name),
 		);
 		return {
-			params: { tag: encodeURIComponent(name) },
+			params: { tag: name },
 			props: { tagName: name, posts, count: t.count },
 		};
 	});
