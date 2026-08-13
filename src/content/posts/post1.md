@@ -25,6 +25,8 @@ cat a.txt
 tail -f /var/log/nginx/access.log
 #分页查看
 less a.txt
+#对比2个文件差异
+diff -u file1.txt file2.txt
 ```
 ### 1.2 文件操作
 ```bash
@@ -103,6 +105,11 @@ sort file.txt | uniq
 sort file.txt | uniq -c
 #执行目录下具有执行权限的脚本
 run-parts /etc/cron.hourly
+#+代表追加属性，-代表删除属性。
+#常见属性i:文件不可修改/删除/重命名/硬链接，连 root 都不行（保护重要且一般不修改的配置文件）.  a:append only，只能追加不能改写/删除（保护审计日志），连 root 都不行
+chattr +i a.txt
+#查看扩展属性
+lsattr a.txt
 ```
 ### 1.3 用户和组管理
 ```bash
@@ -140,21 +147,22 @@ exit
 ```
 ### 1.4 网络管理
 ```bash
-# 查看所有网络接口信息（包括未激活的）
-ifconfig -a
+# 查看所有网络接口信息（包括未激活的，ip addr 默认就含 down 的网卡）
+ip addr
 # 查看特定接口（如 ens33）
-ifconfig ens33
-# 查看路由表（推荐使用 -n 显示数字地址）
-route -n
-#-net指定目标为网络地址 gw指定网关IP2.2.2.2  dev指定出口网卡
-route add -net 3.3.3.0/24 gw 2.2.2.2 dev ens33
+ip addr show ens33
+# 查看路由表（ip route 默认显示数字地址，无需 -n）
+ip route
+# via指定网关IP2.2.2.2  dev指定出口网卡
+ip route add 3.3.3.0/24 via 2.2.2.2 dev ens33
 #一般直接指定default0.0.0.0代表所有网络地址
-route add default gw 2.2.2.2 dev ens33
-# 删除路由
-route del -net 3.3.3.0/24 dev ens33
-# 禁用网卡（ens33和启用网卡（ens33）,重新加载配置文件
-ifdown ens33
-ifup ens33
+ip route add default via 2.2.2.2 dev ens33
+# 删除路由（参数与 add 一致）
+ip route del 3.3.3.0/24 via 2.2.2.2 dev ens33
+# 加载配置并启动网卡
+nmcli con up ens33
+#关闭网卡
+nmcli con down ens33
 # 查看所有网络设备的状态
 nmcli device status
 # 查看所有网络连接（包括未激活的）
@@ -175,12 +183,8 @@ nmcli con mod ens33 ipv4.addresses 192.168.1.100/24
 nmcli con mod ens33 ipv4.gateway 192.168.1.1
 # 修改 DNS
 nmcli con mod ens33 ipv4.dns "8.8.8.8 114.114.114.114"
-#-a显示所有连接和监听端口（all） -n不解析域名，直接显示 IP 和端口号（更快）
-netstat -an
-# 查看所有网卡ip地址
-ip addr
-# 查看网卡 ens33 的 IP 地址、MAC 等配置信息
-ip addr show ens33
+# -t 仅TCP -u 仅UDP -l 仅监听端口 -p 显示进程 -n 不解析域名直接显示 IP 和端口号（更快）
+ss -tulpn
 # 给网卡 ens33 临时添加一个 IPv4 地址（/24 表示子网掩码 255.255.255.0）
 ip addr add 192.168.1.100/24 dev ens33
 # 删除网卡 ens33 上指定的 IP 地址（参数与 add 完全一致）
@@ -193,7 +197,7 @@ ip route add 3.3.3.0/24 via 2.2.2.2 dev ens33
 ip route del 3.3.3.0/24 via 2.2.2.2 dev ens33
 # 查看所有网络接口的统计信息（-s 显示收发数据包、错误、丢包等统计）
 ip -s link
-#具有ping功能的同时可以返回1.1.1.1的网卡的mac地址
+#具有ping功能的同时可以返回1.1.1.1的网卡的mac地址（属于 iputils 包，不是 net-tools，无需替换）
 arping 1.1.1.1
 ```
 ### 1.5 系统管理
@@ -214,7 +218,7 @@ lsblk
 pvcreate /dev/sdb     
 # 创建卷组 vg_data                     
 vgcreate vg_data /dev/sdb  
-# 建数据逻辑卷（按需改大小）                
+# 建数据逻辑卷（按需改大小），lv的大小必须是PE的整数被倍，默认4mb，系统会就近给你分配正确的大小             
 lvcreate -L 10G -n lv_data vg_data       
 # 建交换逻辑卷 
 lvcreate -L 2G  -n lv_swap vg_data  
@@ -278,7 +282,7 @@ wget https://example.com/file.tar.gz
 ```
 ### 2.2 挂载配置文件
 ```bash
-#挂载配置文件，永久挂载。
+#开机自动挂载配置文件，永久挂载。
 /etc/fstab
 ```
 ### 2.3系统及个人用户配置文件
@@ -328,4 +332,17 @@ sources.list           → 配置仓库地址
 echo 1 > /proc/sys/net/ipv4/ip_forward
 #只开启 eth1 的转发
 echo 1 > /proc/sys/net/ipv4/conf/eth1/forwarding
+```
+### 2.6日志
+```bash
+#linux系统所有的默认日志文件在这里面
+/var/log
+#配置主要确定不同系统日志应该写到哪个文件夹
+/etc/rsyslog.conf
+#分片配置
+/etc/rsyslog.d/*.conf
+#日志轮换的默认配置
+/etc/logrotate.conf
+#日志轮换的分片设置，里面包括多个服务的不同文件的日志轮换配置，优先级高于主配置
+/etc/logrotate.d/*
 ```

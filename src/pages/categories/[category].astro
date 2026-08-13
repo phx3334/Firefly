@@ -21,7 +21,9 @@ export const getStaticPaths = (async () => {
 			return isUncategorized ? c === "" : c === name;
 		});
 		return {
-			params: { category: name },
+			// 使用编码后的 category 作为路由参数，与 url-utils 的 getCategoryUrl 保持一致，
+			// 确保预渲染时请求路径（已编码）能匹配到生成的静态路径。
+			params: { category: encodeURIComponent(name) },
 			props: { categoryName: name, posts, count: cat.count },
 		};
 	});
