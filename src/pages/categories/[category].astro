@@ -21,9 +21,9 @@ export const getStaticPaths = (async () => {
 			return isUncategorized ? c === "" : c === name;
 		});
 		return {
-			// 使用编码后的 category 作为路由参数，与 url-utils 的 getCategoryUrl 保持一致，
-			// 确保预渲染时请求路径（已编码）能匹配到生成的静态路径。
-			params: { category: encodeURIComponent(name) },
+			// params 使用原始名称，Astro 会自行对 URL 进行编码；
+			// 若手动 encodeURIComponent 会被二次编码（% → %25）导致路径不匹配。
+			params: { category: name },
 			props: { categoryName: name, posts, count: cat.count },
 		};
 	});
