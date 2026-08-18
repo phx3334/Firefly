@@ -296,3 +296,12 @@ docker run -p 8888:80 -d -v /test:/aaa --name test centos:7 tail -f /dev/null
 
 ### 容器运行时
 
+
+
+
+
+
+## FAQ
+### sh和bin/bash区别
+bin/bash是/bin/sh的都是shell解释器，前者功能更强，支持更多灵活的语法，后者完全符合POSIX标准，可移植性强。  
+POSIX（可移植操作系统接口）是一组由 IEEE 制定的操作系统标准化规范,目的是让程序可以在不同的 Unix 系操作系统之间方便地移植。

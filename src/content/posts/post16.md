@@ -3,7 +3,7 @@ title: linux日志管理
 published: 2026-08-13T23:11:23+08:00
 description: 学会rsyslog和logrotate的使用方法以及配置文件的主要内容
 image: './images/a16.avif'
-tags: [计算机网络,linux]
+tags: [linux]
 category: '计算机技术'
 draft: false
 lang: '中文'

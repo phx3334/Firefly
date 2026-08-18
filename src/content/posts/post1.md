@@ -90,7 +90,7 @@ sed 's/old/new/' file.txt
 sed 's/old/new/g' file.txt
 # 删除包含 error 的行
 sed '/error/d' file.txt
-# 只打印第 5 行
+# 只打印第 5 行，-n取消打印模式空间
 sed -n '5p' file.txt
 # 直接修改文件（备份原文件）
 sed -i.bak 's/old/new/g' file.txt
