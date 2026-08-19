@@ -21,9 +21,9 @@ export const localDynamics: LocalDynamic[] = [
 	{
 		id: "local-2026-08-15",
 		published: Date.UTC(2026, 7, 15, 18, 21, 0),
-		html: "感觉我现在太刀玩的是越来越熟练了，目前遇到的古龙基本都能一命单刷，可能这就是天赋吧，或许未来我也能成为太刀天尊了",
+		html: "怪猎世界太好玩了",
 		images:[{ alt: "", src: "/images/d1.avif" }],
-		searchText: "感觉我现在太刀玩的是越来越熟练了，目前遇到的古龙基本都能一命单刷，可能这就是天赋吧，或许未来我也能成为太刀天尊了",
+		searchText: "怪猎世界太好玩了",
 		pinned: false,
 	},
 ];
