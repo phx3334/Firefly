@@ -17,6 +17,24 @@ lang: '中文'
 UNIX 进程关系 / 作业控制机制。一个会话 = 一组进程组，由会话首领经 `setsid()` 创建。典型场景：终端登录、`tmux`、守护进程脱离终端。用 `ps -o sid` 查看。决定「进程在作业控制上归谁管」，与资源视图隔离无关。
 > 两者正交：命名空间管「资源视图」，会话管「进程从属」，可叠加但互不相等。
 
+### cgroup
+#### 补充
+**硬件中断**:  
+由 CPU 外部设备通过中断线主动通知，异步、不可预期。中断处理分两步：上半部（top half）只做紧急简短的收尾，耗时的剩余工作推迟执行。
+- **网卡中断**：网卡收到数据包后触发中断，CPU 暂停当前任务，把数据从网卡缓冲区拷入内核交给协议栈处理（中断处理完成后用软中断继续）。
+- **时钟中断**：定时器周期性触发（Linux 默认 1000 次/秒），是进程调度的基础，负责时间片轮转、系统时间统计、超时与睡眠唤醒。
+**软中断**：  
+- 内核把硬件中断中耗时的剩余处理延迟到软中断（softirq）执行，保证硬中断快速返回。典型：网络收包后的协议栈处理、时钟中断后的调度统计。
+- 意义：硬件中断对cpu占有的优先级最高，硬件中断过程，其他中断进不来，例如网卡又来包了，时钟中断又来了，如果硬中断时间过长，会导致丢包，系统时间紊乱和系统调度异常。而软中断的优先级低于硬中断，但高于用户进程。例如用户正在玩怪猎，后台百度网盘正在下载小电影（ 网卡持续收包），游戏画面可能会有些许掉帧，卡顿，但是下载速度几乎不受影响。
+**软件中断**
+程序通过特殊指令（`syscall` / `int 0x80`）主动陷入内核，同步、可控。典型：系统调用（`read`、`write`）、异常（缺页、除零）。
+
+#### cpu cgroup
+**定义**：  
+cpu cgroup顾名思义就是限制进程对cpu的使用（硬件中断和软件中断的时间不计入cpu usage），属于cgroup的一个子系统
+......   
+**cgroup详情将会放在后面写k8s或者docker深入的文章里面**
+
 
 ## 虚拟化技术简要介绍
 - **定义**：虚拟化是在硬件与操作系统之间（或之上）加一层抽象，把一台物理机的计算/存储/网络资源切分、模拟成多台逻辑上独立的「机器」，让多个隔离的环境能共用同一套物理资源。
@@ -115,7 +133,7 @@ int main()
     /merged
   ```
 - **Overlay2（Docker 默认存储驱动）的层级结构**：相比早期 `overlay`（只支持单层 lower），`overlay2` 支持**多层 lowerdir 串联**，更贴合镜像「一层层叠出来」的模型：
-  - 镜像层：都是只读 `lowerdir`，按从底到顶顺序 `lower1:lower2:...:lowerN` 串联；
+  - 镜像层：都是只读 `lowerdir`，按从底到顶顺序 `lower1:lower2:...:lowerN` （导出的新镜像中原来的upperdir会成为lowerdir中的一个放在顶部）串联；
   - 容器层：在最上面加一个可读写 `upperdir`；
   - 修改文件时触发 **CoW（写时复制）**：先把 lower 里的文件复制到 upper，再改 upper 的副本，原只读层不受影响；
   - 删除文件时：`upperdir` 里建一个 `whiteout`（白障文件）遮盖下层同名文件，而非真删底层。
@@ -176,8 +194,8 @@ docker info
 #### pull与push
 完整镜像地址格式：镜像仓库网址/项目名/镜像名:标签  
 地址示例：  
-官方镜像：docker.io/library/nginx:latest  
-个人镜像：docker.io/phx3334(账号名)/nginx:v1.0  
+官方镜像：docker.io/library/nginx:(版本)   
+个人镜像：docker.io/phx3334(账号名)/nginx:(版本)    
 ```bash
 #从官方仓库拉取可省略网址docker.io
 docker pull docker.io/library/nginx:1.18
@@ -187,7 +205,7 @@ docker image rm -f <镜像名>:<标签>或 <ID>
 docker tag <本地镜像名>:<标签> <目标完整地址>
 docker tag nginx:1.18 docker.io/phx3334/nginx:v1.0
 #推送
-docker push docker.io/eganlin/nginx:v1.0
+docker push docker.io/phx3334/nginx:v1.0
 
 登录：docker login -u <用户> -p <密码> <仓库地址>
 登出：docker logout
@@ -221,45 +239,6 @@ docker cp <宿主机文件路径> <容器名>:<容器内路径>
 #将容器文件复制到宿主机
 docker cp <容器名>:<容器内路径> <宿主机文件路径>
 ```
-### 容器结构剖析
-`docker inspect` 揭示了容器在宿主机上的真实结构：容器本质上既是宿主机上的一个进程，也是宿主机上的一组目录挂载。以下从守护进程的职责、containerd 与 containerd-shim 的分工、以及 Overlay2 存储驱动三个层面进行剖析。
-
-#### 一、守护进程（dockerd）在整个结构中的作用
-
-Docker 守护进程 `dockerd` 是用户与容器运行时之间的总入口，它并不亲自创建容器，而是把请求转交给下层组件：
-
-- **接收并翻译指令**：`docker run`、`docker inspect` 等 CLI 命令经 daemon 接收，由 daemon 解析为对 `containerd` 的调用。
-- **管理镜像与网络**：镜像的拉取、构建、存储，以及网络、卷的创建与编排，均由 daemon 负责并交由对应子系统执行。
-- **不直接触碰运行时**：daemon 通过 gRPC 调用 `containerd`，再由 containerd 管理具体的容器生命周期，从而将"用户接口层"与"运行时实现层"解耦。
-
-完整调用链为：  
-```
-Docker Daemon (dockerd) → containerd → containerd-shim → runC → 容器进程
-```
-
-#### 二、containerd 与 containerd-shim
-- **containerd 的定位**：作为守护进程与运行时之间的中间层，containerd 负责镜像管理、容器生命周期编排，并通过拉起 `containerd-shim` 来实际创建容器。
-- **containerd-shim 的作用**：containerd 启动 shim 进程，由 shim 调用 runC（OCI 运行时）创建容器并初始化命名空间；runC 完成创建后即退出，容器的后续生命周期改由 shim 维持。这样即便 containerd 重启，已运行的容器也不受影响。
-- **shim 父进程为 1 的原因**：shim 通过类似 `setsid` 的机制脱离原父进程，直接被宿主机 init（PID 1）收养。目的是利用 init 回收僵尸进程的特性——shim 产生的僵尸由 init 统一回收，从而**解放 containerd**，避免其频繁调用 `waitpid`。
-
-#### 三、Overlay2 存储驱动与文件系统原理
-
-`docker inspect` 的 `GraphDriver` 字段揭示了容器文件系统的分层结构（基于联合挂载 UnionFS）：
-
-| 目录 | 含义 |
-|------|------|
-| `LowerDir` | 只读镜像层，内容可通过 `docker save` 导出解压验证一致 |
-| `UpperDir` | 可读写的容器层，存放运行期产生的修改 |
-| `WorkDir` | 联合挂载所需的临时工作目录 |
-| `MergedDir` | LowerDir + UpperDir 合并后的统一视图，即容器内看到的根 `/` |
-
-此外，`resolv.conf`、`hostname`、`hosts` 等网络配置文件由 Docker 动态生成并单独挂载到容器，位于宿主机 `/var/lib/docker/containers/[ID]/` 下。
-
-**宿主机直操作验证**：容器文件系统本质是宿主机目录的挂载。在宿主机的 `UpperDir` 或 `MergedDir` 中创建文件，容器内立即可见；容器内修改文件，实质写入宿主机 `UpperDir`。这意味着无需进入容器，即可通过 `docker inspect` 获取的 `GraphDriver` 路径直接在宿主机读写容器数据。
-
-**补充要点**：
-- `LowerDir` 是多容器共享的：同一镜像启动多个容器，只读层共用，只有 `UpperDir` 各自独立，这正是 Docker 镜像"分层复用、写时复制（CoW）"节省磁盘的原理。
-- 删除容器只会清掉其 `UpperDir` 与 `MergedDir`，`LowerDir`（镜像层）不受影响，除非显式删除镜像。
 
 ### dokcer数据迁移
 #### 前置
@@ -275,10 +254,10 @@ Docker默认数据目录位于 /var/lib/docker：
 #### 数据迁移操作
 `1`先停止容器`docker container stop <container_name>`，再停止docker`systemctl stop docker`  
 `2`新增一块大磁盘，建议采取LVM配置（支持动态扩容），磁盘经过格式化，分区等处理后，通过 blkid 获取UUID，编辑 /etc/fstab 添加挂载信息  
-`3`使用`cp -a /var/lib/docker /data/docker `将旧数据完整拷贝至新目录。
-`4`编辑 `/etc/docker/daemon.json`,指向新目录："data-root": "/data/docker"
-`5`最后重启docker和容器，执行 `docker info | grep "Root Dir"`，确认路径已变更为 /data/docker.通过 docker inspect 或查看文件系统挂载情况，确认镜像层和容器层数据已位于新目录下。若没有则手动umount.
-
+`3`使用`cp -a /var/lib/docker /data/docker `将旧数据完整拷贝至新目录。  
+`4`编辑 `/etc/docker/daemon.json`,指向新目录："data-root": "/data/docker"  
+`5`最后重启docker和容器，执行 `docker info | grep "Root Dir"`，确认路径已变更为 /data/docker.通过 docker inspect 或查看文件系统挂载情况，确认镜像层和容器层数据已位于新目录下。若没有则手动umount.  
+ 
 ### 数据卷挂载和docker commit
 #### 数据卷挂载
 容器启动后产生的新数据写在 Overlay2 的 `UpperDir`（可写层），该层随容器销毁而被清除。为持久化关键数据，需把宿主机目录（或 Docker 管理卷）关联到容器内的某个路径——容器向该路径写入的数据**直接落到宿主机**，容器删除后数据依然保留。    
@@ -292,13 +271,119 @@ docker run -p 8888:80 -d -v /test:/aaa --name test centos:7 tail -f /dev/null
 它与数据卷挂载的目的不同：  
 - **docker commit**：导出整个文件系统状态，包含不必要的初始镜像内容，无法只保存部分关键数据。
 - **数据卷挂载**：仅针对 `UpperDir` 中的部分关键数据做持久化，不导出整体文件系统。
-因此，commit 适合"定制镜像"，挂载卷适合"持久化数据"，二者不可互相替代。更高效的定制镜像方式是用 **Dockerfile** 编写构建流程，而非手动 commit 这种"笨方法"（下载基础镜像 → 安装修改 → commit）。
-
-### 容器运行时
+因此，commit 适合"定制镜像"，挂载卷适合"持久化数据"，二者不可互相替代。更高效的定制镜像方式是用 **Dockerfile** 编写构建流程，而非手动 commit 这种"笨方法"（下载基础镜像 → 安装修改 → commit）
 
 
+### 容器内网络
+本质：四种模式 = 容器网络命名空间与宿主机网络栈的不同组合方式。
+#### None模式
+- 容器拥有独立网络命名空间，但**只有回环接口 `lo`**，无 eth0、无 IP。
+- 无法访问外网，也无法被外部访问。
+- 适合：完全不需要网络的隔离任务（批处理、敏感计算）。
+- k8s中containerd创建 Pod 网络命名空间时就采用的None模式，后续CNI会填充这个网络名称空间，塞入veth，配ip等等
+#### Bridge模式（默认）
+- Docker 创建虚拟网桥（虚拟交换机） `docker0`，每个容器分配一对 veth 虚拟网卡：一端是容器内 `eth0`（分配 IP），另一端连上 `docker0`。
+- **容器间通信**：经 docker0 二层直接互访，速度快。
+- **访问外网**：经 iptables/nftables NAT把容器 IP 伪装成宿主机 IP。
+- **暴露服务**：`-p 8080:80` 用 DNAT 把宿主机端口转发到容器。
+- 优点：隔离好、可自定义网段；缺点：多一层转发，性能略低。
+- **补充**：
+  **veth 是什么**：veth pair = 一对连在一起的虚拟网卡，可看作一根"虚拟网线"，一端收的包必然从另一端出。Docker 为每个容器创建一对：宿主机侧叫 `veth+随机编号`（插在 docker0 上），容器侧叫 `eth0`。**同一根网线的两头，MAC 地址相同**。
+  ```bash
+  # 宿主机看 veth 接口
+  ip link                    # veth9a2b3c4d@if3  ← @if3 是容器侧 eth0 的编号
+  # 容器里找对端 veth 编号（sysfs，无需 ip 命令）
+  cat /sys/class/net/eth0/iflink   # 12345（宿主机上 veth 的接口编号）
+  # 宿主机按编号反查接口名
+  ip -o link | awk -F'[ :]+' '$2==12345{print $2}'   # veth9a2b3c4d
+  ```
+  **数据包传递过程**：
+  ```
+  ① 容器A访问容器B：A进程 → A的eth0 → 虚拟网线 → vethA → docker0查转发表 → vethB → 网线 → B的eth0 → B进程
+  ② 容器访问外网：容器 → eth0 → veth → docker0 → iptables NAT(MASQUERADE，源IP伪装成宿主机IP) → 物理网卡 → 外网
+  ③ 外部访问容器(-p 8080:80)：外部 → 宿主机:8080 → DNAT(目标改写成172.17.0.x:80) → docker0 → veth → eth0 → 容器
+  ```
+  **tcpdump 抓包位置选择**：
+  ```bash
+  # 容器内抓 eth0（NAT 前，原始目标地址）——但精简镜像常无 tcpdump
+  # 宿主机抓对应 veth（效果等同容器内，不用进容器）
+  VETH=$(ip -o link | awk -F'[ :]+' '$2==$(cat /sys/class/net/eth0/iflink){print $2}')
+  sudo tcpdump -i $VETH -nn
+  # 宿主机抓 docker0：看到所有容器间流量；In=容器发出的包，Out=发给容器的包
+  sudo tcpdump -i docker0 -nn
+  # 宿主机抓物理网卡：看到 NAT 后流量（源 IP 已是宿主机 IP）
+  sudo tcpdump -i eth0 -nn
+  ```
+  > 要点：NAT 前后源 IP 不同，想看清容器原始请求抓 veth/docker0，想确认外网链路抓物理网卡。
+#### container模式
+- 新容器与指定容器**共享同一个网络命名空间**：IP、MAC、端口完全一致。
+- 彼此通过 `localhost` 即可访问。
+- 适合：紧密协作的容器对（如 sidecar：日志采集、网络代理）。
+- 命令：`--network container:<容器名>`
+#### host模式
+- 容器**直接使用宿主机网络命名空间**：没有独立 IP，直接用宿主机 IP 和端口。
+- 优点：性能最好，无网桥/NAT 转发开销；缺点：端口易与宿主机冲突，隔离性最差。
+- 命令：`--network host`
 
 
+### dockerfile编写
+```Dockerfile
+ARG GO_VERSION=1.26
+ARG GOPROXY=https://goproxy.cn,direct
+ARG GOSUMDB=sum.golang.google.cn
+
+FROM golang:${GO_VERSION} AS builder
+ARG GOPROXY
+ARG GOSUMDB
+ENV GOPROXY=${GOPROXY} \
+  GOSUMDB=${GOSUMDB}
+
+WORKDIR /src/server
+
+COPY server/go.mod server/go.sum ./
+# target=/go/pkg/mod是容器内路径，挂载卷类型为缓存卷
+# 缓存卷保存在本地机器某一个文件路径下，这样除了第一次构建后，每次构建时都可以复用前一次下载在本地的缓存卷（将缓存卷挂载到容器内指定路径）
+RUN --mount=type=cache,target=/go/pkg/mod \
+  go mod download
+
+COPY server ./
+
+#禁止调用c语言接口，让镜像更小
+#-trimpath隐藏二进制文件中构建机器路径，(二进制文件中不止有机器码，还有字符串)，如/server/cmd/api。
+#-ldflags 是传给 Go 链接器的参数，-s 和 -w 是去掉两类调试信息，让镜像更小
+#go编译器就是把每一个go文件编译成机器码，然后go链接器，就把以main.go为中心，依次寻找每一个文件的引用，将它们都链接成一个可执行文件
+ENV CGO_ENABLED=0
+RUN --mount=type=cache,target=/go/pkg/mod \
+  --mount=type=cache,target=/root/.cache/go-build \  
+  #/out/api这种中间临时文件不手动删除，最终都是存留在构建机本地某处文件夹
+  go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+RUN --mount=type=cache,target=/go/pkg/mod \
+  --mount=type=cache,target=/root/.cache/go-build \
+  go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
+
+FROM alpine:3.21 AS base
+RUN apk add --no-cache ca-certificates tzdata
+WORKDIR /app
+RUN mkdir -p ./.run/uploads
+
+FROM base AS api
+COPY --from=builder /src/server/configs /app/configs
+COPY --from=builder /out/api /app/api
+ENTRYPOINT ["/app/api"]
+
+FROM base AS worker
+RUN apk add --no-cache ffmpeg
+COPY --from=builder /src/server/configs /app/configs
+COPY --from=builder /out/worker /app/worker
+ENTRYPOINT ["/app/worker"]
+```
+我们来看看这段dockerfile  
+- ARG是构建参数的关键字，每一个FROM后面都是一个新世界，需要重新声明一下变量。  
+- WORKDIR /src/server表示后续所有的操作都是在这个目录下进行
+- RUN是在临时容器内运行的命令，每次RUN结束后，临时容器就销毁。
+- 多次FROM即多阶段构建，这样可以大幅减少镜像体积，比如说构建go可执行文件需要下载go环境，但是构建完成后其实只需要可执行文件就行，多阶段构建只引用之前构建的有用的东西
+- “COPY --from=builder /src/server/configs /app/configs”实际上最终的镜像也只会保存/app/configs这一份文件，最终阶段前构建的文件都会自动删除
+- ENTRYPOINT ["/app/api"]表示用exec（shell的内置命令）的方式运行容器内的第一个进程，如果不采用[]形式，而是ENTRYPOINT /app/api那么会隐式地转交给shell解释器执行，第一个进程就是shell解释器。也可以ENTRYPOINT ["sh", "-c", "exec /app/api --port $PORT"]这样既可以用shell解释器能够执行的变量展开（比如$HOME），管道符，第一个进程又是/app/api。信号可以不经过shell解释器直达/app/api
 
 
 ## FAQ

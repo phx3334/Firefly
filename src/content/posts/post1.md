@@ -30,6 +30,8 @@ diff -u file1.txt file2.txt
 ```
 ### 1.2 文件操作
 ```bash
+#输入展示在屏幕的同时并覆盖文件内容，追加用-a
+echo $$ | sudo tee /sys/fs/cgroup/demo/cgroup.procs
 # 创建文件
 touch a.txt
 # 创建目录

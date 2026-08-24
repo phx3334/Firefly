@@ -76,6 +76,8 @@ nftables 是 Linux 内核的新一代**包过滤框架**，统一替代旧的 ip
 nft add table inet filter
 nft add chain inet filter input { type filter hook input priority 0;}
 nft add rule inet filter input tcp dport 22 accept
+#查看完整规则集，并不做DNS解析
+nft -n list ruleset
 ```
 ### 与 netfilter 的关系
 netfilter 是内核网络栈的**钩子框架**（五链检查点），nftables 是挂在其上的**规则引擎**（表达与执行规则）——它替代的是 iptables，不是 netfilter。  

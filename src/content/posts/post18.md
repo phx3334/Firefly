@@ -29,3 +29,5 @@ systemd 不是被 fork 出来的，而是内核"先复制、后换映像"变出�
 - 复制：内核从 idle（编译期静态定义 init_task，非创建）（PID 0）复制出内核线程 kernel_init（PID 1）
 - 换映像：kernel_init 执行 execve("/sbin/init")，程序映像替换成 systemd，PID 不变（仍为 1）
 ### uint介绍
+
+
