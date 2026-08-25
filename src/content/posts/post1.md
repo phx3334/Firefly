@@ -161,33 +161,30 @@ ip route add 3.3.3.0/24 via 2.2.2.2 dev ens33
 ip route add default via 2.2.2.2 dev ens33
 # 删除路由（参数与 add 一致）
 ip route del 3.3.3.0/24 via 2.2.2.2 dev ens33
-# 加载配置并启动网卡
-nmcli con up ens33
-#关闭网卡
-nmcli con down ens33
+# netplan 是 Ubuntu 18.04+ 的默认网络配置工具（yaml 配置，对应旧版的 NetworkManager/nmcli）
+#打开/启动所有配置里的网卡
+netplan apply
 # 查看所有网络设备的状态
-nmcli device status
-# 查看所有网络连接（包括未激活的）
-nmcli connection show
-# 查看当前活动的连接
-nmcli connection show --active
-# 查看连接
-nmcli con show
-#查看ens33具体连接的配置信息
-nmcli con show ens33
+netplan status
+# 查看所有网络连接配置
+netplan get
+# 查看 ens33 具体连接的配置信息
+netplan get ethernets.ens33
 # 修改为 DHCP
-nmcli con mod ens33 ipv4.method auto
-# 修改为static
-nmcli con mod ens33 ipv4.method manual
-# 修改ip
-nmcli con mod ens33 ipv4.addresses 192.168.1.100/24
+sudo netplan set ethernets.ens33.dhcp4=true
+# 修改为 static
+sudo netplan set ethernets.ens33.dhcp4=false
+# 修改 ip
+sudo netplan set 'ethernets.ens33.addresses=[192.168.1.100/24]'
 # 修改网关
-nmcli con mod ens33 ipv4.gateway 192.168.1.1
+sudo netplan set ethernets.ens33.routes.default.via=192.168.1.1
 # 修改 DNS
-nmcli con mod ens33 ipv4.dns "8.8.8.8 114.114.114.114"
+sudo netplan set 'ethernets.ens33.nameservers.addresses=[8.8.8.8, 114.114.114.114]'
+# 应用配置使其生效
+sudo netplan apply
 # -t 仅TCP -u 仅UDP -l 仅监听端口 -p 显示进程 -n 不解析域名直接显示 IP 和端口号（更快）
 ss -tulpn
-# 给网卡 ens33 临时添加一个 IPv4 地址（/24 表示子网掩码 255.255.255.0）
+# 给网卡 ens33 临时添加一个 IPv4 地址
 ip addr add 192.168.1.100/24 dev ens33
 # 删除网卡 ens33 上指定的 IP 地址（参数与 add 完全一致）
 ip addr del 192.168.1.100/24 dev ens33
@@ -275,7 +272,7 @@ wget https://example.com/file.tar.gz
 /etc/passwd
 # 组配置文件
 /etc/group
-# 用户密码配置文件
+# 用户密码配置文件（显示加密后的密码）
 /etc/shadow
 # 组密码配置文件
 /etc/gshadow
@@ -330,7 +327,11 @@ sources.list           → 配置仓库地址
 ```
 ### 2.5网络相关配置文件
 ```bash
-#临时全局路由转发（所有网卡）
+# netplan 配置目录（Ubuntu 18.04+ 默认网络配置，替代 /etc/network/interfaces，01-xxx 数字小的先合并，后读的覆盖先读的）
+/etc/netplan/*.yaml
+# 网卡配置文件（旧版 Debian/Ubuntu，被 netplan 取代）
+/etc/network/interfaces
+# 临时全局路由转发（所有网卡）
 echo 1 > /proc/sys/net/ipv4/ip_forward
 #只开启 eth1 的转发
 echo 1 > /proc/sys/net/ipv4/conf/eth1/forwarding

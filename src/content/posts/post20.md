@@ -172,6 +172,7 @@ k8s中有几十种Controller，这里简单罗列一些Controller
 | **ResourceQuota Controller**（资源配额控制器） | 确保指定的资源对象在任何时候都不会超量占用系统物理资源 |
 | **Namespace Controller**（命名空间控制器） | 管理 Namespace 的生命周期 |
 | **Service Controller**（服务控制器） | 属于 K8s 集群与外部的云平台之间的一个接口控制器 |
+**控制器进程**都只存在于主节点
 #### 客户端工具
 kubctl这个客户端程序的调用操作都是过kube-apiserver提供的HTTP Restful API接口进行。
 

@@ -11,65 +11,65 @@ lang: '中文'
 
 ## 防火墙的定位
 防火墙本质是一道「访问控制」屏障，工作在网络边界或主机边界，依据预设规则对流量做**过滤、转发、NAT**。按工作层次可分为：  
-`1`包过滤（网络层 / 传输层）：基于源 / 目的 IP、端口、协议判断放行或丢弃，Linux 的 netfilter/iptables/firewalld 主要做这一层。    
+`1`包过滤（网络层 / 传输层）：基于源 / 目的 IP、端口、协议判断放行或丢弃，Linux 的 netfilter/iptables/nftables 及其前端工具 ufw 主要做这一层。    
 `2`状态检测：跟踪连接状态，只放行属于已建立合法连接的数据包，而非孤立地看每个包。    
 `3`应用层代理 / WAF：理解应用协议内容（如 HTTP、SQL），做更细的语义级防护。  
 核心作用：隔离内外网、收敛暴露面、阻断非法访问、审计与告警。实际部署中，它通常和网络中的**软件防火墙（主机侧）**与**硬件防火墙（边界设备）**分层配合。
 
-## firewalld 简单操作
-firewalld 是 Linux 上 iptables（老版）/nftables 的「前端」：用 zone（区域）+ service（服务）的概念把规则管理变简单，底层默认交给 nftables 执行。常用命令如下：
+## ufw 简单操作
+ufw 是 Ubuntu 上 iptables（老版）/nftables 的「前端」：用 allow/deny 的简单命令把规则管理变简单，底层生成 iptables 语法规则，再通过 iptables-nft 兼容层交给 nftables 执行。常用命令如下：
 ```bash
 # 启动并设为开机自启
-systemctl start firewalld
-systemctl enable firewalld
+sudo systemctl enable --now ufw
+
+# 开启防火墙（⚠️ 先放行 SSH 再 enable，避免把自己锁在外面）
+sudo ufw allow ssh
+sudo ufw enable
 
 # 查看状态
-firewall-cmd --state
-firewall-cmd --list-all              # 列出默认 zone 的全部规则
-firewall-cmd --zone=public --list-all
+sudo ufw status                    # 状态 + 规则列表
+sudo ufw status verbose            # 详细模式（含默认策略）
+sudo ufw status numbered           # 带编号显示，便于按编号删除规则
 
-# 放行服务（--permanent 表示写入永久配置，否则重启失效）
-firewall-cmd --zone=public --add-service=http --permanent
-firewall-cmd --zone=public --add-service=https --permanent
+# 放行服务（ufw 支持常见服务名）
+sudo ufw allow http
+sudo ufw allow https
 
 # 放行端口
-firewall-cmd --zone=public --add-port=8080/tcp --permanent
-firewall-cmd --zone=public --add-port=53/udp --permanent
+sudo ufw allow 8080/tcp
+sudo ufw allow 53/udp
 
 # 移除 / 查询
-firewall-cmd --zone=public --remove-service=http --permanent
-firewall-cmd --zone=public --query-port=8080/tcp
+sudo ufw delete allow http         # 移除放行 http
+sudo ufw status | grep 8080        # 查询 8080 是否放行
 
-# 修改后必须 reload 才能生效（永久配置需 reload 应用）
-firewall-cmd --reload
-
-# 设置默认 zone 与网卡绑定
-firewall-cmd --set-default-zone=public
-firewall-cmd --zone=public --change-interface=eth0 --permanent
+# 默认策略（ufw 没有 zone，用默认策略表达整体信任等级）
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+# ufw 规则即时生效、默认永久保存，无需 reload
 ```
-### zone（区域）+ service（服务）的设计
-**zone＝「信任等级」的抽象**：按可信度把来源分组，每张网卡同一时刻只属于一个 zone（默认 `public`），各 zone 独立维护放行规则。常见区域：
-| zone | 信任度 | 典型用途 |
+### 默认策略 + 规则列表的设计
+**ufw 没有 zone，核心是「默认策略（default policy）+ 规则列表」**：用默认策略定义整体信任等级，再用一条条 allow/deny 规则放行具体端口。模型比 firewalld 的 zone 更简单直观。
+| ufw 概念 | 含义 | 典型用途 |
 | --- | --- | --- |
-| `trusted` | 最高 | 内网 / 管理网，全部放行 |
-| `internal` / `home` | 高 | 办公网 / 家庭网 |
-| `public`（默认） | 低 | 公网，仅放行显式声明的服务 |
-| `drop` / `block` | 无 | 直接丢弃 / 拒绝 |
-**service＝「端口 + 协议」的命名**：如 `http`=80/tcp、`https`=443/tcp、`ssh`=22/tcp，用名字代替裸端口，语义清晰、可复用；自定义服务写到 `/etc/firewalld/services/`。
-一句话：**zone 决定「谁」能进（来源），service 决定「什么」能进（业务）**，二者组合即表达"对哪张网卡放行哪些服务"，把规则从"面向数据包"升级为"面向业务"，易读也易维护。
-**举例**：一台 Web 服务器，内网网卡 `eth1` 绑定 `trusted`（全放行），公网网卡 `eth0` 绑定 `public`（只开 Web 服务）：
+| `default deny incoming` | 入站默认拒绝 | 服务器：默认不开放，只放行显式声明的端口 |
+| `default allow outgoing` | 出站默认放行 | 服务器：主动对外访问不受限 |
+| `allow 服务/端口` | 放行具体业务 | 如 `allow 8080/tcp`、`allow http` |
+**service＝「端口 + 协议」的命名**：ufw 直接支持 `/etc/services` 里的服务名，如 `http`=80/tcp、`https`=443/tcp、`ssh`=22/tcp，用名字代替裸端口，语义清晰、可复用；自定义端口直接写数字即可。
+一句话：**默认策略决定「整体信不信任」，allow/deny 规则决定「具体放行谁」**，把规则从"面向数据包"升级为"面向业务"，易读也易维护。
+**举例**：一台 Web 服务器，内网网卡 `eth1`（全放行），公网网卡 `eth0`（只开 Web 服务）：
 ```bash
-firewall-cmd --zone=trusted --add-interface=eth1 --permanent   # 内网：信任度高，默认全放行
-firewall-cmd --zone=public  --add-interface=eth0 --permanent   # 公网：只放行声明的服务
-firewall-cmd --zone=public  --add-service=http  --permanent
-firewall-cmd --zone=public  --add-service=https --permanent
-firewall-cmd --reload
+sudo ufw default deny incoming                   # 整体默认拒绝入站
+sudo ufw allow in on eth1                        # 内网网卡：信任度高，全放行
+sudo ufw allow in on eth0 to any port http       # 公网网卡：只放行 80
+sudo ufw allow in on eth0 to any port https      # 公网网卡：只放行 443
+sudo ufw enable
 ```
 效果：内网访问不受限；公网仅放行 80/443，其余一律丢弃。
 
 
 ## nftables
-nftables 是 Linux 内核的新一代**包过滤框架**，统一替代旧的 iptables / ip6tables / arptables / ebtables 四套工具。firewalld 的 zone/service 意图最终就是翻译成 nftables 规则下发。  
+nftables 是 Linux 内核的新一代**包过滤框架**，统一替代旧的 iptables / ip6tables / arptables / ebtables 四套工具。ufw 的 allow/deny 意图最终就是翻译成 iptables/nftables 规则下发。  
 核心概念只有三个：**表（table）**= 命名空间、**链（chain）**= 挂到钩子上的时机、**规则（rule）**= `条件 动作`。  
 ```bash
 # 建表 → 建链挂到 input 钩子 → 加规则
@@ -82,7 +82,7 @@ nft -n list ruleset
 ### 与 netfilter 的关系
 netfilter 是内核网络栈的**钩子框架**（五链检查点），nftables 是挂在其上的**规则引擎**（表达与执行规则）——它替代的是 iptables，不是 netfilter。  
 ```text
-用户配置（firewalld / nft 命令）
+用户配置（ufw / nft 命令）
    ↓ 翻译
 nftables 规则集（表 + 链 + 规则）
    ↓ 挂载
@@ -118,7 +118,7 @@ flowchart TD
 
 
 ## 为什么一般很少手动加防火墙规则
-实际生产里，业务服务器上**很少人去堆 iptables/firewalld 规则**，核心原因是「代价」：  
+实际生产里，业务服务器上**很少人去堆 iptables/ufw 规则**，核心原因是「代价」：  
 `1`规则过多会严重拉低转发速率：软件防火墙是**逐条匹配**的，每个数据包都要从头遍历规则链。规则越膨胀，单包处理的 CPU 开销越大，单位时间能转发的包数（pps）明显下降，直接拖累业务吞吐。  
 `2`复杂度骤升、难维护：规则一多，增删改查都容易出错，排障时很难看清到底哪条在生效，一旦配错还可能把自己挡在门外（连 SSH 都上不去）。    
 `3`因此主机侧只留「最小必要规则」：通常只开放必要端口、限制管理来源 IP，保持链短而精，把匹配开销压到最低。  
