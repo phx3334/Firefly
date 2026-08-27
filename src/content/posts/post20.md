@@ -294,4 +294,33 @@ List-watch还具有高性能的特点，
 而watch作为异步消息通知机制，复用一条长链接,保证实时性的同时也保证了性能。  
 
 
+## 补充
+### ReplicaSet 在哪一层
+Deployment、ReplicaSet、Pod 是三层套娃的关系：
+```text
+Deployment（最外层，你 apply 操作的对象）
+    ↓ 管理
+ReplicaSet（中间层，真正管副本数量的控制器）
+    ↓ 管理
+Pod（最底层，实际跑容器）
+```
+- 你 apply 的 Deployment → 控制器创建 ReplicaSet → ReplicaSet 保证 Pod 始终有 `replicas: 3` 个
+- 每次改 Deployment 的 spec（如换镜像）都会**新建一个 ReplicaSet**，滚动升级就是新旧 RS 交替扩缩容，回滚就是让控制器把 Pod 指回旧 RS
+- ReplicaSet 一般不直接写 yaml 使用，它没有滚动更新/回滚能力，所以被 Deployment 包一层间接管理
+- 一句话：**Deployment 管发布，ReplicaSet 管副本，Pod 跑业务**
+
+### 控制器是不是都在主节点
+- 是的。所有内置控制器（Deployment、ReplicaSet、Node、Namespace、Endpoint 等几十种）都集中在 **kube-controller-manager 一个进程**里并发跑，并不是"每类控制器一个进程"
+- 主节点上的控制平面组件：kube-apiserver、kube-controller-manager、kube-scheduler、etcd，生产环境以静态 Pod 形式运行在主节点上
+- 工作节点上跑的是 kubelet、kube-proxy、容器引擎；kubelet 才是真正"动手"的，控制器的命令最终都落到各节点的 kubelet 上执行（拉镜像、起容器、上报状态）
+### controller-manager 管调谐，scheduler 管调度
+容易混淆的点：**controller-manager 不负责调度**，调度是独立的 kube-scheduler 组件干的。
+```text
+kube-controller-manager  → 调谐（Reconcile）：副本够不够、滚动更新、回滚
+kube-scheduler           → 调度（Schedule）：新 Pod 放哪个节点
+```
+对应前面的 POD 创建流程：controller-manager 生成"创建 Pod"的事件 → scheduler 选好节点 → 节点上的 kubelet 创建容器。两者分工不同、缺一不可。
+
+
+
 **更深层次剖析请看https://bbs.huaweicloud.com/blogs/334436**
