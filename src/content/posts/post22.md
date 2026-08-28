@@ -316,7 +316,7 @@ resources:
         memory:"3Gi"#声明需要3G内存
     limits:
         memory:"4Gi"#声明最大4G内存
-[root@master01~]#kubectlapply-fweb.yaml
+[root@master01~]#kubectl apply -f web.yaml
 查看Pod，发现Pod一直在挂起状态中
 这是为什么？因为我声明的需要3G内存，而我的虚拟机最多就2G内存，所以资源不满足，影响了Pod调度，更多详细内容请参考官方文档：Pod和容
 器的资源请求和约束
@@ -324,14 +324,15 @@ resources:
 #### 2、节点标签选择器
 ```yaml
 为node02上打标签,就是键值对，随便起名字
-kubectl label node10.1.1.104 xxx=yyy
+kubectl label node 10.1.1.104 xxx=yyy
 
 
 然后在web.yaml中新增nodeSelector声明
-[root@master01~]#catweb.yaml
+[root@master01~]#cat web.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+ # 创建时间，null = 占位，apply 时系统自动填
   creationTimestamp: null
   labels:
     app: web
@@ -377,37 +378,68 @@ spec:
       - name: nginx
         image: nginx:1.7.9
         ports:
-        - containerPort: 80
-          name: nginxweb
+        - containerPort: 80       # 容器内进程监听的端口
+          name: nginxweb       # 给这个端口起的名字
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:  # 硬策略
             nodeSelectorTerms:
             - matchExpressions:
-              - key: kubernetes.io/hostname
+              - key: kubernetes.io/hostname     #kubernetes.io/hostname 是 K8s 自动给每个节点打的标签，值就是节点名
                 operator: NotIn
                 values:
                 - xxx-node3
           preferredDuringSchedulingIgnoredDuringExecution:  # 软策略
-          - weight: 1
+          - weight: 1   #1-100
             preference:
               matchExpressions:
               - key: com
                 operator: In
                 values:
                 - yyy-zzz-mmm
-
-[root@master01~]#
-上面的亲和性表示如下含义
-requiredDuringSchedulingIgnoredDuringExecution：硬亲和，test123_env等于dev或者test，必须满足
-preferreDuringSchedulingIgnoredDuringExecution：软亲和，group等于ttttest，非必须满足
-K8S搞这么多策略有啥用呢？又是节点污点、节点标签、Pod调度策略之类的，目的当然是提供最大的灵活性，最终提高整体资源利用率，这就是自动
-装箱
-此外强调：
-preferredDuringSchedulingIgnoredDuringExecution和requiredDuringSchedulingIgnoredDuringExecution名字中后半段字符串
-IgnoredDuringExecution表示的是，在Pod资源基于节点亲和性规则调度到某个节点之后，如果节点的标签发生了改变，调度器不会讲Pod对象从
-该节点上移除，因为该规则仅对新建会更新Pod有效。
 ```
+- **required（硬）**：条件不满足 → 根本不调度，Pod 一直 Pending
+- **preferred（软）**：条件不满足也能调度，`weight` 越大优先级越高（多个候选节点里挑权重高的）
+操作符表达式（`matchExpressions` 里的 `operator`）：
+| operator | 含义 | 需要 values 吗 |
+|---|---|---|
+| `In` | 键的值在给定列表里 | 要 |
+| `NotIn` | 键的值不在列表里 | 要 |
+| `Exists` | 键存在（值无所谓） | 不要 |
+| `DoesNotExist` | 键不存在 | 不要 |
+| `Gt` | 值大于（数值比较） | 要 |
+| `Lt` | 值小于（数值比较） | 要 |
+组合逻辑：
+- `nodeSelectorTerms` 里多个 term 之间是 **或（OR）**：满足任意一个即可
+- 单个 term 里多个 `matchExpressions` 是 **且（AND）**：必须全部满足
+**IgnoredDuringExecution（名字后半段）** 的含义：规则只在**调度那一刻**生效。Pod 已经调度到某节点后，如果该节点标签后来变了（比如 `xxx` 标签被删了），**已运行的 Pod 不会被移走**——规则只对新建/更新的 Pod 有效。所以完整意思是"调度时强制/优先满足，运行期忽略"。
+为什么搞这么多策略（污点、节点标签、亲和性、反亲和性）？一推一拉组合出各种调度需求，让 Pod 尽量"塞"进合适的节点，**提高整体资源利用率**——这就是"自动装箱（bin packing）"。
+**按pod标签进行调度**：  
+场景：缓存 Pod 要跟业务 Pod 放同一台机器，减少网络延迟。  
+```yaml
+spec:
+  affinity:
+    podAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:            # 找"目标 Pod"：app=cache 的
+          matchLabels:
+            app: cache
+        topologyKey: kubernetes.io/hostname   # 范围：同一台节点
+
+```
+意思：这个 Pod 必须调度到"已经跑着 app=cache Pod"的节点上。  
+场景：高可用——副本别挤一台机器，一台挂了全挂。
+```yaml
+spec:
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: web
+        topologyKey: kubernetes.io/hostname
+```
+意思：这个 Pod 不能跟任何 app=web 的 Pod 在同一台节点上。   
 
 ### Secret和配置管理
 secret在K8S中表示一个存储在etcd中的配置，通常用Base64编码，此配置可以通过挂载卷或者环境变量的方式供Pod访问   
@@ -738,8 +770,8 @@ spec:
     app: web
   ports:
   - port: 80         # Service 对外端口
-    targetPort: 80   # 后端 Pod 的端口
-  type: ClusterIP    # 默认类型
+    targetPort: 8080   # 后端 Pod 的端口
+  type: ClusterIP    # 默认类型，一个虚拟ip，集群内任意一个节点都可以访问
 ```
 ```bash
 # apply 部署（声明式，重复执行不会报错）
@@ -796,13 +828,10 @@ pod-a (前端) ──请求 web:80──> Service web (ClusterIP 10.96.0.5)
 |------|------|------|
 | iptables（默认） | 用 iptables 规则转发 | 简单可靠，性能一般 |
 | ipvs | 用内核 IPVS 模块 | 性能好、支持多种负载均衡算法（rr/wrr/lc 等），大集群推荐 |
-| userspace（已废弃） | 用户态代理 | 老古董，性能最差 |
 #### 细节知识
 - **DNS 服务发现**：集群内置 CoreDNS，任何 Service 自动获得 `服务名.命名空间.svc.cluster.local` 域名，同命名空间内直接用服务名即可
 - **Endpoints**：Service 通过 Endpoints 对象记录"当前有哪些后端 Pod IP"。`kubectl get endpoints web` 可查看
 - **无头服务（Headless Service）**：`clusterIP: None` 的 Service 不分配 ClusterIP，DNS 直接返回所有 Pod IP，配合 StatefulSet 给每个 Pod 一个稳定域名（如 `pod名.服务名`）
-- **端口命名**：如果 Service 要绑定多个端口，端口必须命名，否则 Kubernetes 1.20+ 会拒绝创建
-- **selector 匹配不上**：如果后端 Pod 标签对不上，Service 的 Endpoints 为空，访问会失败——`kubectl describe svc web` 的 Endpoints 列为空即是此问题
 
 
 ### 自我修复
@@ -816,7 +845,7 @@ pod-a (前端) ──请求 web:80──> Service web (ClusterIP 10.96.0.5)
 重启策略主要分为以下三种
 - Always：当容器终止退出后，总是重启容器，默认策略（spec.restartPolicy: Always）
 - OnFailure：当容器异常退出（退出状态码非0）时，才重启
-- Never：当容器终止退出，从不重启容器
+- Never：当容器终止退出，从不重启容器  
 | 对比维度 | restartPolicy: Always（重启策略） | Deployment 控制器（副本维护） |
 | --- | --- | --- |
 | 作用对象 | Pod 内部的容器 | 整个 Pod |
@@ -831,7 +860,6 @@ pod-a (前端) ──请求 web:80──> Service web (ClusterIP 10.96.0.5)
 这就需要从应用层面来检查，K8S中定义了两种检查机制  
 - livenessProbe：存活检查，如果检查失败，将杀死容器，根据Pod的restartPolicy来操作
 - readinessProbe：就绪检查，如果检查失败，Kubernetes会把Pod从Service endpoints中剔除，也就是让客户流量不打到
-- readinessProbe检查失败的Pod上
 具体的检查方式支持三种  
 - http Get：发送HTTP请求，返回200 - 400范围状态码为成功
 - exec：执行Shell命令返回状态码是0为成功
@@ -1039,7 +1067,7 @@ kind: Deployment
 metadata:
   labels:
     app: web
-  name: web
+  name: web01
 spec:
   replicas: 3
   selector:
@@ -1054,24 +1082,11 @@ spec:
       - image: nginx:1.14
         name: nginx
 ```
-| 字段 | 详细解释 | 举例 / 实战说明 |
-| --- | --- | --- |
-| `apiVersion` | API 版本号，告诉 K8s"我要创建哪种资源、按哪套规则校验"。格式是 `组/版本`；属于核心组（core）的资源（如 Service、Pod）省略组名，直接写 `v1`。Deployment 属于 apps 组，稳定版是 `apps/v1`，字段结构和校验规则都随版本走 | 写错版本 `kubectl apply` 直接报错|
-| `metadata` | 资源的"身份证"。核心两个子字段：`name`（资源名，集群内唯一，后续所有命令都靠它引用）和 `labels`（标签，键值对，供 Selector 按标签批量找资源） | 同名 apply 是更新、换名是新建；`kubectl get all -l app=web` 按标签筛选出一批资源 |
-| `selector` | Deployment 的"认领凭证"：`matchLabels` 声明"我只管理带 `app: web` 标签的 Pod"。它和 `template` 里的标签必须配对——template 决定"造出来的 Pod 贴什么标签"，selector 决定"我管带什么标签的 Pod" | 两者不一致 apply 直接校验失败；只改 selector 不改 template，Deployment 会认为旧 Pod 不属于自己，可能全部删掉重建 |
-| `template` | Pod 模板，也就是 Deployment 造 Pod 用的"图纸"。里面的 `metadata` / `spec` 会原样拷贝给每个新 Pod（Pod 名字、IP 由系统自动生成，模板里的标签、容器、镜像等则由你定义） | 改镜像、加环境变量、加健康检查探针，全改这里；改完触发一次滚动更新 |
-| `containers` | `template.spec.containers`：一个 Pod 内的容器列表，至少 1 个、可以多个（主进程 + sidecar）。每个容器至少要写 `name`（容器名，Pod 内唯一）和 `image`（镜像，`仓库:标签`） | 多容器时用 `kubectl exec <pod> -c <容器名>` 进入指定容器；升级/回滚本质就是改 `image` 后 apply 或用 `kubectl set image` |
+- metadata.name是该deployment资源的名字
+- metadata.labels.app是deployment资源所属组的名字
+- spec.selector.matchLabels.app是认领条件，表示deployment控制器只管理app=web的pod
+- spec.template.metadata.labels.app是每个pod身上的标签。
 
-两个最关键的"对应关系"（这个 yaml 的骨架逻辑）：
-```
-selector.matchLabels.app: web      ←── 选 Pod 用
-template.metadata.labels.app: web ←── 造 Pod 时贴的标签
-（两者必须一致，Deployment 才能"按标签找到自己造的 Pod"）
-
-template 里的标签 app: web          ←── 也是 Service 转发流量的依据
-Service.selector.app: web   →  只转发给贴了 app=web 标签的 Pod
-```
-一个容易踩的坑：如果 `template` 里的标签和 `selector.matchLabels` 不一致，apply 会直接报错；如果只改 `selector` 而不改 template，Deployment 会认为 Pod 全"不属于自己"，可能把新 Pod 全删了重建。所以这两个字段要一起动。
 ### 调谐与调度
 调谐（Reconcile）和调度（Schedule）是两件不同的事：
 - 调谐：由各类控制器（Deployment 控制器、ReplicaSet 控制器等）负责。控制器不断对比"期望状态 spec"和"实际状态 status"，发现不一致就驱动系统向 spec 收敛。比如前面讲的：副本数预期 3 个，某个 Pod 挂了，控制器发现实际比期望少 1 个，就重新创建一个补齐。
@@ -1084,3 +1099,126 @@ Service.selector.app: web   →  只转发给贴了 app=web 标签的 Pod
 - 调谐循环：控制器读 spec → 对比 status → 执行动作（创建/删除/更新）→ 更新 status → 再来一遍，直到 status 与 spec 一致。
 - 看 `kubectl get deployment` 的 DESIRED / CURRENT / READY 三列：DESIRED 来自 `spec.replicas`，CURRENT 和 READY 来自 `status` 里的 `replicas`、`readyReplicas`。
 - 想看填充后的 status：`kubectl get deployment web -o yaml`，最下面的 `status:` 段就是控制器写好的实际状态。
+
+### cpu亲和性和pod调度亲和性
+两者名字像，但完全是两码事：
+| | CPU 亲和性 | Pod 调度亲和性 |
+|---|---|---|
+| 绑定对象 | **CPU 核** | **节点 / 其它 Pod** |
+| 解决什么 | 性能稳定（缓存命中、减少切换） | 调度位置（Pod 放哪台机器） |
+| 谁实现 | 节点上的 **kubelet**（CPU Manager） | 集群的 **kube-scheduler** |
+| YAML 写在 | 容器 `resources`（间接触发） | Pod `spec.affinity` / `nodeSelector` |
+| Linux 对应 | `taskset` | 无（纯 K8s 概念） |
+
+##### CPU 亲和性
+把容器"绑死"在固定的 CPU 核上跑，不来回跳，换来缓存命中率高、性能稳定。
+K8s 用 CPU Manager 的 `static` 策略实现，触发条件：**Guaranteed QoS（requests == limits）+ CPU 请求是整数**：
+```yaml
+spec:
+  containers:
+  - name: app
+    resources:
+      requests:
+        cpu: "2"        # 整数 CPU，且 requests==limits → 独占 2 个核
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+```
+Linux 上的 CPU 亲和性命令（`taskset`）：
+```bash
+nproc                     # 看机器有几个 CPU 核
+taskset -p <pid>          # 查看某个进程当前绑定在哪些核
+taskset -pc 0-3 <pid>     # 把已有进程绑定到核 0-3
+taskset -c 0-3 <命令>     # 启动命令时直接绑定核 0-3
+```
+
+##### Pod 调度亲和性
+决定"新 Pod 调度到哪台节点"，比 CPU 亲和性更常见：
+- `nodeSelector`：最简单，指定节点标签
+```yaml
+spec:
+  nodeSelector:
+    disktype: ssd        # 只调度到带 disktype=ssd 标签的节点
+```
+- `nodeAffinity`：更灵活，required（必须）/ preferred（倾向）
+```yaml
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: disktype
+            operator: In
+            values:
+            - ssd
+```
+- `nodeAffinity` 完整示例（硬亲和 + 软亲和组合）：
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-affinity
+  labels:
+    app: node-affinity
+spec:
+  replicas: 8
+  selector:
+    matchLabels:
+      app: node-affinity
+  template:
+    metadata:
+      labels:
+        app: node-affinity
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.7.9
+        ports:
+        - containerPort: 80
+          name: nginxweb
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:   # 硬策略：必须满足，不满足就不调度
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - xxx-node3           # 意思：不要调度到 xxx-node3 这台节点
+          preferredDuringSchedulingIgnoredDuringExecution:  # 软策略：尽量满足，不满足也能调度
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: com
+                operator: In
+                values:
+                - yyy-zzz-mmm         # 意思：优先调度到带 com=yyy-zzz-mmm 标签的节点
+```
+硬/软的区别：
+- **required（硬）**：条件不满足 → 根本不调度，Pod 一直 Pending
+- **preferred（软）**：条件不满足也能调度，`weight` 越大优先级越高（多个候选节点里挑权重高的）
+
+操作符表达式（`matchExpressions` 里的 `operator`）：
+| operator | 含义 | 需要 values 吗 |
+|---|---|---|
+| `In` | 键的值在给定列表里 | 要 |
+| `NotIn` | 键的值不在列表里 | 要 |
+| `Exists` | 键存在（值无所谓） | 不要 |
+| `DoesNotExist` | 键不存在 | 不要 |
+| `Gt` | 值大于（数值比较） | 要 |
+| `Lt` | 值小于（数值比较） | 要 |
+
+组合逻辑：
+- `nodeSelectorTerms` 里多个 term 之间是 **或（OR）**：满足任意一个即可
+- 单个 term 里多个 `matchExpressions` 是 **且（AND）**：必须全部满足
+
+**IgnoredDuringExecution（名字后半段）** 的含义：规则只在**调度那一刻**生效。Pod 已经调度到某节点后，如果该节点标签后来变了（比如 `xxx` 标签被删了），**已运行的 Pod 不会被移走**——规则只对新建/更新的 Pod 有效。所以完整意思是"调度时强制/优先满足，运行期忽略"。
+
+为什么搞这么多策略（污点、节点标签、亲和性、反亲和性）？一推一拉组合出各种调度需求，让 Pod 尽量"塞"进合适的节点，**提高整体资源利用率**——这就是"自动装箱（bin packing）"。
+- `podAffinity` / `podAntiAffinity`：和**其它 Pod** 绑在一起 / 避开（同节点/异节点）
+
+一句话区分：**CPU 亲和性管"上了机器后绑定哪几个核"，Pod 调度亲和性管"把 Pod 放到哪台机器"。**
+
+
