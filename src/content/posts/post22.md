@@ -177,9 +177,9 @@ kubectl scale deployment nginx --replicas=0
 #改镜像版本、加配置。这个和上面那个改的都是etcd里面存的yaml文件，本地yaml文件不变，再次apply -f可以重置
 kubectl edit deployment nginx
 #删除
-kubectl delete deloyment xxx
+kubectl delete deployment xxx
 #按配置文件删
-kubectl delete -f1.yaml
+kubectl delete -f 1.yaml
 #看资源上都打了什么标签
 kubectl get pods --show-labels
 #按标签删。
@@ -197,7 +197,7 @@ kubectl cp egon.txt web-77887cf499-4spwp:/tmp -c c2
 - 创建一个可执行文件，文件名必须以kubectl-开头（例如kubectl-hello），该文件就是kubectl的插件文件名kubectl-hello，注意必须以kubectl-开头必须添加可执行权限
 - 将插件放到$PATH下，例如/usr/local/bin
 - 然后就可以执行kubectl来运行自定义插件了`kubectl hello`
-想删除插件的话直接删就行`rm-rf/usr/local/bin/kubectl-hello`
+想删除插件的话直接删就行`rm -rf /usr/local/bin/kubectl-hello`
 
 
 ### 创建与删除资源
@@ -250,25 +250,21 @@ vim /etc/kubernetes/manifests/kube-apiserver.yaml   # 保存后 kubelet 自动�
 
 ```bash
 kubectl get nodes
+# 输出示例：
+# NAME            STATUS   ROLES           AGE     VERSION
+# k8s-master-01   Ready    control-plane   6h25m   v1.30.3
+# k8s-node-01     Ready    <none>          6h24m   v1.30.3
+# k8s-node-02     Ready    <none>          6h24m   v1.30.3
 
-| NAME | STATUS | ROLES | AGE | VERSION |
-|------|--------|-------|-----|---------|
-| k8s-master-01 | Ready | control-plane | 6h25m | v1.30.3 |
-| k8s-node-01 | Ready | <none> | 6h24m | v1.30.3 |
-| k8s-node-02 | Ready | <none> | 6h24m | v1.30.3 |
-
-### 查看节点污点
-
+# 查看节点污点
 kubectl describe node k8s-master-01 | grep Taints
 kubectl describe node k8s-node-01 | grep Taints
 kubectl describe node k8s-node-02 | grep Taints
 
-主节点默认带污点：
+# 主节点默认带污点：
+# Taints: node-role.kubernetes.io/control-plane:NoSchedule
 
-Taints: node-role.kubernetes.io/control-plane:NoSchedule
-
-### 打污点 / 去掉污点
-
+# 打污点 / 去掉污点
 # 打污点
 kubectl taint nodes 10.1.1.104 node-role.kubernetes.io/control-plane:NoSchedule
 
@@ -281,7 +277,7 @@ kubectl taint nodes 10.1.1.104 node-role.kubernetes.io/master:NoExecute
 # 去掉 NoExecute 污点
 kubectl taint nodes 10.1.1.104 node-role.kubernetes.io/master:NoExecute-
 
-### 污点语法速记
+# 污点语法速记
 kubectl taint nodes <节点名> <key>:<value>:<污点策略>
 # 去掉污点：在最后加一个减号 -
 ```
@@ -299,9 +295,8 @@ tolerations:
 ```yaml
 tolerations:
 - key: "node-role.kubernetes.io/control-plane"
-  operator: "Equal"      # Equal = 精确匹配 key 和 value
-  value: ""              # 必须和污点 value 一致
-  effect: "NoSchedule"   # 必须和污点 effect 一致,	不写 effect 则容忍该 key 的所有 effect
+  operator: "Exists"     # Exists = 只看 key 是否存在，不关心 value
+  effect: "NoSchedule"   # 必须和污点 effect 一致，不写 effect 则容忍该 key 的所有 effect
 ```
 
 ### pod调度策略
@@ -309,26 +304,26 @@ tolerations:
 - 根据资源。Pod声明的requests和limits，前者就是Pod需要多少资源，后者表示Pod最多用多少资源，资源比如CPU内存等
 - 指哪打哪。节点标签选择器，会选择符合标签的节点进行调度
 - 同上。节点亲和性，分为硬亲和和软亲和，前者必须满足，后者尝试满足，不强制
-#### 1、requests和limits，修改web.yaml文件的resources: {}配置项
+##### 1、requests和limits，修改web.yaml文件的resources: {}配置项
 ```yaml
 resources:
     requests:
-        memory:"3Gi"#声明需要3G内存
+        memory: "3Gi"   # 声明需要3G内存
     limits:
-        memory:"4Gi"#声明最大4G内存
-[root@master01~]#kubectl apply -f web.yaml
+        memory: "4Gi"    # 声明最大4G内存
+[root@master01 ~]# kubectl apply -f web.yaml
 查看Pod，发现Pod一直在挂起状态中
 这是为什么？因为我声明的需要3G内存，而我的虚拟机最多就2G内存，所以资源不满足，影响了Pod调度，更多详细内容请参考官方文档：Pod和容
 器的资源请求和约束
 ```
-#### 2、节点标签选择器
+##### 2、节点标签选择器
 ```yaml
 为node02上打标签,就是键值对，随便起名字
 kubectl label node 10.1.1.104 xxx=yyy
 
 
 然后在web.yaml中新增nodeSelector声明
-[root@master01~]#cat web.yaml
+[root@master01 ~]# cat web.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -356,7 +351,7 @@ spec:
         xxx: yyy
   status: {}
 ```
-#### 3、节点亲和性(亲和性和节点选择器类似，只不过多了操作符表达式：In、NotIn、Exists、Gt、Lt)
+##### 3、节点亲和性(亲和性和节点选择器类似，只不过多了操作符表达式：In、NotIn、Exists、Gt、Lt)
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -445,14 +440,14 @@ spec:
 secret在K8S中表示一个存储在etcd中的配置，通常用Base64编码，此配置可以通过挂载卷或者环境变量的方式供Pod访问   
 通过下面的secret.yaml声明创建一个Secret，名字和密码是base64编码后的
 ```yaml
-apiVersion:v1
-kind:Secret
+apiVersion: v1
+kind: Secret
 metadata:
-    name:test-secret
-    namespace:default
+    name: test-secret
+    namespace: default
 data:
-    username:ZWdvbg==
-    password:MTIzNDU2
+    username: ZWdvbg==
+    password: MTIzNDU2
 ```
 
 挂载卷的方式，声明文件如下；  
@@ -495,8 +490,8 @@ spec:
 验证上述文件
 ```bash
 kubectl apply -f test.yaml
-# 进入容器（先到对应的节点上）
-docker container exec -ti 9023b9cfa886 sh
+# 进入容器
+kubectl exec -ti <pod-name> -c alpine -- sh
 # 查看挂载的 Secret 文件
 cat /etc/secret-volume/username   # 显示 egon
 cat /etc/secret-volume/password   # 显示 123456
@@ -611,15 +606,17 @@ spec:
   - ReadWriteMany
   hostPath:            # 声明本地存储，绑定该 pv 的 pod 调度到目标主机后，默认会自动创建出该路径
     path: /data/hostpath
-
-
-kubectl apply -f PVC.yaml创建后  
-
-NAME   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM   STORAGECLASS   REASON   AGE
-my-pv  1Gi        RWX            Retain           Available           manual                  39s
-
-可以看到创建成功，并且状态是Available，说明还没有被PVC绑定，注意声明的hostPath会在pod被调度到目标主机之后默认自动创建
 ```
+
+创建后验证（以下为 shell 命令与输出，不在 YAML 内）：
+```bash
+kubectl apply -f PVC.yaml
+
+# 输出示例：
+# NAME   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM   STORAGECLASS   REASON   AGE
+# my-pv  1Gi        RWX            Retain           Available           manual                  39s
+```
+可以看到创建成功，并且状态是Available，说明还没有被PVC绑定，注意声明的hostPath会在pod被调度到目标主机之后默认自动创建
 PV的关键参数解释:  
 - Capacity（存储能力）：一般来说，一个PV对象都要指定一个存储能力，通过PV的capacity属性来设置的，目前只支持存储空间的
 设置，就是我们这里的storage=1Gi，不过未来可能会加入IOPS、吞吐量等指标的配置。  
@@ -640,22 +637,23 @@ spec:
   - ReadWriteMany
   resources:
     requests:
-      storage: 1G
+      storage: 1Gi
+```
 
-
-创建后
+创建后验证（以下为 shell 命令与输出，不在 YAML 内）：
+```bash
 [root@master01 ~]# kubectl get pvc
-NAME     STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
-my-pvc   Bound    my-pv    1Gi        RWX            manual         13s
+# NAME     STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+# my-pvc   Bound    my-pv    1Gi        RWX            manual         13s
 
 [root@master01 ~]# kubectl get pv
-NAME    CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM            STORAGECLASS   REASON   AGE
-my-pv   1Gi        RWX            Retain           Bound    default/my-pvc   manual                  3m36s
+# NAME    CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM            STORAGECLASS   REASON   AGE
+# my-pv   1Gi        RWX            Retain           Bound    default/my-pvc   manual                  3m36s
+```
 
 可以看到PV的状态变成了Bound，说明PV被PVC绑定了（注意：创建PVC之后，Kubernetes就会去查找满足我们声明要求的PV，比如
 storageClassName、accessModes以及容量这些是否满足要求，如果满足要求就会将PV和PVC绑定在一起，目前PV和
 PVC之间是一对一绑定的关系，也就是说一个PV只能被一个PVC绑定
-```
 **最后通过如下web-test.yaml声明创建deploy**
 ```yaml
 apiVersion: apps/v1
@@ -690,21 +688,21 @@ spec:
   status: {}
 
 
-[root@master01 ~]# kubectl get deploy,pods -o wide | grep web-test
-deployment.apps/web-test   1/1   1   1   12m11s   nginx   nginx:1.14   app=web-test
-pod/web-test-88bc96645-8mrgd   1/1   Running   0   2m11s   10.2.73.23   10.1.1.103   <none>   <none>
-
+# 创建后验证（以下为 shell 命令，不在 YAML 内）：
+# [root@master01 ~]# kubectl get deploy,pods -o wide | grep web-test
+# deployment.apps/web-test   1/1   1   1   12m11s   nginx   nginx:1.14   app=web-test
+# pod/web-test-88bc96645-8mrgd   1/1   Running   0   2m11s   10.2.73.23   10.1.1.103   <none>   <none>
+#
 # 此声明将 Pod 内的 /usr/share/nginx/html 绑定到主机的 /data/hostpath（通过 PV 声明的）
 # 如果此时访问一下 nginx 会报 403 Forbidden 错误，因为主机内的 /data/hostpath/index.html 并不存在
 # 先创建一个（注意：Pod 在哪个节点上就在哪个节点上创建）
-cat > /data/hostpath/index.html <<EOF
-Hello egon
-EOF
-
+# cat > /data/hostpath/index.html <<EOF
+# Hello egon
+# EOF
+#
 # 然后验证
-[root@node02 ~]# curl 10.2.73.23
-Hello egon
-[root@node02 ~]#
+# [root@node02 ~]# curl 10.2.73.23
+# Hello egon
 ```
 #### 网络存储NFS
 一般来讲，不会通过本地存储来持久化数据，因为Pod的调度不是固定的，一般会通过网络的方式来存储数据，比如NFS。我们可以新增一台服务器(192.168.88.100)作为NFS服务器  
@@ -723,7 +721,7 @@ spec:
   accessModes:
   - ReadWriteMany
   nfs:
-    path: /data/nfs#NFS服务器的共享路径
+    path: /data/nfs   # NFS服务器的共享路径
     server: 192.168.88.100
 ```
 
@@ -1154,71 +1152,6 @@ spec:
             values:
             - ssd
 ```
-- `nodeAffinity` 完整示例（硬亲和 + 软亲和组合）：
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: node-affinity
-  labels:
-    app: node-affinity
-spec:
-  replicas: 8
-  selector:
-    matchLabels:
-      app: node-affinity
-  template:
-    metadata:
-      labels:
-        app: node-affinity
-    spec:
-      containers:
-      - name: nginx
-        image: nginx:1.7.9
-        ports:
-        - containerPort: 80
-          name: nginxweb
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:   # 硬策略：必须满足，不满足就不调度
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: kubernetes.io/hostname
-                operator: NotIn
-                values:
-                - xxx-node3           # 意思：不要调度到 xxx-node3 这台节点
-          preferredDuringSchedulingIgnoredDuringExecution:  # 软策略：尽量满足，不满足也能调度
-          - weight: 1
-            preference:
-              matchExpressions:
-              - key: com
-                operator: In
-                values:
-                - yyy-zzz-mmm         # 意思：优先调度到带 com=yyy-zzz-mmm 标签的节点
-```
-硬/软的区别：
-- **required（硬）**：条件不满足 → 根本不调度，Pod 一直 Pending
-- **preferred（软）**：条件不满足也能调度，`weight` 越大优先级越高（多个候选节点里挑权重高的）
-
-操作符表达式（`matchExpressions` 里的 `operator`）：
-| operator | 含义 | 需要 values 吗 |
-|---|---|---|
-| `In` | 键的值在给定列表里 | 要 |
-| `NotIn` | 键的值不在列表里 | 要 |
-| `Exists` | 键存在（值无所谓） | 不要 |
-| `DoesNotExist` | 键不存在 | 不要 |
-| `Gt` | 值大于（数值比较） | 要 |
-| `Lt` | 值小于（数值比较） | 要 |
-
-组合逻辑：
-- `nodeSelectorTerms` 里多个 term 之间是 **或（OR）**：满足任意一个即可
-- 单个 term 里多个 `matchExpressions` 是 **且（AND）**：必须全部满足
-
-**IgnoredDuringExecution（名字后半段）** 的含义：规则只在**调度那一刻**生效。Pod 已经调度到某节点后，如果该节点标签后来变了（比如 `xxx` 标签被删了），**已运行的 Pod 不会被移走**——规则只对新建/更新的 Pod 有效。所以完整意思是"调度时强制/优先满足，运行期忽略"。
-
-为什么搞这么多策略（污点、节点标签、亲和性、反亲和性）？一推一拉组合出各种调度需求，让 Pod 尽量"塞"进合适的节点，**提高整体资源利用率**——这就是"自动装箱（bin packing）"。
-- `podAffinity` / `podAntiAffinity`：和**其它 Pod** 绑在一起 / 避开（同节点/异节点）
-
-一句话区分：**CPU 亲和性管"上了机器后绑定哪几个核"，Pod 调度亲和性管"把 Pod 放到哪台机器"。**
+- `nodeAffinity` 完整示例（硬亲和 + 软亲和组合）见上文「3、节点亲和性」一节。
 
 
