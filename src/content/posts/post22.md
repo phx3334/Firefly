@@ -156,7 +156,7 @@ nerdctl -n k8s.io exec -it <id> sh  # 进入 k8s 容器
 kubectl get pods -w
 # -o wide就是让输出的数据更详细
 kubectl get deploy,pods -o wide -n 某个名称空间
-#-A不能直接跟在kubectl后，要往后放，代表查看所有名称空间
+# -A（--all-namespaces）代表查看所有名称空间，建议放在资源类型之后
 kubectl get deploy,pods -o wide -A
 #1、基于yaml创建资源
 kubectl apply -f 1.yaml
@@ -185,7 +185,7 @@ kubectl get pods --show-labels
 #按标签删。
 kubectl delete pods,services -l <label-key>=<label-value>
 #进入Pod内
-kubectl exec -it pod 名字 bash
+kubectl exec -it pod名字 -- bash
 #pod拷贝到本机
 kubectl cp pod名:/etc/fstab /tmp/a.txt
 #本机拷贝到pod内
@@ -311,19 +311,19 @@ resources:
         memory: "3Gi"   # 声明需要3G内存
     limits:
         memory: "4Gi"    # 声明最大4G内存
-[root@master01 ~]# kubectl apply -f web.yaml
-查看Pod，发现Pod一直在挂起状态中
-这是为什么？因为我声明的需要3G内存，而我的虚拟机最多就2G内存，所以资源不满足，影响了Pod调度，更多详细内容请参考官方文档：Pod和容
-器的资源请求和约束
 ```
+```bash
+kubectl apply -f web.yaml
+```
+查看 Pod，发现 Pod 一直在挂起状态中。
+这是为什么？因为我声明的需要 3G 内存，而我的虚拟机最多就 2G 内存，所以资源不满足，影响了 Pod 调度。更多详细内容请参考官方文档：Pod 和容器的资源请求和约束。
 ##### 2、节点标签选择器
-```yaml
-为node02上打标签,就是键值对，随便起名字
+先给 node02 打标签（键值对，名字随便起）：
+```bash
 kubectl label node 10.1.1.104 xxx=yyy
-
-
-然后在web.yaml中新增nodeSelector声明
-[root@master01 ~]# cat web.yaml
+```
+然后在 web.yaml 中新增 nodeSelector 声明：
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -642,11 +642,11 @@ spec:
 
 创建后验证（以下为 shell 命令与输出，不在 YAML 内）：
 ```bash
-[root@master01 ~]# kubectl get pvc
+kubectl get pvc
 # NAME     STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
 # my-pvc   Bound    my-pv    1Gi        RWX            manual         13s
 
-[root@master01 ~]# kubectl get pv
+kubectl get pv
 # NAME    CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM            STORAGECLASS   REASON   AGE
 # my-pv   1Gi        RWX            Retain           Bound    default/my-pvc   manual                  3m36s
 ```
@@ -859,7 +859,7 @@ pod-a (前端) ──请求 web:80──> Service web (ClusterIP 10.96.0.5)
 - livenessProbe：存活检查，如果检查失败，将杀死容器，根据Pod的restartPolicy来操作
 - readinessProbe：就绪检查，如果检查失败，Kubernetes会把Pod从Service endpoints中剔除，也就是让客户流量不打到
 具体的检查方式支持三种  
-- http Get：发送HTTP请求，返回200 - 400范围状态码为成功
+- http Get：发送HTTP请求，返回 200~399 范围状态码为成功（200≤code<400 即成功）
 - exec：执行Shell命令返回状态码是0为成功
 - tcpSocket：发起TCP Socket建立成功
 实战思路：  
@@ -887,6 +887,7 @@ spec:
       labels:
         app: health-test
     spec:
+      restartPolicy: Always
       containers:
         - image: nginx:1.14
           name: nginx
@@ -910,9 +911,7 @@ spec:
             initialDelaySeconds: 95
             # 隔多少秒检查一次（检查间隔）
             periodSeconds: 5
-          # 重启策略
-          restartPolicy: Always
-status: {}
+            status: {}
 ```
 
 

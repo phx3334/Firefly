@@ -3,7 +3,7 @@ title: k8s网络
 published: 2026-08-25T20:11:23+08:00
 description: 进一步学习k8s的内容
 image: './images/a23.avif'
-tags: [k8s，计算机网络]
+tags: [k8s,计算机网络]
 category: '计算机技术'
 draft: false
 lang: '中文'
@@ -84,7 +84,7 @@ IPv6（128 bit）生下来就是无类的，只有 CIDR 一种玩法，习惯上
 
 ### CIDR 在 Pod IP 地址规划中的作用
 
-默认情况下，Kubernetes的节点配置为运行不超过 110 个 Pod、每个节点的CIDR范围为/24、每个节点可用IP地址数量为256  
+默认情况下，Kubernetes 的节点配置为运行不超过 110 个 Pod、每个节点的 CIDR 范围为 /24（共 256 个地址，去掉网络地址和广播地址后实际可分配给 Pod 的是 254 个，对默认 110 个 Pod 的上限来说绰绰有余）  
 k8s 的网络规划完全建立在 CIDR 上，典型的三层嵌套：
 
 ```text
@@ -200,24 +200,26 @@ Linux 内核提供两个隧道模块（都能创建虚拟隧道设备）：
 | | GRE 模块 | VXLAN 模块 |
 |---|---|---|
 | 封装格式 | 新IP头 + GRE头 + 原始二层帧 | 新IP头 + UDP头 + VXLAN头 + 原始二层帧 |
-| 隔离标识 | 按 key 区分 | 24 bit 的 VNI，理论 1600 万+ |
+| 隔离标识 | 按 key 区分 | 24 bit 的 VNI，约 1677 万（2^24） |
 | 额外开销 | 约 24 字节 | 约 50 字节（Pod 的 MTU 因此常见 1450） |
 | 现状 | 较老，生产少用 | **主流**（flannel vxlan、calico vxlan 都基于它） |
 
-以 flannel 的 VXLAN 模式为例，跨节点 Pod 通信全过程（从 Pod A 的网卡一路走到物理线）：
+#### 跨节点 Pod 通信全过程（node1 → node2）
+下面结合三张表，看一次完整的跨节点 Pod 访问（Pod A `10.244.1.2` → Pod B `10.244.2.3`）是怎么走通的：
 
 ```text
 【node1 出站】
-Pod A(10.2.1.2) 容器内 eth0
-  │ 目的 IP 10.2.2.3 不在本节点网段，按默认路由把包交给网关（cni0 的 IP）
+Pod A(10.244.1.2) 容器内 eth0
+  │ 目的 IP 10.244.2.3 不在本节点网段，按默认路由把包交给网关（cni0 的 IP）
   ▼
 cni0 网桥（节点级 Pod 网桥，IP 即 Pod 的网关）
-  │ 网桥二层转发，但发现目的 10.2.2.3 是远端网段，查路由表
-  │   → "10.2.2.0/24 via ... dev flannel.1"
+  │ 包进入 cni0 后，宿主机内核按路由表判定目的为远端网段，不在此网桥二层投递
+  │   → "10.244.2.0/24 via 10.244.2.0 dev flannel.1 onlink"
   ▼
-flannel.1（VXLAN 设备 / VTEP，node1 这一端 IP 通常是 10.2.1.0）
-  │ 内核 VTEP 查 FDB：目的网段 10.2.2.0/24 → 对端 VTEP 是 node2 的节点 IP 10.1.1.102
-  │ 再查 ARP：flannel.1 对应的对端 MAC
+flannel.1（VXLAN 设备 / VTEP，node1 这一端 IP 通常是 10.244.1.0/32）
+  │ 路由给出的下一跳是 node2 的 flannel.1 地址 10.244.2.0
+  │ 1) 先查静态 ARP/邻居表：10.244.2.0 → 假 MAC（aa:bb:cc:dd:ee:ff），填进内层帧头
+  │ 2) 再拿这个假 MAC 查 FDB：假 MAC → 对端真实节点 IP 10.1.1.102
   ▼
 VTEP 封装：[新IP头: 10.1.1.101→10.1.1.102][UDP:4789][VXLAN头:VNI=1][原始二层帧]
   ▼
@@ -232,23 +234,25 @@ eth0（node1 物理网卡）
 eth0（node2 物理网卡）
   │ 收到 UDP:4789 包，交给内核 VXLAN 模块（监听 4789 端口）
   ▼
-flannel.1（node2 的 VTEP，IP 10.2.2.0）
+flannel.1（node2 的 VTEP，IP 10.244.2.0/32）
   │ 解封装，剥掉外层 IP/UDP/VXLAN 头，还原出原始二层帧
+  │ 内层帧目的 MAC 是自己 flannel.1 的 → 上送本机三层查路由
+  │   → "10.244.2.0/24 dev cni0"（本节点 Pod 网段直连）
   ▼
 cni0 网桥（node2 节点级 Pod 网桥）
-  │ 按目的 MAC 把帧二层转发给对应 Pod 的 veth
+  │ 解析 Pod B 的 MAC（本地 ARP），二层转发到对应 Pod 的 veth
   ▼
-Pod B(10.2.2.3) 容器内 eth0 收到
+Pod B(10.244.2.3) 容器内 eth0 收到
 
 Pod B 全程不知道中间被套了一层壳：它发出/收到的都是普通的同网段二层帧
 ```
-
-关键点：
-- **cni0 是 Pod 的网关**，负责把 Pod 的包收上来、把回包递下去；跨节点时它只做"转发到 flannel.1"
+**关键点：**
+- **cni0 是 Pod 的网关**，负责把 Pod 的包收上来、把回包递下去；跨节点时它只做"判定为远端、转交 flannel.1"，本身不封装
 - **flannel.1 才是真正封装/解封装的地方**（VTEP），它和 cni0 是两件不同的设备
 - **eth0 是物理出口**，只看到封装后的 UDP 包，节点间的物理网络完全不感知 Pod IP
-
+- **为什么必须靠静态假 MAC（广播风暴的成因）**：若不用静态 ARP，内核会为远端网段发 ARP 广播去解析下一跳 MAC；而 overlay 里的广播帧会被 VXLAN 头端复制、群发给所有 VTEP，于是"节点数 × 远端网段数"的 ARP 被成倍放大到全网（且 `10.244.2.0` 这个下一跳 IP 本就是占位、无人应答）。flannel 直接写死静态 ARP，从根上绕开 ARP 广播，避免广播风暴
 > VTEP（VXLAN Tunnel Endpoint）：隧道的两端，就是宿主机上的 vxlan 设备（flannel 里叫 flannel.1），封装/解封装都发生在这里。
+- 为什么外层用 UDP 包装： 穿透性好——UDP（IP 协议号 17）普遍被防火墙/NAT 放行，而 IPIP（协议号 4）常被中间设备丢弃；无连接、内核实现简单（和内层跑什么协议无关，内层可能是 TCP/UDP/ICMP/ARP 任意协议）
 
 手工感受一下（不用任何 CNI，直接用内核 vxlan 模块搭大二层）：
 ```bash
@@ -270,7 +274,7 @@ ip link set vxlan0 up
 | VLAN | 同一广播域（二层） | 最好 | 不能 | 4094 |
 | GRE | 三层可达 | 有封装开销 | 能 | 少用 |
 | VXLAN | 三层可达 | 有封装开销 | 能 | 约 1677 万 |
-> 在k8s集群中VLAN ID,VNI默认都是1，因为 k8s 集群内部默认所有 Pod 本来就在同一个扁平网络里（Pod 之间默认互通，不做租户隔离），不需要用不同 VNI 去区分不同网络——一个 VNI 就够了。  
+> 在 k8s 集群中 VNI 默认是 1（VLAN ID 没有默认 1 的约定，由管理员按网络规划配置），因为 k8s 集群内部默认所有 Pod 本来就在同一个扁平网络里（Pod 之间默认互通，不做租户隔离），不需要用不同 VNI 去区分不同网络——一个 VNI 就够了。  
 
 #### 采用 VXLAN 协议，往集群里面再增加一个节点会怎么样
 以 flannel（默认 VXLAN，VNI=1）为例，新节点加入集群时：
@@ -286,8 +290,8 @@ ip link set vxlan0 up
 小结：**加节点 = 分一个 /24 + 各节点 FDB 加一条转发规则，不用手动布线，集群自动织成同一个大二层。**
 
 #### VXLAN模式下三个重要的表
-以下三个重要的表由守护进程flanneld维护（`kubectl -n kube-flannel get pods -o wide`查询到的pod就是承载这个进程的），从etcd获取所有pod的网络信息并写入，
-##### 路由表
+以下三个重要的表由守护进程 flanneld 维护（`kubectl -n kube-flannel get pods -o wide` 查询到的 pod 就是承载这个进程的），flanneld 经 APIServer 监听各节点的 Pod 网段信息（数据存在 etcd）并写入本机内核，
+**路由表**
 
 路由表决定"去某个 Pod 网段，包该交给哪个设备"。flanneld 给每个节点写入两类路由：
 
@@ -300,13 +304,13 @@ ip link set vxlan0 up
 # 在 node1 上查看（与上面一一对应）
 ip route
 # 10.244.0.0/24 dev cni0 scope link              # 本节点 Pod
-# 10.244.1.0/24 via 10.244.1.0 dev flannel.1 onlink   # node2 的 Pod
+# 10.244.1.0/24 via 10.244.1.0 dev flannel.1 onlink   # node2 的 Pod，onlink代表跳过验证网段中的网关地址是否正确，强制视为在链路上
 # 10.244.2.0/24 via 10.244.2.0 dev flannel.1 onlink   # node3 的 Pod
 ```
 
 跨节点流量一旦命中 `dev flannel.1` 这条，就进入 VXLAN 封装流程。
 
-##### arp表
+**arp表**
 
 包进到 flannel.1 后，内核需要知道"目的 MAC 是谁"才能封装二层帧。但 Pod B 在远端，ARP 广播不能在 overlay 里乱飞（否则广播风暴），所以 flanneld 直接写**静态 ARP**：把"对端 VTEP 的 IP → 一个固定的假 MAC"写死。
 
@@ -318,7 +322,7 @@ ip neigh show dev flannel.1
 - `aa:bb:cc:dd:ee:ff` 是 flannel 给每个节点 VTEP 分配的假 MAC，不是真实网卡 MAC
 - 内核拿到它，下一步去 FDB 表查"这个 MAC 该发往哪个真实节点 IP"
 
-##### fdb表
+**fdb表**
 
 FDB（Forwarding Database，转发数据库）是 VXLAN 设备的 MAC 转发表，决定"这个 VXLAN 帧最终发到哪个真实节点的 IP（外层 UDP 的目的 IP）"。
 
@@ -326,7 +330,6 @@ FDB（Forwarding Database，转发数据库）是 VXLAN 设备的 MAC 转发表�
 bridge fdb show dev flannel.1
 # aa:bb:cc:dd:ee:ff dst 10.1.1.102 self permanent   # node2 的物理节点 IP
 ```
-
 - `aa:bb:cc:dd:ee:ff`：和上面 ARP 表里的假 MAC 对上
 - `dst 10.1.1.102`：对端节点的真实 IP，外层 UDP 封装的目的 IP 就是它
 
@@ -334,12 +337,134 @@ bridge fdb show dev flannel.1
 1. **路由表**：目的在远端 → 包交给 flannel.1
 2. **ARP 表**：flannel.1 用静态 ARP 得到对端 VTEP 的假 MAC
 3. **FDB 表**：假 MAC → 真实节点 IP（10.1.1.102），内层帧被封装成 `[10.1.1.101→10.1.1.102][UDP:4789][VXLAN][原始帧]` 发走
-
 小结：**路由表决定走哪、ARP 表给出对端 VTEP 假 MAC、FDB 表把假 MAC 映射到真实节点 IP——三者由 flanneld 维护，共同完成"跨节点 Pod 流量进隧道"的全过程。**
 
+#### VXLAN的优缺点
 
+**优点：**
 
+- **对物理网络零要求**：封装后就是普通 UDP 包，节点间三层可达即可，跨机房、跨云 VPC 都能跑——这是 overlay 方案通吃各种环境的根本原因
+- **隔离规模大**：24 bit 的 VNI 理论上支持约 1677 万个虚拟网络，远超 VLAN 的 4094，天然支持多租户隔离
+- **内核原生、生态成熟**：Linux 内核自带 VXLAN 模块，flannel/calico 都以它为主流方案，不需要改造物理交换机
 
+**缺点：**
 
+- **封装开销大**：外层头（新IP头 + UDP头 + VXLAN头）约 50 字节，且封装/解封装消耗内核 CPU——每次跨节点转发都要"套壳/拆壳"
+- **MTU 被迫缩小**：因为多出约 50 字节的头部，Pod 的 MTU 常见只能设 1450，大包传输效率下降
+- **广播被放大**：BUM 流量（如 ARP 广播）靠头端复制群发给所有 VTEP，节点一多，广播流量随节点数平方级膨胀
+- **排障更难**：中间物理设备只看得见外层 IP，抓包看到的是隧道流量，Pod 真实报文被"藏"了一层，定位问题要多剥一层看
+
+### calico 的 BGP 模式
+和 flannel 默认走 VXLAN 隧道（把 Pod 帧封装进 UDP）不同，calico 的 BGP 模式是**纯三层路由**：Pod 包不做隧道封装，直接按节点路由表做普通 IP 转发。它靠 BGP 协议在节点之间"互相通告路由"来打通集群网络。
+
+核心组件（每个节点都跑）：
+
+| 组件 | 角色 |
+|---|---|
+| Felix | 每个节点上的 calico 客户端（agent），负责把本节点的 Pod 路由、ACL 写进内核（路由表、iptables/ipset） |
+| BIRD | 每个节点上的 BGP 客户端，把本节点的 Pod 网段以 BGP 路由形式宣告出去，也接收别人的路由 |
+| datastore（etcd / k8s） | 只存配置、IPAM 分配、网络策略等**元数据**，不是转发时实时查的表 |
+
+路由是怎么维护的（以新增 node3 为例）：
+
+```text
+1. node3 的 Felix 感知到本节点新 Pod（IP 10.244.3.5），给每个 Pod 写一条 /32 直连路由（这是 calico 与 flannel 的区别：flannel 是整段 /24 dev cni0，calico 是逐 Pod /32 dev caliXXX）：
+     10.244.3.5 dev calixxx scope link       # 直连，到本节点这个 Pod
+2. node3 的 BIRD 把这条路由宣告给 BGP 邻居：
+     "10.244.3.0/24 的下一跳是我 node3(10.1.1.103)"   ← BGP update
+3. node1 / node2 的 BIRD 收到，各自写进本机路由表：
+     10.244.3.0/24 via 10.1.1.103 dev eth0  # 去 node3 的 Pod，下一跳是 node3 节点 IP
+4. 之后任意节点访问 10.244.3.x，内核直接按路由表三层转发到 10.1.1.103，无需封装
+```
+
+为什么说是"去中心化、不依赖 etcd 查询"：
+
+- flannel 的 overlay 是"所有节点都去一个中心（APIServer/etcd）拉全网段信息，再各自写 FDB/路由"；而 calico 节点之间**直接通过 BGP 对等（peer）交换路由**，路由在节点间自主传播、各自收敛，没有中心查询瓶颈。
+- 节点**转发包时只看本地路由表**，根本不查 etcd——etcd 只在 Felix 初始化/配置变更时用到（存 IPAM 分配结果、策略），运行态的每包转发完全本地化。
+- 好处：① 控制面无单点，挂一个节点不影响别人（BGP 自动收敛）；② 转发无封装开销，比 VXLAN 性能好（没有 MTU 缩小、没有内核封装的 CPU 消耗）。
+
+两种对等模式：
+
+| 模式 | 连接关系 | 适用规模 |
+|---|---|---|
+| 全互联（node-to-node mesh） | 每个节点和所有节点建 BGP 连接 | 小规模（连接数 O(n²)） |
+| 路由反射器（Route Reflector） | 节点只连 RR，由 RR 中转路由 | 大规模（连接数降到 O(n)） |
+
+验证：
+```bash
+# 看本节点的 BGP 邻居和收到的路由（进 calico-node pod）
+kubectl -n calico-system exec -ti calico-node-xxxxx -- birdcl show protocol
+kubectl -n calico-system exec -ti calico-node-xxxxx -- birdcl show route
+
+# 节点上直接看路由表：跨节点 Pod 路由下一跳是节点 IP，没有 flannel.1 那种隧道设备
+ip route
+# 10.244.3.0/24 via 10.1.1.103 dev eth0    # ← 直接三层转发，无封装
+```
+小结：**calico BGP 模式用 Felix 写本机路由、用 BIRD 通过 BGP 对等把路由播给全集群，节点本地维护完整路由表、转发零 etcd 查询——去中心化、无隧道封装，性能好，但要求节点间三层可达（跨三层时需 IPIP/VXLAN 隧道兜底）。**
+
+#### BGP的优缺点
+
+**优点：**
+
+- **零封装、性能最好**：Pod 包直接三层转发，没有隧道头开销——既不占带宽，也没有内核封装/解封装的 CPU 消耗，MTU 也不用缩小
+- **去中心化、无单点**：路由靠节点间 BGP 对等自主传播、自动收敛，不依赖中心组件查询——挂一个节点不影响其他节点
+- **转发完全本地化**：每包转发只查本地路由表，不查 etcd/APIServer——运行态控制面零参与，转发路径最短
+
+**缺点：**
+
+- **强依赖物理网络配合**：要求节点间能直接路由彼此的 Pod 网段，可能需要在物理交换机/路由器上放行和配置路由——网络不受自己掌控时往往落地不了
+- **规模受限于对等方式**：全互联 mesh 模式连接数随节点数平方增长（O(n²)），大规模要引入路由反射器（RR），增加组件复杂度和潜在瓶颈
+- **跨三层/跨云受限**：物理网络不允许扁平路由时（跨机房、云 VPC），BGP 路由通告传不过去，必须退回 IPIP/VXLAN 隧道兜底
+- **排障门槛高**：需要理解 BGP 邻居状态、路由通告、RR 原理等，出了问题排查链路比查一张 FDB 表复杂
+
+### calico的IP-in-IP模式
+
+calico 的 BGP 模式要求节点间能**直接三层路由**到彼此的 Pod 网段（不封装）。但跨机房、跨云 VPC 等场景里，物理网络不允许做这种扁平路由，Pod 包送不到对端节点 IP——这时就开启 **IP-in-IP 模式**做兜底。
+
+IPIP 是 Linux 内核自带的 IP-over-IP 隧道：把整个 Pod IP 包再套一层 IP 头，外壳目的 IP 填对端节点 IP，物理网络只认外壳做普通路由，到对端再解封装还原。
+
+```text
+Pod A(10.244.1.2 @node1) → 目的 10.244.3.3 @node3
+  ▼
+node1 内核 IPIP 封装：[新IP头 10.1.1.101→10.1.1.103][原始IP包 10.244.1.2→10.244.3.3]
+  ▼
+物理网络按外层 IP 三层路由 ────────→ node3
+  ▼
+node3 解 IPIP，露出原始包，按本机路由表送进 Pod B
+```
+
+和 VXLAN 的区别（都是隧道，但封装层级不同）：
+
+| | IPIP | VXLAN |
+|---|---|---|
+| 封装内容 | 新IP头 + 整个原始IP包 | 新IP头 + UDP + VXLAN头 + 原始二层帧 |
+| 隔离标识 | 无（单隧道） | 24 bit VNI，支持多租户 |
+| 开销 | 小（约 20 字节） | 大（约 50 字节） |
+| 本质 | 三层隧道 | 伪造大二层（overlay） |
+
+calico 三种模式怎么选：
+
+| 模式 | 是否封装 | 物理网络要求 | 性能 |
+|---|---|---|---|
+| 纯 BGP（直连路由） | 否 | 节点间能路由 Pod 网段（同二层/可信三层） | 最好 |
+| IPIP | 是（轻量） | 节点间 IP 三层可达即可 | 较好 |
+| VXLAN | 是（较重） | 节点间 IP 三层可达，且需多租户隔离 | 稍差 |
+
+小结：**IPIP 是 calico 跨三层时的轻量隧道兜底——把 Pod IP 包再套一层 IP 头发给对端节点，开销比 VXLAN 小；能用纯 BGP 直连就别开隧道，跨三层又不能做扁平路由时才用 IPIP（或要隔离时用 VXLAN）。**
+
+#### IP-in-IP的优缺点
+
+**优点：**
+
+- **封装开销比 VXLAN 小**：只加一个新 IP 头（约 20 字节），比 VXLAN 的"IP+UDP+VXLAN"三层头（约 50 字节）省一大半，MTU 损耗更小
+- **配置简单、内核原生**：不需要 VNI、不用维护 FDB 表，隧道两端就是纯粹的"套 IP 头/剥 IP 头"——实现和维护都轻量
+- **解决纯 BGP 的跨三层困境**：物理网络不允许承载 Pod 扁平路由时，用外壳节点 IP 做普通路由兜底，让 calico 在跨机房/跨云也能跑
+
+**缺点：**
+
+- **仍然有隧道开销**：相比纯 BGP 直连，还是多了封装/解封装的 CPU 消耗和 MTU 缩小——能直连就别开隧道
+- **没有隔离标识**：不像 VXLAN 有 24 bit VNI，无法用隧道层做多租户隔离——要隔离只能选 VXLAN
+- **可能被中间设备过滤**：IPIP 用 IP 协议号 4，部分云平台/防火墙默认丢弃非 TCP/UDP 的 IP 包——跨云场景要先确认链路放行
+- **只保留三层信息**：内层只封装到 IP 包，原始二层帧头被剥掉——对 Pod 转发无影响，但不如 VXLAN 的"完整二层搬运"通用
 
 
