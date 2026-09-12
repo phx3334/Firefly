@@ -34,18 +34,18 @@ struct epoll_event {
     epoll_data_t data;        // 用户数据
 };
 ```
-`events`类型：  
-- EPOLLIN：文件描述符可读
-- EPOLLOUT：文件描述符可写
-- EPOLLHUP：挂起
-- EPOLLERR：错误发生  
+`events` 类型（按位标志，可用 `|` 组合）：  
+- EPOLLIN：文件描述符可读。对 socket 而言：对端发来新数据、**监听 socket 上有新连接待 accept**、对端正常关闭（FIN 到达，read 返回 0，这个很容易漏判）。
+- EPOLLOUT：文件描述符可写。发送缓冲区有空间就能写——所以 socket 刚建立时几乎总是可写的，一般**只在「写满后需要继续写」时才注册它**（见后文阶段四），否则会陷入 busy loop。
+- EPOLLHUP：挂起。连接两端都关闭了（如对端 `close()` 后 RST 到达），无需注册也会自动上报，收到后直接关闭 fd，不要再读写。
+- EPOLLERR：错误发生。如收到 RST、缓冲区溢出，同样无需注册自动上报，配合 `getsockopt(SO_ERROR)` 取出具体错误码。
+一个实用的状态机视角：**IN/OUT 是「你请求的关注」，HUP/ERR 是「内核的强制通知」**。Nginx 的事件处理入口都会先检查 ERR/HUP 再处理 IN/OUT，避免对已死连接做无谓的读写。
 #### epoll的三个系统调用
 ##### epoll_create
 
 ```c
 int epfd = epoll_create1(0);
 ```
-
 在内核中创建一个 epoll 实例，返回一个 epfd（本身也是一个 fd）。内核为它分配两个核心数据结构：
 
 - **红黑树**：存放所有待监听的 fd，增删查都是 O(log n)，这就是 epoll 不怕海量连接的根本原因（对比 select 的 1024 上限和 poll 的 O(n) 遍历）。
@@ -116,7 +116,7 @@ Nginx 的 worker 主循环本质上就是：`epoll_wait` → 遍历就绪事件 
 4. 客户端回 `ACK`，内核校验后连接进入**全连接队列（accept queue）**，TCP 状态置为 `ESTABLISHED`。
 5. **关键点**：TCP 层通过 socket 注册的回调（`sk->sk_data_ready` 链路）触发 epoll 的回调，把**监听 fd 挂到 epoll 的就绪链表**上——注意此时数据还没被任何用户程序「看到」，监听 fd 已经就绪。
 
-SRE 排障关联：`netstat -s` 中的 `SYNs to LISTEN sockets dropped`、`ss -lnt` 的 `Recv-Q/Send-Q`（对监听 socket 就是全连接队列当前值/上限，对应 `somaxconn` 与 Nginx 的 `listen backlog`），溢出意味着用户态 accept 太慢或突发流量过大。
+SRE 排障关联：`ss -lnt` 的 `Recv-Q/Send-Q`（对监听 socket 就是全连接队列当前值/上限，对应 `somaxconn` 与 Nginx 的 `listen backlog`），Recv-Q 持续逼近 Send-Q 即溢出，意味着用户态 accept 太慢或突发流量过大。
 
 ##### 阶段二：epoll_wait 唤醒与 accept（内核→用户态）
 
@@ -156,7 +156,7 @@ SRE 排障关联：`netstat -s` 中的 `SYNs to LISTEN sockets dropped`、`ss -l
 
 | 现象 | 相关参数/指标 | 常用命令 |
 |------|--------------|----------|
-| 握手丢包、连接建立慢 | `somaxconn`、Nginx `listen backlog`、`net.ipv4.tcp_max_syn_backlog`、`syncookies` | `netstat -s \| grep -i 'listen'`（看握手溢出计数）；`ss -lnt`（看 Recv-Q 是否逼近上限）；`sysctl net.core.somaxconn` |
+| 握手丢包、连接建立慢 | `somaxconn`、Nginx `listen backlog`、`net.ipv4.tcp_max_syn_backlog`、`syncookies` | `ss -lnt`（看 Recv-Q 是否逼近 Send-Q，逼近即全连接队列溢出）；`ss -lnt`（看 Recv-Q 是否逼近上限）；`sysctl net.core.somaxconn` |
 | accept 跟不上突发 | 全连接队列溢出计数（`ss -lnt` 的 Recv-Q）、worker 数与 `accept_mutex`/`reuseport` | `ss -lnt state listening`（Recv-Q ≈ Send-Q 即溢出）；`ps -eo pid,psr,cmd \| grep nginx`（看 worker 分布） |
 | 大量 TIME_WAIT 占端口 | 连接复用（upstream keepalive）、`tcp_tw_reuse`、端口范围 `ip_local_port_range` | `ss -s`（总览各状态连接数）；`ss -ant state time-wait \| wc -l`；`sysctl net.ipv4.ip_local_port_range` |
 | 事件处理 CPU 高 | `epoll_wait` 频率、ET vs LT 选择、惊群唤醒开销 | `top -H -p $(pgrep -d, nginx)`（定位热点 worker/线程）；`pidstat -t -p <pid> 1`（上下文切换）；`perf top -p <pid>`（火焰图看热点函数） |
@@ -187,20 +187,17 @@ Worker 的主循环（ngx_process_events_and_timers）本质是一个固定框�
 4. 处理定时器: 连接空闲超时、上游超时、日志 flush 等
 5. 回到 1
 ```
-
 几个关键设计：
 
 - **事件与模块解耦**：epoll 只是事件「采集器」，Nginx 抽象出 ngx_event_layer（epoll/kqueue/select 等 10 余种实现按平台编译期选择），上层 HTTP 模块只关心「这个连接的读事件发生了」，不关心底层是哪个多路复用实现。所以同一段代码在 Linux 上跑 epoll、FreeBSD 上跑 kqueue，行为一致。
 - **epoll_data 复用技巧**：注册时通过 `epoll_data.ptr` 直接挂 connection 结构体指针，事件返回时零查找拿到连接上下文——不需要像 select 那样拿 fd 反查数组，这是 O(1) 的。
 - **定时器红黑树**：所有超时任务（如 `keepalive_timeout` 到期回收连接）挂在定时器红黑树上，epoll_wait 的 timeout 参数取最近超时时间，保证既不空转也不延误。
 
-### 惊群与连接竞争
-
 ### 异步非阻塞与状态机
 
 Nginx 对连接的处理不是「读完→处理→写完」的串行思维，而是**状态机驱动**：一个请求的生命周期被拆成 READ_REQUEST → PROCESS → WRITE_RESPONSE 等阶段，每个阶段可能只完成一小片（比如 read 只读到半个 HTTP 头），剩余工作挂起，等下一次事件到来再从断点继续。
 
-这正是处理慢客户端（弱网、移动端）的关键：一个拖慢 100 秒的请求只是占住一条连接的事件状态，**不占用 CPU**；对比 Apache 的 prefork/worker 模型，一个慢请求占住一个进程/线程，CPU 空等——这就是 C10K 之后事件驱动模型胜出的根本原因。
+这正是处理慢客户端（弱网、移动端）的关键：一个拖慢 100 秒的请求只是占住一条连接的事件状态，**不占用 CPU**；
 
 代价是编程模型复杂：任何阻塞调用（比如 worker 里调了一个同步 DNS 解析）都会卡住整个 worker 的所有连接。所以 Nginx 里连 DNS 都必须是异步 resolver，所有文件读都用线程池（`aio threads`）卸载。
 
@@ -209,10 +206,8 @@ Nginx 对连接的处理不是「读完→处理→写完」的串行思维，�
 ### 为什么不用 malloc 而要自建内存池
 
 请求级别的内存分配极其频繁（解析一个 HTTP 头部就要分配几十次），而一条请求的生命周期是明确的：**请求结束，所有相关内存一次性释放**。基于这个特征，Nginx 自建了 ngx_pool：
-
 - 分配只需移动指针（近似 O(1)），不逐块 free；
 - **统一销毁**：请求/连接结束时调用 `ngx_destroy_pool` 一次释放整片内存，杜绝内存泄漏（忘了 free 也没关系，池销毁时全收）。
-
 代价是「只大不小」：池内小对象无法单独归还，所以**长生命周期的大对象**（如 upstream 配置）不会放池里，避免内存膨胀。
 
 ### 三层内存结构
@@ -226,18 +221,8 @@ Nginx 对连接的处理不是「读完→处理→写完」的串行思维，�
 请求池挂在连接池下，请求结束先销毁请求池，连接 keepalive 复用；连接关闭再销毁连接池。**层级化 + 统一销毁**是 Nginx 内存管理的核心思想，这也是它作为反向代理能长期稳定运行、极少内存泄漏的结构性原因——绝大多数分配都跟着请求走，请求一结束全部回收。
 
 ### 大块与小块的分配策略
-
-- 小块（< 页大小）：直接在池内分配。池按链表串起多个内存块，当前块放不下就 `POSIX memalign` 新申请一块（通常 2 倍扩容）挂到链表尾。
+- 小块（< 页大小）：直接在池内分配。池按链表串起多个内存块，当前块放不下就新申请一块（通常 2 倍扩容）挂到链表尾。
 - 大块：直接走 `malloc`/`mmap` 单独分配，只在池里挂个引用（`ngx_pool_large_t` 链表），销毁时统一释放。避免小池被一个 10MB 的响应体撑爆。
-
-### slab 共享内存
-
-跨 worker 共享的数据（限流计数、`proxy_cache` 元数据、`keyzone`）必须放在 **shm 共享内存**里，Nginx 用自实现的 slab 分配器管理：
-
-- 页级 bitmap + 多级 size slot（近似 jemalloc 思路），按对象大小分档复用，减少共享内存的碎片；
-- 配合自旋锁/原子操作保证多 worker 并发安全。
-
-SRE 视角：`limit_req_zone`/`proxy_cache_path` 的 `keys_zone` 大小就是这里分配的，容量估算错误（如限流 key 太多撑爆 zone）会在 errorlog 里报 `could not allocate node`，需要调大 zone 或缩短 key 过期时间。
 
 ### 内存相关的运维指标与排障
 
@@ -245,5 +230,45 @@ SRE 视角：`limit_req_zone`/`proxy_cache_path` 的 `keys_zone` 大小就是这
 |------|---------|----------|
 | worker RSS 缓慢增长不回落 | 有模块把长生命周期对象挂到了请求池（第三方模块常见 bug），用 valgrind/Jemalloc 分析 | `ps -o pid,rss,vsz,cmd -C nginx`（对比各 worker RSS 是否均匀增长）；`pmap -x <pid> \| tail -1`；`strace -e trace=brk,mmap,munmap -p <pid>`（看分配是否只增不减） |
 | 大量小文件响应内存占用高 | `proxy_buffering`/`output_buffers` 配置，或未开 sendfile 导致数据绕行用户态 | `nginx -T \| grep -E 'sendfile\|buffering'`；`strace -e trace=sendfile,read,write -p <pid> -c`（确认是否走 sendfile）；`free -h && cat /proc/meminfo \| grep -i page` |
-| 共享内存告警 | limit_req/cache 的 zone 容量 vs 实际 key 数量 | `grep 'could not allocate node' /var/log/nginx/error.log`（slab 撑爆的直接证据）；`ipcs -m`（看共享内存段）；`ls -lh /dev/shm/` |
 | 连接数暴涨后内存陡增 | 每个 connection 固定开销 × 连接数（预分配模型），对照 `worker_connections` 与 `worker_rlimit_nofile` | `ss -ant state established \| wc -l`（实际连接数）；`nginx -T \| grep -E 'worker_connections\|worker_rlimit_nofile'`；`cat /proc/<pid>/limits \| grep open`（当前 fd 上限） |
+
+## 补充
+### fd和指针的关系
+
+fd（文件描述符）本质是**进程打开文件表的下标**，用户态拿到的只是一个整数，真正干活的是内核里的对象。以 TCP 连接为例：
+```c
+int conn_fd = accept4(listen_fd, ...);   // 内核新建 socket 对象，返回整数编号
+setsockopt(conn_fd, ...);                 // 用编号指回内核，操作那个 socket
+write(conn_fd, buf, len);                 // 往那个 socket 的发送缓冲区写数据
+close(conn_fd);                           // 让内核销毁那个 socket 对象
+```
+`conn_fd` 只是个 int，但每次系统调用都带上它，内核从进程的 fd 表查到对应的 `struct socket`/`struct sock`，后续操作全部落在那个内核对象上。**fd 是用户态对内核对象的「句柄」**——类比指针：两者都是「间接引用一个对象」的凭据，区别在于指针指向的是本进程地址空间里的内存（直接解引用，快但危险），fd 指向的是内核里的对象（必须经系统调用间接访问，受权限管控）。
+这也解释了两个常见现象：
+- **fd 泄漏**：`close()` 忘了调，内核对象就一直活着，`ss -antp` 里连接还在、`/proc/<pid>/fd` 里 fd 数持续上涨，直到撞上 `ulimit -n`。
+- **epoll_data.ptr 的前提**：文中前面提到用 `epoll_data.ptr` 挂 connection 指针，是因为**用户态的 connection 结构体和内核 socket 是两套东西**：fd 用来跟内核打交道，ptr 用来在用户态零查找拿到自己的上下文，二者各司其职。
+
+### docker.sock
+先看它是什么：
+```bash
+$ ls -l /var/run/docker.sock
+srw-rw---- 1 root docker 0 ... /var/run/docker.sock
+```
+注意第一个字符 **`s`**：ls -l 的类型标识符里，`-` 是普通文件、`d` 是目录、`l` 是软链接、**`p` 是命名管道（FIFO）**、**`s` 是 socket 文件**——即 Unix Domain Socket（UDS）。
+**UDS 与 TCP socket 的同与异**：内核走的是同一套 socket 抽象（同样是 fd，同样 `socket()/bind()/listen()/accept()`），事件同样能挂 epoll；区别是 UDS 不经过 IP 协议栈和网卡，**以文件系统路径为「地址」**，仅限本机进程通信，少三四层封装，延迟更低、还能带上文件权限控制（上面那个 `srw-rw---- root docker` 就是准入门槛：只有 root 和 docker 组能连）。
+Docker daemon 的 API 就是跑在这个 socket 上的：`docker ps`、`docker run` 等所有客户端命令，本质都是往 `/var/run/docker.sock` 发 HTTP（RFC 套壳在 UDS 上）。挂载进容器就是：
+```bash
+docker run -v /var/run/docker.sock:/var/run/docker.sock ...
+```
+**安全风险：容器逃逸**。容器内的进程一旦能访问这个 socket，就等于拿到了宿主机 Docker daemon 的完整控制权——daemon 是宿主机上的 root 进程，通过它起一个挂载宿主机根目录的特权容器，就能任意读写宿主机文件系统：
+```bash
+curl --unix-socket /var/run/docker.sock \
+  -X POST 'http://localhost/v1.41/containers/create?name=escape' \
+  -d '{"Image":"alpine","Cmd":["sh"], "Binds":["/:/host"]}'
+curl --unix-socket /var/run/docker.sock -X POST .../containers/escape/start
+# 容器内 cat /host/etc/shadow 即宿主机文件
+```
+这正是知名的逃逸手法（CVE-2019-5736、各类 CI/CD 挂 docker.sock 的审计项都源于此）。SRE 的实践准则：**生产容器绝不挂载 docker.sock**；确有需要（如 dind、监控 agent）时，改用 Proxy sidecar 做命令白名单、或用 rootless/podman 降权；巡检时用下面命令快速排查：
+```bash
+docker inspect $(docker ps -q) | grep -i docker.sock   # 谁挂了 sock
+ls -l /var/run/docker.sock                              # 谁在 docker 组里
+```
