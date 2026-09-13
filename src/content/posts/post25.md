@@ -1,15 +1,13 @@
 ---
 title: 深入Nginx
-published: 2026-09-11T19:11:23+08:00
-description: 学习Nginx事件驱动和内存管理机制
+published: 2026-09-11T20:11:23+08:00
+description: 学习io多路复用技术以及进一步学习nginx机制
 image: './images/a25.avif'
 tags: [nginx]
 category: '计算机技术'
 draft: false
 lang: '中文'
 ---
-
-
 ## io多路复用机制
 ### 定义
 单个线程，通过内核提供的系统调用可以同时监听多个文件描述符fd,只要其中一个就绪，这个调用就返回，程序去处理就绪的io。  

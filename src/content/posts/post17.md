@@ -3,7 +3,7 @@ title: 学习NFSV4
 published: 2026-08-17T10:11:23+08:00
 description: 学习基于kerberos5的NFSV4的原理和实际应用
 image: './images/a17.avif'
-tags: [计算机网络,linux,网络文件系统]
+tags: [linux,文件系统]
 category: '计算机技术'
 draft: false
 lang: '中文'
