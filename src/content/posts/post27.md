@@ -9,17 +9,14 @@ draft: false
 lang: '中文'
 ---
 
-| `noatime` | 不更新访问时间 | 几乎所有盘（减少无谓写 IO，对高频读目录尤其明显） |
-| `sync`/`async` | 同步/异步写 | 关键小盘防丢数据才用 sync（代价大，别全盘开） |
-
 ## VFS：一切皆文件的统一层
 
 ### 为什么需要 VFS
 
-Linux 支持几十种文件系统（ext4/xfs/btrfs/NFS/procfs/tmpfs/fuse...），但应用只认识 `open/read/write/close`。VFS（Virtual File System）就是中间的抽象层：定义一套统一的接口（`file_operations`、`inode_operations`），每种文件系统各自实现，应用无感切换。
+Linux 支持几十种文件系统（ext4/xfs/btrfs/NFS/procfs/tmpfs/fuse...），但应用只认识 `open/read/write/close`。VFS（Virtual File System）就是中间的抽象层：定义一套统一的接口，每种文件系统各自实现，应用无感切换。
 
 ```text
-用户态 write(fd) → 系统调用 → VFS 分发
+用户态 write (int fd, const void *buf, size_t count) → 系统调用 → VFS 分发
 ├── ext4/xfs      → 块设备（本地磁盘，掉电可丢，靠 journal 保证一致性）
 ├── NFS/CIFS      → 网络 RPC（另一台机器，网络抖动 = IO 卡死）
 ├── procfs        → 内核实时生成（/proc、/sys，读一次算一次，非真实文件）
@@ -27,6 +24,11 @@ Linux 支持几十种文件系统（ext4/xfs/btrfs/NFS/procfs/tmpfs/fuse...）�
 ├── overlayfs     → 分层合并（容器镜像的分层就是它）
 └── fuse          → 用户态文件系统（s3fs、sshfs，慢但有想象力）
 ```
+**如何通过fd写入磁盘分区的背后的文件系统**
+关键：内核**从不判断**「这个 fd 是什么文件系统」，靠的是 open 时就绑定的函数指针表。
+引用链：`fd` → 进程 fd 表取出 `struct file`（打开会话对象）→ 里面的 `f_op`（file_operations 函数指针表）→ **直接调用 `f_op->write_iter()`**。ext4 在注册时会把自己的实现函数填进这张表，所以 open("/data/a.log") 时内核沿 inode 找到 superblock，就把 ext4 的函数表塞进了 f_op——从此这个 fd 的每次 write 都自然落进 ext4 的代码，一跳到位，没有 if(ext4) 这种分支。
+一句话：**fd 是凭据，f_op 是分发点，「是什么文件系统」在 open 那一刻就写死在指针里了**。这也是为什么换文件系统必须重新挂载并重新打开文件——旧 fd 的 f_op 还指向旧实现。
+
 
 ### VFS 三个核心对象
 - **superblock**：整个文件系统的元数据（类型、块大小、总量/余量）——`df` 读的就是它。
@@ -34,7 +36,6 @@ Linux 支持几十种文件系统（ext4/xfs/btrfs/NFS/procfs/tmpfs/fuse...）�
 - **dentry（目录项）**：文件名与 inode 的映射缓存，配合 dcache 加速路径解析（全路径查找就是一层层 dentry 查下去）。
 
 ### SRE 视角的三个经典现象
-
 **1. df 和 du 对不上（已删除但未释放）**
 文件被 rm 了，但进程还持有 fd → inode 没释放，df 看到的占用不降，du 却找不到文件：
 ```bash
@@ -137,3 +138,23 @@ kubectl describe pod   # 事件里 ephemeral-storage 超限
 | 容器写盘失败 | 宿主机 `df -h` + `df -i` + `kubectl describe pod` |
 
 **心法**：VFS 层的问题很少是「文件系统坏了」，绝大多数是**视角错位**——你以为在操作文件，其实在被挂载遮盖/被句柄拖住/被 namespace 隔离。排查时永远先问三个问题：这路径**当前挂在哪**（findmnt）、**被谁占用**（lsof）、**我在哪个 namespace**（容器 or 宿主机）。
+
+## 补充
+### 什么是struct file
+**struct file 不是磁盘上的文件，而是内核内存里记录「一次打开行为」的会话对象**。
+以 `int fd = open("/data/a.log", O_WRONLY)` 为例，struct file 的诞生过程：
+```text
+1. VFS 沿路径逐层查目录项缓存，找到 a.log 的目录项 → 拿到 inode
+2. inode 指向的 superblock 说明：这文件在 ext4 上
+3. 内核 kmalloc 一个 struct file，开始填表：
+   - f_op       ← 填入 ext4 的函数指针表（分发能力在此定型）
+   - f_mode     ← O_WRONLY（本次以写方式打开）
+   - f_pos      ← 0（读写位置，从文件头开始）
+   - f_inode    ← 指向 a.log 的 inode
+   - f_count    ← 1（一个引用）
+4. 把这个 struct file 的地址挂进进程 fd 表的第 3 格
+5. 返回 fd=3 给应用
+```
+关键理解：**同一个文件可以有多个 struct file**。tail -f 和 grep 同时打开 a.log，各自得到一个 struct file，各自的 f_pos 独立推进（互不影响读到哪了）；但它们共享同一个 inode（文件本体只有一份）。O_APPEND 之所以能让多进程日志不互相覆盖，就是每次 write 前强制把各自的 f_pos 跳到 inode 记录的文件尾。
+反过来，struct file 的消亡也严格对应引用计数：`close(fd)` 只是清空 fd 表的那一格，f_count 减 1；减到 0 才真正销毁 struct file。这就是「文件被 rm 但进程还持着 fd → 磁盘不释放」的底层机制——inode 释放要求「link count=0 **且** 没有任何 struct file 引用它」两个条件同时满足。
+一句话：**inode 是文件本体，struct file 是打开文件的会话（f_op 定行为、f_pos 定位置），fd 是会话的入场券**。
