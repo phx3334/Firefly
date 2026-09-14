@@ -49,8 +49,6 @@ truncate -s 0 /proc/<pid>/fd/4  # 或重启该进程释放
 ```bash
 df -i                # 看 IUse%
 df -i | grep -v 0    # 找快满的文件系统
-# 定位哪个目录文件多（遍历慢，放低峰跑）：
-find / -xdev -printf '%h\n' | sort | uniq -c | sort -rn | head
 ```
 
 **3. 只读文件系统（emergency）**
@@ -140,9 +138,9 @@ kubectl describe pod   # 事件里 ephemeral-storage 超限
 **心法**：VFS 层的问题很少是「文件系统坏了」，绝大多数是**视角错位**——你以为在操作文件，其实在被挂载遮盖/被句柄拖住/被 namespace 隔离。排查时永远先问三个问题：这路径**当前挂在哪**（findmnt）、**被谁占用**（lsof）、**我在哪个 namespace**（容器 or 宿主机）。
 
 ## 补充
-### 什么是struct file
-**struct file 不是磁盘上的文件，而是内核内存里记录「一次打开行为」的会话对象**。
-以 `int fd = open("/data/a.log", O_WRONLY)` 为例，struct file 的诞生过程：
+### struct file介绍
+struct file 不是磁盘上的文件，而是内核内存里记录「一次打开行为」的会话对象。   
+以 int fd = open("/data/a.log", O_WRONLY) 为例，struct file 的诞生过程：  
 ```text
 1. VFS 沿路径逐层查目录项缓存，找到 a.log 的目录项 → 拿到 inode
 2. inode 指向的 superblock 说明：这文件在 ext4 上
@@ -155,6 +153,18 @@ kubectl describe pod   # 事件里 ephemeral-storage 超限
 4. 把这个 struct file 的地址挂进进程 fd 表的第 3 格
 5. 返回 fd=3 给应用
 ```
-关键理解：**同一个文件可以有多个 struct file**。tail -f 和 grep 同时打开 a.log，各自得到一个 struct file，各自的 f_pos 独立推进（互不影响读到哪了）；但它们共享同一个 inode（文件本体只有一份）。O_APPEND 之所以能让多进程日志不互相覆盖，就是每次 write 前强制把各自的 f_pos 跳到 inode 记录的文件尾。
-反过来，struct file 的消亡也严格对应引用计数：`close(fd)` 只是清空 fd 表的那一格，f_count 减 1；减到 0 才真正销毁 struct file。这就是「文件被 rm 但进程还持着 fd → 磁盘不释放」的底层机制——inode 释放要求「link count=0 **且** 没有任何 struct file 引用它」两个条件同时满足。
-一句话：**inode 是文件本体，struct file 是打开文件的会话（f_op 定行为、f_pos 定位置），fd 是会话的入场券**。
+关键理解：同一个文件可以有多个 struct file。tail -f 和 grep 同时打开 a.log，各自得到一个 struct file，各自的 f_pos 独立推进（互不影响读到哪了）；但它们共享同一个 inode（文件本体只有一份）。O_APPEND 之所以能让多进程日志不互相覆盖，就是每次 write 前强制把各自的 f_pos 跳到 inode 记录的文件尾。 反过来，struct file 的消亡也严格对应引用计数：close(fd) 只是清空 fd 表的那一格，f_count 减 1；减到 0 才真正销毁 struct file。这就是「文件被 rm 但进程还持着 fd → 磁盘不释放」的底层机制——inode 释放要求「link count=0 且 没有任何 struct file 引用它」两个条件同时满足。 一句话：inode 是文件本体，struct file 是打开文件的会话（f_op 定行为、f_pos 定位置），fd 是会话的入场券。
+#### 举例f_count大于1的情况
+f_count 数的是「指向同一个 struct file 的引用数」，两种经典情形：
+`1`同进程多个 fd 指同一个会话。如 shell 重定向 `ls > out.txt 2>&1`，本质是把 fd=2 格的指针改成和 fd=1 相同 → 同一 struct file，f_count=2，f_pos 共享（stderr 和 stdout 写同一个文件且偏移接续）。  
+`2`fork：子进程 fd 表是父进程的指针数组拷贝，同一格存着同一个 struct file 地址 → f_count 加 1，父子共享 f_pos（这也是父子进程轮流写同一 socket/文件不会互相覆盖的原因）。  
+对照：各自 open 同一文件则是两个独立 struct file，f_count 各=1，f_pos 独立（tail -f 和 grep 就是这种）。
+#### fd底层如何通过指针指向数据位置的
+fd 本身只是进程私有「指针数组」的下标，数组每一格存 struct file 的地址：
+```text
+fd=3 → current->files->fdt->fd[3]（这一格是指针）→ struct file
+     → f_pos（当前读写偏移）→ f_inode → inode 的数据块指针 → 实际磁盘块
+```
+`1`fd 表是数组，格子里存指针；重定向、dup、fork 共享，底层全是对这张指针数组的覆盖/拷贝。  
+`2`写数据时沿 f_pos 定位字节偏移，再由 inode 里的数据块指针换算成磁盘扇区地址；f_pos 随每次读写自动推进（O_APPEND 则每次写前跳到文件尾）。  
+`3`一句话：fd 是下标，格子里是指针，指针指向的 struct file 里 f_pos 定「读到哪」，inode 定「数据在盘上哪里」。
