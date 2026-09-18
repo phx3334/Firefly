@@ -1,7 +1,7 @@
 ---
-title: linux内核
-published: 2026-09-21T20:11:23+08:00
-description: 
+title: 入门linux内核
+published: 2026-09-18T20:11:23+08:00
+description: 大致学习linux内核的一些功能，掌握常见的故障分析
 image: './images/a19.avif'
 tags: [linux]
 category: '计算机技术'
@@ -10,7 +10,7 @@ lang: '中文'
 ---
 
 
-## 一、进程与调度
+## 进程与调度
 **核心概念**
 ### 进程与线程
 - **内核只有 task，不区分进程/线程**：它们的结构体是一样的，里面的PID字段就是每个task自己的ID，也就是线程id，tgid就是线程组ID，同一线程组的task里面的指针所指向的资源都是一样的。**所以说，进程只是一个逻辑上的集合，代表整个线程组，没有实体**（`top` 是按时进程汇总）
@@ -18,67 +18,80 @@ lang: '中文'
 - **fork和clone**: fork实际上就是克隆出一个只有一个线程的线程组（tgid等于pid）,克隆也采取`COW`，clone可以通过CLONE_THREAD 这个标志告诉内核：「新 task 加入调用者的线程组」。（除了这个标志，内核强制要求还需要其他标志，比如共享虚拟地址空间，信号处理表，fd表）
 - **页内存转换相关**：地址空间由 `mm_struct` 里的页表（`pgd` 多级页表）把虚拟地址映射到物理页。**进程各有独立页表** → 进程切换要换页表基址，  
 - **TLB （地址翻译缓存）被刷掉**，后续访问要重新走页表，开销大；**线程共享同一 `mm`** → 切换不换页表、TLB 不刷，开销小。这正是前面「切进程才切页表」的来由，也是线程比进程轻的核心原因。
-### 上下文切换
+### 上下文切换 
 CPU 从当前 task 换到下一个 task 时，要**保存旧 task 的寄存器、栈指针**，再**恢复新 task 的**——这套现场保存/恢复就是切换开销，每秒切换次数体现在 `vmstat` 的 `cs` 指标上。  
 - **两种切换代价不同**：**线程切换**共享同一 `mm`，只换寄存器/栈，不换页表、不刷 TLB，很轻；**进程切换**要换页表基址并刷 TLB，代价明显更高  
 - **什么时候会切换**：时间片用完被抢占、等锁/IO 阻塞、中断打断。频繁阻塞/唤醒或线程数过多 → 切换风暴，`cs` 飙升、CPU `sy` 涨、实际干活时间变少。
-- **排障信号**：`vmstat 1` 看 `cs` 是否异常高，然后配合其他命令定位是不是锁竞争或过多线程在抢 CPU。
+- **排障信号**：`vmstat 1` 看 `cs` 是否异常高，然后配合其他命令定位是不是锁竞争或过多线程在抢 CPU。  
 
 ### 内核调度 
-**内核调度**：决定「接下来哪个可运行 task 上 CPU、跑多久」的机制。每个 CPU 有自己的运行队列（rq），独立挑任务，互不干扰。
-- **调度类（按优先级排）**：`stop` > `deadline` > `rt`（实时）> `cfs`（普通）> `idle`。高优先级类有可跑任务时，直接抢占低优先级。SRE 日常打交道的几乎都是 **CFS**。
-- **CFS 怎么做到公平**：给每个任务记一个「虚拟运行时间」`vruntime`（实际跑得越久涨得越多），调度时总是挑 `vruntime` 最小（即跑得最少）的任务上 CPU，于是大家雨露均沾。`nice` 值通过权重调节 vruntime 增速：nice 越小权重越大、涨得越慢、拿到的 CPU 越多。
-- **实时类（RT）要小心**：`SCHED_FIFO/RR` 任务优先级高于所有 CFS 任务，一旦可运行就抢占普通进程——一个失控的 RT 进程会把 CPU 占满、让普通服务饿死，是经典的「CPU 用满但业务卡」陷阱。
-- **抢占时机**：当前任务时间片/vruntime 用尽、或有更高优先级任务就绪（新任务唤醒、中断/系统调用返回）时触发切换，切换本身的开销见上一节。
-- **排障工具**：`top` 看 `PR`/`NI`（优先级与 nice）、`chrt` 查/设实时优先级、`taskset` 绑核、`cat /proc/<pid>/sched` 看该任务调度明细、`perf sched` 分析调度延迟。
-- **CPU 亲和度（任务绑核）**：默认调度器可在任意核间迁移 task，亲和度是给这份自由加约束——限定某 task 只能跑在哪些核上。好处是让任务长期待在同一核，缓存/TLB 不被其他任务冲掉（呼应前面 TLB 一节）、避免跨 NUMA 访存、把延迟敏感服务绑到专属核。工具：`taskset -c 0,1 <cmd>` 设/查、`sched_setaffinity` 系统调用、cgroup `cpuset.cpus`；`/proc/<pid>/status` 的 `Cpus_allowed` 可看允许范围。注意绑太死反而会降低调度灵活性、引发核间负载不均。
+**调度策略（算法）**：Linux 把任务按调度类排出优先级梯队 `stop > deadline > rt > cfs > idle`，高类有可运行任务就抢占低类。普通进程走 CFS，实时/硬实时走 rt / deadline。
+- **CFS（完全公平调度，普通进程）**：核心是「按 `vruntime`（虚拟运行时间）排序的红黑树」。每次都挑 vruntime 最小（即跑得最少）的 task 上 CPU，于是大家雨露均沾。真实运行时间会按权重换算成 vruntime——权重越大，同样真实时间 vruntime 涨得越慢，拿到的 CPU 越多。
+- **rt（实时，SCHED_FIFO / RR）**：严格优先级（1–99），高优先级永远抢低优先级；该优先级进程一旦上cpu,不遵循时间片轮转，只有自己阻塞，或者被更高优先级进程抢走。才会停止占用cpu。优先级整体高于 CFS，一个失控 RT 任务会饿死普通服务。
+- **nice 值（调 CFS 权重）**：`nice` 范围 -20（最优先）~ 19（最逊），默认 0。它不直接等于 CPU 份额，而是映射到 CFS 的**权重**：nice 越小权重越大，同样真实运行时间 vruntime 涨得越慢 → 抢到越多 CPU。`nice` / `renice` 命令调整；容器内还会被 cgroup `cpu.shares` 再限一层。
+- **CPU 亲和度（任务绑核）**：默认调度器可在任意核间迁移 task，亲和度是给这份自由加约束——限定某 task 只能跑在哪些核。好处：长期待同一核，缓存/TLB 不被冲掉。  
+- **NUMA** :非一致性内存访问。在多cpu插槽服务器里，内存不是一块共享池，而是分区的，每块内存就近挂在某颗cpu上。当一个task跑在一个cpu1上，但它的内存是在cpu0附近的内存上。这样task处理速度就会很慢。**补充**：我们自己用的笔记本，台式机虽然也是多核，但是是一个cpu插槽塞多个核，属于UMA。像那种多cpu插槽，每个插槽附近有一块对应内存，这种才叫NUMA节点,对于这种服务器，一个进程的运行和内存应该都在一个节点上。
+```bash
+#查看某一个进程允许运行的核
+taskset -c -p <pid> 
+```
+### cgroup cpu配额
+cgroup 把一组 task 圈成一个「组」，对这组整体设 CPU 使用上限（quota）或权重（shares）。**原理**：按固定周期（period，如 100ms）发放 CPU 时间额度（quota，如 50ms）；组内任务在周期内累计用光额度后就被**限流（throttle）**暂停，到下个周期才重新发放——所以即便宿主机还有空闲 CPU，该组也用不到更多，表现为「CPU 用不满却变慢」。  
+容器内查看cpu配额：`cat /sys/fs/cgroup/cpu.max`输出50000 100000代表 100 毫秒一个周期，有50毫秒给该容器使用。  
+宿主机起容器：docker run --cpus=0.5   给某容器50%额度
 
 
 
+## 内存管理
+### 虚拟内存
+虚拟内存给每个进程一套独立、连续的「虚拟地址」,让程序以为自己独占整块连续的内存；实际访问时由 CPU 的 MMU（内存管理单元，负责将虚拟地址翻译为物理地址） + 页表把虚拟地址翻译成物理地址才真正读写 RAM。程序只跟虚拟地址打交道,永远不直接碰物理内存。  
+#### 大页表和小页表
+大页表可以有效提高TLB命中率，页表项也会少很多。但是细粒度不够，如果一个进程所需要的内存本身只要几MB，但是一个大页表中的一项可能就对应了500MB的物理内存，这样会浪费大量内存。并且大页要求大块连续物理内存,分配难。
+小页表则相反，假设一个进程需要的内存为1GB，那么理论上要几万条 TLB 才装得下,必然频繁 TLB miss,每次 miss 都要走多级页表访存,性能掉。  
+#### THP
+THP是透明大页，平时还是普通 4KB 小页,内核后台线程扫着扫着,发现一段地址空间连续且空闲,就自动把它升级成 2MB 大页;应用该咋跑咋跑,白嫖了大页的 TLB/页表收益。    
+**静态大页**：开机就预留一大块连续内存专供大页,应用得主动 mmap 去申请。好处是确定性强、绝不临时卡顿;坏处是死板——预留了不用就浪费,用超了就申请不到。  
+**为什么数据库类应用常关THP**:  
+- **写时复制（COW）放大**：数据库常 `fork()` 做快照/备份（Redis 的 RDB/AOF、MongoDB 后台刷盘、PostgreSQL 大量 fork。`fork` 用 COW——父子共享物理页，谁写才复制。小页（4KB）下改 1 字节只复制那一个 4KB 页；大页（2MB）下改 1 字节，**整个 2MB 物理页都得复制一份** → 快照期间内存可能瞬间翻倍、CPU 尖峰、延迟抖动，对追求稳定 p99 的数据库是灾难。  
+- **正确姿势**：关 `THP=never`，但可用**静态大页 hugetlbfs** 给共享内存区——静态大页是预留好的、不被后台回收/合并/拆分，确定性强。所以 Oracle/PostgreSQL 推荐静态大页，Redis/MongoDB 直接关 THP 用普通小页。  
+#### 缺页中断
+程序访问虚拟地址，但是对应的物理页面没有在内存中，需要从磁盘读取，这个过程称为缺页中断。
+### 排障场景
+**当机器卡，但内存看着还有一些空闲内存时**：  
+`free -h`查看时free这一行显示的内存是完全没被用的内存，但linux其实默认会尽可能使用你的空闲内存作为缓存，所以有的时候哪怕机器开的进程很少，但是free依旧不高。反过来，你看到机器的free还有那么一点，认为内存没问题也是错误的。而available这行才是真正应该看的，因为它把可回收的页缓存也算进去了。  
+`vmstat 1` 看si和so指标，si是每秒从交换区读回内存的页数，so是每秒换出到交换区的页数。若长期大于0或者偏高，那么系统就会卡，因为进程访问的内存其实在磁盘和内存之间来回倒腾,每次都是主要缺页+磁盘 I/O,延迟爆表。看bi/bo指标，它们代表读盘和写盘的次数。
 
 
-
-## 二、内存管理
-**核心概念**
-`虚拟内存`：每进程独立地址空间，靠页表 + TLB 映射物理页，4KB 页 + 大页（THP）。  
-`RSS / VSZ / PSS`：常驻、虚拟、按比例摊共享库后的实际占用。  
-`page cache`：文件读写先过内存缓存，是「空闲内存就是浪费内存」的根源，可被回收。  
-`匿名页 / swap`：堆栈等无文件 backing 的页，内存紧张时换出。  
-`OOM Killer`：物理内存耗尽时按 oom_score 选进程杀，容器看 cgroup memory limit 触发。  
-`回收 / 水位线`：direct reclaim、kswapd，水位低时进程被卡住同步回收，表现为延迟毛刺。  
-**排障场景**
-- 机器变慢但 free 还有 → 看 available 与 si/so，真凶是回收/换页。  
-- 进程莫名被杀 → dmesg | grep -i oom。  
-- THP 导致延迟抖动 → 数据库类应用常关 THP。  
-**工具**：free -m、/proc/meminfo、/proc/<pid>/status、smem、sar -r。
-
-## 三、文件系统与 I/O
-**核心概念**
-`VFS`：统一抽象层，ext4/xfs/procfs 都实现它，dcache/dentry 缓存路径解析。  
-`struct file / inode / fd`：一次打开 = 一个 struct file（含 f_pos），inode 是磁盘元数据，fd 是进程私有表下标。  
-`page cache 回写`：write 先进脏页，由 flusher 线程异步刷盘，dirty_ratio、dirty_background_ratio 控制节奏。  
-`fsync / O_DIRECT`：fsync 强制落盘（数据库靠它保证持久性），O_DIRECT 绕过 page cache。  
-`IO 调度器`：mq-deadline、bfq、none（NVMe 用 none）。  
-**排障场景**
-- 写延迟高 → iostat -x 看 await、%util，再看脏页堆积（/proc/vmstat 的 nr_dirty）。  
-- 删大文件卡住 → 空间不立即释放 + 大量回写。  
-- fsync 慢 → 磁盘或 RAID 缓存/电池策略。  
-**工具**：iostat -xz 1、iotop、pidstat -d、/proc/vmstat、bpftrace 的 biolatency。
-
-## 四、网络协议栈
-**核心概念**
-`socket 缓冲`：sk_buff 在各层流动，rmem/wmem、netdev_max_backlog。  
-`TCP 状态机`：TIME_WAIT（2MSL）、CLOSE_WAIT（应用没 close，排查连接泄漏关键）。  
-`conntrack`：有状态防火墙/NAT 的连接跟踪表，满了新连接直接失败。  
-`中断与软中断`：网卡收包走硬中断→软中断 NET_RX，单核打满看 RPS/RFS 分散。  
-`backlog 溢出`：半/全连接队列溢出（ss -lnt 的 Recv-Q/Send-Q、netstat -s 的 overflow）。  
+## 网络协议栈
+### socket 缓冲
+- **sk_buff**：内核里每个数据包的结构体，从应用到网卡整条路径上只被传递、就地加/剥协议头（不每层拷贝），省内存拷贝。
+- **发送缓冲 wmem**：`send()` 把数据放进发送缓冲（内核内存）→ TCP 负责分段/重传/拥塞控制再发网卡；缓冲满（对端 ACK 慢/拥塞）→ `send()` 阻塞或返回 EAGAIN。
+- **接收缓冲 rmem**：收包进接收缓冲 → app `recv()` 读走；缓冲满（app 读慢）→ TCP 通告窗口缩到 0（零窗口）→ 对端降速。TCP 接收窗口直接来自接收缓冲剩余空间。
+- **netdev_max_backlog**：网卡收包走硬中断→软中断 NET_RX，软中断处理不过来时包先进每 CPU 积压队列（默认 1000），满了丢包→重传。高 PPS 场景可调大或上 RPS/RFS。
+- **坑**：缓冲过大→bufferbloat 延迟暴涨；BDP 大的长肥链路缓冲不够→吞吐上不去；零窗口→对端被掐；backlog 溢出→丢包。查 `ss -m`(缓冲占用)。
+### TCP 状态机   
+- **TIME_WAIT（2MSL）**：主动关闭方最后发 ACK 后进入，等 2 倍报文最大生存时间（默认 60s）才释放，确保最后 ACK 到达、旧报文消亡。危害：高并发短连接（压测、微服务互调）堆积大量 TIME_WAIT
+- **CLOSE_WAIT（连接泄漏关键）**：被动关闭方收到对端 FIN、自己还没发 FIN 时处于此态，卡着说明本端应用没调 `close()`（代码 bug / 连接池没释放）。CLOSE_WAIT 一直涨=连接泄漏，最终 fd 耗尽。
+- 补充：**SYN_RECV** 半连接多→可能 SYN flood；**ESTABLISHED** 异常多→连接没及时释放。
+### backlog
+- **两个队列**：服务端 `listen()` 后内核为监听 socket 维护两个队列——**半连接队列**（收到 SYN、三次握手未完成，大小由 `tcp_max_syn_backlog` 控制）和**全连接队列**（握手完成、等应用 `accept()` 取走，大小 = min(应用传的 backlog, `net.core.somaxconn`)。
+- **溢出后果**：全连接队列满时新完成的握手连接被丢弃（`tcp_abort_on_overflow=0` 默认静默丢，客户端重传 SYN；=1 则直接 RST）→ 业务表现为**连接偶发超时/失败，但 CPU 内存都正常**，根因往往是应用 accept 慢（卡慢查询、GC、事件循环阻塞）。
+- **半连接队列**：被 SYN flood 塞满 → 后续 SYN 全丢；内核靠 `tcp_syncookies=1` 应对：不进队列、用带cookie的 SYN-ACK 直接应答。
+- **排查**：`ss -lnt` 看 Recv-Q（当前全连接队列堆积数）/Send-Q（队列上限），Recv-Q 持续 >0 就是 accept 跟不上，调大 somaxconn/应用 backlog 治标，优化应用 accept 治本。
+### conntrack
+- **是什么**：内核 netfilter 的**连接追踪表**，每条经过本机的连接（TCP/UDP/ICMP 都算）记一条表项，NAT、iptables、K8s Service 转发全依赖它。
+- **坑**：表容量 `nf_conntrack_max` 有限，表满后**新连接直接丢**（dmesg 报 `table full, dropping packet`）→ 新建连接失败/偶发超时。SNAT 网关、K8s 节点最易翻车。排查：`conntrack -C` 对比 count 和 max；解法：调大 `nf_conntrack_max`、调低 established 超时（默认竟长达 5 天）
 **排障场景**
 - 偶发超时 → 看重传、看 backlog 溢出。  
 - 大量 TIME_WAIT → 短连接风暴，调 tcp_tw_reuse/长连接/端口范围。  
-- 新连接失败 → conntrack 表满（nf_conntrack_count vs max）。  
-**工具**：ss -s、ss -antp、netstat -s、sar -n DEV/ETCP、nstat、tcpdump、ip -s link。
+- 新连接失败 → conntrack 表满。  
+### ipvs
+- **是什么**：内核自带的**四层负载均衡器**（LVS 项目），哈希表存转发规则（查找 O(1)），支持轮询/最少连接/源地址哈希等调度算法，规则增量更新。
+- **对比 iptables 转发**：iptables 靠 NAT 表逐条匹配实现转发，O(n) 线性遍历，规则上千后匹配延迟和 CPU 明显劣化，且更新要全量刷写；IPVS 万级 Service 无压力。
+- **与 kube-proxy 的关系**：kube-proxy 是 K8s 实现 Service 转发（ClusterIP → Pod IP）的组件，提供 iptables / ipvs 两种模式（`--proxy-mode`）——它只是"消费者"，两种模式分别用上面两个内核机制干活。Service 数量大时集群应切 ipvs 模式；更新的 eBPF 方案（Cilium）则绕开两者直接转发。
+- **与 conntrack 的关系**：无论哪种模式，Service 的 DNAT 改写映射都记在 conntrack 里（回程包靠它还原地址），所以 **K8s 节点的 conntrack 表天然是重灾区**——表满就丢新连接。
 
-## 五、系统调用与态切换
+## 系统调用与态切换
 **核心概念**
 `用户态/内核态`：read/write/epoll 触发陷入，切换有开销。  
 `调用开销`：高频小调用会放大 CPU sy。  
@@ -86,30 +99,26 @@ CPU 从当前 task 换到下一个 task 时，要**保存旧 task 的寄存器�
 **排障场景**
 - sy 高 → perf top 看内核热点，strace -c 统计调用次数。  
 - 上下文切换风暴 → 线程数过多或锁竞争。  
-**工具**：strace、perf trace、/proc/<pid>/status 的 ctxt 计数。
 
-## 六、中断与软中断
-**核心概念**
-`硬中断`：打断 CPU，越少越快，/proc/interrupts 看分布。  
-`软中断/tasklet/workqueue`：把重活推到中断上下文外。  
-`irqbalance / 亲和`：网卡中断绑核避免单核瓶颈。默认中断可由任意核处理，单核打满时就把指定中断（如网卡）绑到特定核：`/proc/irq/<n>/smp_affinity` 写核掩码（或 `irqbalance` 自动均衡、`RPS/RFS` 在软件层分散收包）。注意这是**中断**亲和度，和上一节「任务 CPU 亲和度」对象不同：前者绑的是中断，后者绑的是进程/线程。  
-**排障场景**
-- 单核 si 100% 其他空闲 → 网卡中断集中一核，调 RPS 或 irq affinity。  
-**工具**：mpstat -P ALL 1（每核 %soft/%irq）、/proc/interrupts、/proc/softirqs。
+## eBpf
+后续单独一章
 
-## 七、cgroup 与 namespace（容器内核基础）
-**核心概念**
-`namespace`：隔离 PID/NET/MNT/UTS/IPC/USER，让容器看到独立系统。  
-`cgroup v1/v2`：限制 CPU/内存/IO/PID，K8s requests/limits 落到 cgroup。  
-**排障场景**
-- 容器 CPU 限流、内存 OOM、PID 耗尽（fork 失败）都在 cgroup 层。  
-- 容器里 top 看到宿主机 → namespace 未隔离 proc 或工具没读 cgroup。  
-**工具**：/sys/fs/cgroup/...、/proc/<pid>/cgroup、crictl、kubectl top。
 
-## 八、内核参数调优 sysctl
-**核心概念**
-`/proc/sys/...` 与 sysctl -w：网络、内存、句柄等运行时可调。  
-关键项：net.core.somaxconn、tcp_max_tw_buckets、ip_local_port_range、vm.swappiness、vm.dirty_ratio、fs.file-max、nf_conntrack_max。  
-**排障场景**：高并发机器几乎都要针对性调一批 sysctl，改完持久化到 /etc/sysctl.d/。  
-**工具**：sysctl -a、sysctl -w、/etc/sysctl.conf。
-
+## 补充
+### kubeproxy访问一组pod的流程
+以 ipvs 模式为例，Service `10.96.0.10:80` 背后挂 3 个 Pod（`172.17.0.2/3/4:8080`）：
+**控制面（搭规则，一次性）**
+- kube-proxy watch API Server，拿到 Service 和它的 Endpoints（就绪 Pod 列表）
+- 在每个节点内核里创建一条 IPVS 虚拟服务：`ipvsadm -Ln` 可见 `TCP 10.96.0.10:80 → 调度算法(默认 rr)`
+- 每个 Pod IP 注册成该虚拟服务的 real server，Pod 扩缩容时增删对应条目
+- **注意 kube-proxy 不转发任何数据包**，它只负责把"期望的转发规则"写进内核，真正干活的是内核 IPVS
+**数据面（转发每个包）**
+```
+业务 Pod 发包：src=172.17.0.5:51000  dst=10.96.0.10:80   （目标是 ClusterIP）
+  → 包进内核 PREROUTING，IPVS 按调度算法（如轮询）选中 Pod2
+  → DNAT：dst 改写为 172.17.0.3:8080，同时 conntrack 记下映射
+  → 路由到 Pod2（同节点直达，跨节点走 overlay/路由）
+  → 回程包靠 conntrack 把 src 还原成 10.96.0.10:80，业务侧全程只看到 ClusterIP
+```
+- 后续同一条连接的包**不再走调度**，直接查 conntrack 映射转发——所以 Pod 被摘掉后**存量连接不受影响**，只有新连接才会重新调度
+- 排查：`ipvsadm -Ln` 看规则和后端列表、`conntrack -L | grep <clusterip>` 看映射、Pod 都正常但访问不通多半是 kube-proxy 没同步规则或 conntrack 残留脏条目
