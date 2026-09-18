@@ -1,25 +1,26 @@
 <script lang="ts">
 import I18nKey from "@i18n/i18nKey";
 import { i18n } from "@i18n/translation";
-import { navigateToPage } from "@utils/navigation-utils";
 import { onMount } from "svelte";
 import Icon from "@/components/common/Icon.svelte";
+import SearchResultItem from "@/components/pages/SearchResultItem.svelte";
 import {
 	loadSearchIndex,
 	searchPosts,
 	highlight,
 	buildSnippet,
+	buildPostUrl,
 	type SearchPost,
 } from "@/utils/search-client";
 
 export let keyword: string = "";
 
-let results: { url: string; titleHtml: string; excerptHtml: string }[] = [];
+let results: { url: string; titleHtml: string; snippetHtml: string }[] = [];
 let isSearching = false;
 let initialized = false;
 let index: SearchPost[] = [];
 
-const search = async (): Promise<void> => {
+const search = (): void => {
 	if (!keyword.trim()) {
 		results = [];
 		return;
@@ -27,16 +28,11 @@ const search = async (): Promise<void> => {
 	isSearching = true;
 	const posts = searchPosts(index, keyword);
 	results = posts.map((p) => ({
-		url: p.url,
+		url: buildPostUrl(p, keyword),
 		titleHtml: highlight(p.title, keyword),
-		excerptHtml: buildSnippet(p.description + "\n" + p.content, keyword),
+		snippetHtml: buildSnippet(p.description + "\n" + p.content, keyword),
 	}));
 	isSearching = false;
-};
-
-const handleResultClick = (event: Event, target: string): void => {
-	event.preventDefault();
-	navigateToPage(target);
 };
 
 // 监听 URL 中的 q 参数变化（前进/后退）
@@ -77,7 +73,7 @@ $: if (initialized && keyword !== undefined) {
 }
 </script>
 
-<div class="search-panel flex flex-col gap-6">
+<div class="flex flex-col gap-6 text-neutral-800 dark:text-neutral-200">
 	<div class="relative">
 		<input
 			type="text"
@@ -91,33 +87,24 @@ $: if (initialized && keyword !== undefined) {
 		/>
 	</div>
 
-	<div class="text-sm text-(--text-muted)">
+	<div class="text-sm opacity-60">
 		{#if isSearching}
 			{i18n(I18nKey.searchLoading)}
 		{:else if keyword.trim() && results.length > 0}
 			{i18n(I18nKey.searchSummary)} {results.length}
-			{:else if keyword.trim()}
-				<span class="search-no-results">{i18n(I18nKey.searchNoResults)}</span>
-			{/if}
+		{:else if keyword.trim()}
+			<span class="search-no-results">{i18n(I18nKey.searchNoResults)}</span>
+		{/if}
 	</div>
 
-	<div class="search-panel flex flex-col gap-3">
+	<!-- 结果列表与导航栏搜索浮层共用 SearchResultItem：标题 + 摘要，无封面/元信息 -->
+	<div class="flex flex-col gap-2">
 		{#each results as result}
-			<a
-				href={result.url}
-				on:click={(e) => handleResultClick(e, result.url)}
-				class="flex flex-col gap-2 rounded-xl border border-white/10 bg-black/40 p-4 transition-colors hover:border-(--primary)"
-			>
-				<div class="search-result-title flex items-center gap-2 text-lg font-bold">
-					<span>{@html result.titleHtml}</span>
-					<Icon icon="fa7-solid:arrow-right" class="shrink-0" />
-				</div>
-				{#if result.excerptHtml.includes("<mark>")}
-					<div class="line-clamp-3 text-sm text-white/60">
-						{@html result.excerptHtml}
-					</div>
-				{/if}
-			</a>
+			<SearchResultItem
+				url={result.url}
+				titleHtml={result.titleHtml}
+				snippetHtml={result.snippetHtml}
+			/>
 		{/each}
 	</div>
 </div>

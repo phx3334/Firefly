@@ -1,15 +1,16 @@
 <script lang="ts">
 import I18nKey from "@i18n/i18nKey";
 import { i18n } from "@i18n/translation";
-import { navigateToPage } from "@utils/navigation-utils";
 import { onMount } from "svelte";
 import Icon from "@/components/common/Icon.svelte";
+import SearchResultItem from "@/components/pages/SearchResultItem.svelte";
 import { getSearchUrl } from "@/utils/url-utils";
 import {
 	loadSearchIndex,
 	searchPosts,
 	highlight,
 	buildSnippet,
+	buildPostUrl,
 	type SearchPost,
 } from "@/utils/search-client";
 
@@ -39,7 +40,7 @@ const runSearch = (kw: string): void => {
 		const posts = searchPosts(index, kw);
 		total = posts.length;
 		result = posts.slice(0, 5).map((p) => ({
-			url: p.url,
+			url: buildPostUrl(p, kw),
 			titleHtml: highlight(p.title, kw),
 			snippetHtml: buildSnippet(p.description + "\n" + p.content, kw),
 		}));
@@ -69,12 +70,6 @@ const onBlur = (): void => {
 
 const openMobilePanel = (): void => {
 	panelOpen = true;
-};
-
-const handleResultClick = (event: Event, target: string): void => {
-	event.preventDefault();
-	closePanel();
-	navigateToPage(target);
 };
 
 const goToSearchPage = (event: Event): void => {
@@ -126,24 +121,21 @@ onMount(() => {
 	</div>
 
 	{#if panelOpen}
-		<div class="search-panel absolute right-0 top-full z-50 mt-2 w-[22rem] max-h-[70vh] overflow-y-auto rounded-xl border border-white/10 bg-black/50 p-3 shadow-2xl backdrop-blur-md">
+		<div
+			class="search-panel absolute right-0 top-full z-50 mt-2 w-[22rem] max-h-[70vh] overflow-y-auto rounded-xl border border-white/10 bg-black/50 p-3 text-white shadow-2xl backdrop-blur-md"
+		>
 			{#if isSearching}
 				<div class="px-2 py-6 text-center text-sm text-white/60">
 					{i18n(I18nKey.searchLoading)}
 				</div>
 			{:else if result.length > 0}
 				{#each result as item}
-					<a
-						href={item.url}
-						on:click={(e) => handleResultClick(e, item.url)}
-						class="flex flex-col gap-1 rounded-xl px-3 py-3 transition-colors hover:bg-white/10"
-					>
-						<div class="search-result-title flex items-center gap-1.5 text-base font-bold">
-							<span>{@html item.titleHtml}</span>
-							<Icon icon="fa7-solid:arrow-right" class="shrink-0" />
-						</div>
-						<div class="line-clamp-2 text-sm text-white/60">{@html item.snippetHtml}</div>
-					</a>
+					<SearchResultItem
+						url={item.url}
+						titleHtml={item.titleHtml}
+						snippetHtml={item.snippetHtml}
+						onNavigate={closePanel}
+					/>
 				{/each}
 				{#if total > 5}
 					<a
@@ -186,7 +178,9 @@ onMount(() => {
 			}}
 			role="presentation"
 		>
-			<div class="search-panel w-full max-w-[600px] rounded-2xl border border-white/10 bg-black/60 p-4 shadow-2xl backdrop-blur-md">
+			<div
+				class="search-panel w-full max-w-[600px] rounded-2xl border border-white/10 bg-black/60 p-4 text-white shadow-2xl backdrop-blur-md"
+			>
 				<div class="relative mb-3">
 					<input
 						type="text"
@@ -212,17 +206,12 @@ onMount(() => {
 				{:else if result.length > 0}
 					<div class="max-h-[50vh] overflow-y-auto">
 						{#each result as item}
-							<a
-								href={item.url}
-								on:click={(e) => handleResultClick(e, item.url)}
-								class="flex flex-col gap-1 rounded-xl px-3 py-3 transition-colors hover:bg-white/10"
-							>
-								<div class="search-result-title flex items-center gap-1.5 text-base font-bold">
-									<span>{@html item.titleHtml}</span>
-									<Icon icon="fa7-solid:arrow-right" class="shrink-0" />
-								</div>
-								<div class="line-clamp-2 text-sm text-white/60">{@html item.snippetHtml}</div>
-							</a>
+							<SearchResultItem
+								url={item.url}
+								titleHtml={item.titleHtml}
+								snippetHtml={item.snippetHtml}
+								onNavigate={closePanel}
+							/>
 						{/each}
 					</div>
 					<a

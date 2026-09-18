@@ -299,25 +299,15 @@ html {
     .float-panel-closed * {
         @apply pointer-events-none
     }
-    .search-panel mark {
+    /* 搜索结果高亮：深色浮层与 /search 页面通用，文字主色、透明底 */
+    .search-result-item mark {
         background-color: transparent;
         color: var(--primary);
         font-weight: inherit;
     }
-    .search-panel .search-result-title {
-        color: #ffffff;
-        font-weight: 700;
-        transition: color 0.15s ease;
-    }
-    .search-panel a:hover .search-result-title,
-    .search-panel a:focus-visible .search-result-title {
-        color: var(--primary);
-    }
-    .search-panel .search-no-results {
-        color: #ffffff;
-        font-size: 1.125rem;
-        font-weight: 600;
-    }
+    /* 标题/无结果文字色跟随父容器：浮层 text-white，页面显式深色文字，
+       不再强制白色，避免浅色页面上白字不可见 */
+
 
     /* 文章封面元数据覆盖层：底部渐变蒙版，保证文字在任意封面上清晰可读 */
     .post-cover-meta-scrim {

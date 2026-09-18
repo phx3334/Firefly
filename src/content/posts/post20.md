@@ -113,6 +113,99 @@ kube-proxy自动维护------>负载均衡（service）--------同一个应用的
 至于副本的故障检测、负载均衡代理目标端点的更新均有由k8s自动完成（kubelet检测pod状态汇报给
 apiserver组件，然后kube-proxy可以获取pod的状态变化，自动完成sevice代理目标端点的上下线）  
 **注意** ：kube-proxy为pod提供的是代理服务，而不是网络，pod的网络是kubelet调用网络插件实现的  
+#### ingress资源
+
+**一、ingress 的层级定位**
+
+前面我们讲了 service：service 是一份声明（yaml），由 kube-proxy 真正执行，工作在**网络4层（IP+端口）**，负责把一个应用的多个 POD 副本"聚合成一个稳定的访问入口"，并且只在集群**内部**生效。
+
+可 service 有两个天生的短板：
+1. 它只认 IP:端口做转发，**看不懂 HTTP 的域名和 URL 路径**，做不到"a.com 走前端、a.com/api 走后端"这种7层分流；
+2. 它默认只在集群内可达，要暴露给外网要么用 NodePort（端口难管理），要么用 LoadBalancer（每个都要外部IP和费用）。
+
+ingress 就是为了解决"**外部用户如何通过域名/URL路径，访问到集群内的 service**"而生的，它的层级定位可以这样理解：
+
+```text
+ 外部用户 (浏览器)
+      |
+      |  HTTP/HTTPS (带域名、路径)
+      v
+ [ ingress ]    ← 7层路由：按 Host(域名) + Path(路径) 决定转给谁
+      |            本质是一份规则声明(yaml)，由 ingress controller 真正执行
+      v
+ [ service ]    ← 4层负载均衡：把流量分摊给多个 POD 副本
+      |            一份规则声明(yaml)，由 kube-proxy 真正执行
+      v
+ [ POD 副本 ]   ← 真正跑应用的容器
+```
+
+可以看到：**ingress 是包在 service 外面的一层"7层入口网关"**，它不替代 service，而是在 service 之上工作——ingress 只负责"按域名/路径把外部请求引到正确的 service"，之后的事（分摊给哪个 POD、健康检查上下线）还是 service + kube-proxy 的活。
+
+跟 service 一样，**ingress 本身也只是一份声明（一段 yaml），自己不会转发流量**。真正干活的7层代理叫 **ingress controller**（如 ingress-nginx、Traefik，底层通常还是个 nginx），它才是实际运行的负载均衡器。二者的关系和"service(声明) + kube-proxy(执行者)"完全对称。
+
+**二、从输入 URL 到后端服务的完整流程**
+
+为了讲清楚，我们用一个具体场景：你在集群部署了博客后端 `blog-api`（监听 8080，起了3个副本，配了同名 service `blog-api`），并写了一条 ingress 规则——"`a.com/api/*` 转发给 `blog-api` 的 8080 端口"。现在用户在浏览器输入 `https://a.com/api/health` 回车，发生了什么？
+
+**第1步：DNS 解析**
+浏览器先查 DNS，把域名 `a.com` 解析成一个 IP。这个 IP 通常就是 ingress controller 对外暴露的地址：
+- 云上一般是 ingress controller 的 `LoadBalancer` 类型 service 分配到的外部 IP；
+- 自建集群可能是某个节点的 IP + `NodePort`，或 `hostNetwork` 直接用的节点 IP。
+总之，这个 IP 指向的是 **ingress controller 所在的 Pod**，而不是你的应用 Pod。
+
+**第2步：建立 TCP 连接 + TLS 握手（HTTPS）**
+浏览器与该 IP 的 443 端口建立 TCP 连接，然后进行 TLS 握手。ingress controller 上配置的证书（可以来自 cert-manager 自动签发，或手动挂的 Secret）会返回给浏览器，双方协商出加密通道。如果是 HTTP 则跳过 TLS，直接到 80 端口。
+
+**第3步：发送 HTTP 请求**
+浏览器发出 HTTP 请求，关键字段包括：
+- `Host: a.com`（请求的是哪个域名）
+- `Path: /api/health`（请求路径）
+- `Method: GET` 等。
+注意：这俩字段（Host + Path）正是 ingress 能做7层路由的"原材料"——纯 service 是看不到这些的。
+
+**第4步：请求到达 ingress controller**
+数据包到达 ingress controller 的 Pod。它通常以 Deployment 部署，里面跑着一个真正的7层代理（如 nginx），监听 80/443。
+
+**第5步：ingress controller 匹配路由规则（7层路由核心）**
+ingress controller 启动后，会通过前面讲过的 **list-watch 机制持续监听 API Server 上的 Ingress 资源**。当你 `kubectl apply` 那条 ingress 规则时，controller 就把规则翻译成自己内部的代理配置（比如 nginx 的 `server`/`location`），并 reload 生效。
+所以当请求到来，它手里有张"路由表"，根据 `Host: a.com` + `Path: /api/health` 一查，命中规则："`a.com/api/*` → service `blog-api` 的 8080 端口"。**这一步就是 ingress 比 service 强的地方——它能读懂 HTTP 域名和路径。**
+
+**第6步：定位后端 service（ClusterIP）**
+ingress controller 现在知道目标是一个叫 `blog-api` 的 service、端口 8080。在集群里，`blog-api` 这个 service 有一个**虚拟 IP（ClusterIP，例如 10.96.0.20）**和映射端口。ingress controller 把请求的目标地址设为 `10.96.0.20:8080`，准备转发。
+
+**第7步：交给 service，由 kube-proxy 做4层负载均衡**
+`10.96.0.20` 是个**虚拟 IP，并不对应任何真实网卡**。真正把"发往这个虚拟 IP 的流量分摊到多个 POD 副本"的，是 **kube-proxy**——这正是前面说的"service 只是一份声明，kube-proxy 才是执行者"的体现。kube-proxy 会监听 service 和 Endpoint 的变化，在**每个节点**上把负载均衡规则写成内核级的转发规则；包到达节点时，内核直接按规则挑一个后端 POD 转发，根本不需要把流量再绕回某个中心负载均衡器。
+
+kube-proxy 有两种工作模式，负载均衡的实现方式不一样：
+
+- **iptables 模式（默认）**：kube-proxy 给每个后端 POD 写一条 iptables 的 DNAT 规则，并用 `statistic --mode random --probability` 把它们串成一条"概率链"。以 `blog-api` 有 3 个健康副本为例：
+  - 第 1 条：以 1/3 的概率命中，把目标 DNAT 成 POD-1（`10.244.1.15:8080`）；没命中（剩 2/3）就继续往下；
+  - 第 2 条：在剩下的流量里以 1/2 的概率命中，DNAT 成 POD-2（`10.244.2.23:8080`）；没命中就继续；
+  - 第 3 条：无条件（100%）命中，DNAT 成 POD-3（`10.244.3.7:8080`）。
+  
+  长期统计下来每个 POD 大约分到 1/3 流量，实现了**近似随机的负载均衡**。注意 iptables 模式不是严格轮询，而是靠概率分摊；请求量够大时各 POD 趋于均匀，但单个连接级别不够"公平"。
+
+- **ipvs 模式**：kube-proxy 用 Linux 内核的 LVS（IP Virtual Server）来干活。它为 `blog-api` 的 ClusterIP:Port 建一个"虚拟服务"，下面挂 3 个真实服务器（就是 3 个 POD 的 IP:Port），并支持真正的调度算法：
+  - `rr`（轮询 round-robin）：请求一个一个轮流分给各 POD；
+  - `lc`（最少连接 least connection）：优先发给当前连接数最少的 POD；
+  - `sh`（源地址哈希 source hashing）：同一客户端 IP 总落到同一 POD，实现**会话保持**；
+  - 另有 `dh`、`sed`、`nq` 等。
+  ipvs 是内核态转发、性能远高于 iptables，集群 service 数量很大时推荐开启。
+
+不管哪种模式，最终效果一致：从 `blog-api` 的多个 Endpoint 里挑出一个 POD 的真实 IP:端口（如 `10.244.1.15:8080`），对包做 **DNAT（目标地址转换）**，把目标地址改写掉。
+
+至于"此刻有哪些后端 POD 可用"，由 Endpoints Controller 根据 POD 健康状态维护（`blog-api` 的 3 个副本对应 3 个 Endpoint）。kube-proxy 会据此动态刷新上面的转发规则——某副本挂了，它会被自动移出负载均衡池，流量不再被打到它身上。
+
+**第8步：到达 POD 网络（CNI）**
+改写后的包，通过集群网络插件（CNI，如 Calico、Flannel）提供的网络，跨节点路由到目标 POD 所在节点，再送进具体的容器。`blog-api` 容器里监听 8080 的进程收到请求。
+
+**第9步：应用处理并返回响应**
+`blog-api` 处理 `/api/health`，生成响应体（比如 `{"status":"ok"}`）。
+
+**第10步：响应原路返回**
+响应沿原路径回去：容器 →（CNI 网络）→ 节点 → kube-proxy 规则做反向 NAT 还原源地址 → ingress controller →（经 TLS 加密）→ 浏览器。浏览器收到 `{"status":"ok"}`，渲染或处理。
+
+
 
 ### 主节点部署的组件
 #### etcd分布式数据库

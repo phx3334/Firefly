@@ -741,6 +741,14 @@ const siteLang = lang.replace("_", "-");
       height: 4.5rem !important;
     }
   }
+
+  /* 搜索跳转后，正文里命中关键字的静态高亮：重点色文字 + 淡色底 */
+  mark.in-post-keyword {
+    border-radius: 0.25rem;
+    padding: 0 0.15rem;
+    background: color-mix(in srgb, var(--primary) 22%, transparent);
+    color: var(--primary);
+  }
 </style>
 
 <script>
@@ -1386,6 +1394,85 @@ function disableAnimation() {
     setup();
   } else {
     document.addEventListener("swup:enable", setup);
+  }
+
+  // ===== 搜索结果关键字高亮 =====
+  // 搜索链接形如 /posts/xxx/?kw=关键字#小标题：滚动到小标题完全交给浏览器/Swup
+  // 的原生锚点处理（正文标题自带 scroll-margin），这里只负责在该小标题所属
+  // section 内，把关键字标成重点色，方便辨识。
+  function highlightSearchKeyword() {
+    const params = new URLSearchParams(window.location.search);
+    const kw = params.get("kw")?.trim() ?? "";
+    if (!kw) return;
+
+    // 高亮范围：hash 小标题所在的 section（remark-sectionize 已把标题和正文包进
+    // section）；无 hash 时退到整篇文章容器
+    const hash = window.location.hash.slice(1);
+    const heading = hash ? document.getElementById(decodeURIComponent(hash)) : null;
+    const scope: ParentNode | null = heading
+      ? heading.closest("section")
+      : document.getElementById("post-container");
+    if (!scope) return;
+
+    // 收集含关键字的文本节点（跳过代码块和已有 mark，不跨节点匹配）
+    const needle = kw.toLowerCase();
+    const targets: Text[] = [];
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const value = node.nodeValue ?? "";
+        const parent = node.parentElement;
+        if (
+          !value.toLowerCase().includes(needle) ||
+          !parent ||
+          parent.tagName === "MARK" ||
+          !!parent.closest("code, pre, script, style")
+        ) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    while (walker.nextNode()) targets.push(walker.currentNode as Text);
+
+    targets.forEach((textNode) => {
+      const value = textNode.nodeValue ?? "";
+      const lower = value.toLowerCase();
+      const fragment = document.createDocumentFragment();
+      let cursor = 0;
+      let idx = lower.indexOf(needle);
+      while (idx >= 0) {
+        if (idx > cursor)
+          fragment.appendChild(document.createTextNode(value.slice(cursor, idx)));
+        const mark = document.createElement("mark");
+        mark.className = "in-post-keyword";
+        mark.textContent = value.slice(idx, idx + kw.length);
+        fragment.appendChild(mark);
+        cursor = idx + kw.length;
+        idx = lower.indexOf(needle, cursor);
+      }
+      if (cursor < value.length)
+        fragment.appendChild(document.createTextNode(value.slice(cursor)));
+      textNode.parentNode?.replaceChild(fragment, textNode);
+    });
+  }
+  // 硬加载 / 刷新进入（DOM 已解析，样式就位后立即染色）
+  requestAnimationFrame(highlightSearchKeyword);
+  window.addEventListener("load", highlightSearchKeyword);
+  // Swup 无刷新切页后：新内容里高亮关键字，并补滚到 hash 小标题
+  // （Swup 跨页导航时自身的 scroll:anchor 可能不触发；scrollIntoView
+  // 会尊重正文 [id] 自带的 scroll-margin-top，落点与原生锚点一致）
+  const registerKeywordHook = () => {
+    window.swup?.hooks?.on("page:view", () => {
+      const hash = window.location.hash.slice(1);
+      if (hash)
+        document.getElementById(decodeURIComponent(hash))?.scrollIntoView();
+      highlightSearchKeyword();
+    });
+  };
+  if (window?.swup?.hooks) {
+    registerKeywordHook();
+  } else {
+    document.addEventListener("swup:enable", registerKeywordHook);
   }
 
   document.addEventListener("astro:page-load", scheduleContentOverflowEnhancements);

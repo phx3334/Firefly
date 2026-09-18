@@ -1,6 +1,12 @@
 // 客户端文章搜索工具：加载由 /api/search.json 生成的静态索引并在浏览器内过滤。
 // 无需后端服务，dev 与 build 均可工作。
 
+export interface SearchBlock {
+	id: string;
+	text: string;
+	headingId: string | null;
+}
+
 export interface SearchPost {
 	url: string;
 	title: string;
@@ -9,6 +15,7 @@ export interface SearchPost {
 	date: string;
 	excerpt: string;
 	content: string;
+	blocks?: SearchBlock[];
 }
 
 let cache: SearchPost[] | null = null;
@@ -91,4 +98,36 @@ function escapeHtml(s: string): string {
 
 function escapeRegExp(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// 找到第一个包含任一关键字的块，返回它上方最近小标题的 id
+// （关键字在标题上时返回该标题；文章开头无标题时返回 null）。
+export function findNearestHeadingId(
+	blocks: SearchBlock[],
+	keyword: string,
+): string | null {
+	const terms = keyword
+		.trim()
+		.toLowerCase()
+		.split(/\s+/)
+		.filter(Boolean);
+	if (!terms.length) return null;
+	for (const block of blocks) {
+		const lower = block.text.toLowerCase();
+		if (terms.some((t) => lower.includes(t))) {
+			return block.headingId;
+		}
+	}
+	return null;
+}
+
+// 构造结果链接：?kw=关键字（文章页据此高亮）#最近小标题（原生锚点滚动）。
+// 无小标题时只带 kw，落到文章顶部。
+export function buildPostUrl(post: SearchPost, keyword: string): string {
+	const firstTerm = keyword.trim().split(/\s+/)[0] ?? "";
+	const headingId = findNearestHeadingId(post.blocks ?? [], keyword);
+	let target = post.url;
+	if (firstTerm) target += `?kw=${encodeURIComponent(firstTerm)}`;
+	if (headingId) target += `#${headingId}`;
+	return target;
 }
