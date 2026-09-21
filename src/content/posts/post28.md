@@ -182,7 +182,7 @@ kubectl logs <pod-name> -c jenkins
 - 系统回归到仅有Master的状态，实现资源的按需使用和零闲置浪费。
 #### 如何让jenkins可以自主创建slave pod
 - 在jenkins里面下载Kubernetes 插件
-- 给Jenkins Pod 挂一个 ServiceAccount，并用 RBAC 授权，这样api server才认可
+- 给Jenkins Pod 挂一个 ServiceAccount，并用 RBAC 授权，这样api server才认可（这里的 ServiceAccount 用于插件调 API Server 创建 slave Pod，授权细节见文末「RBAC详解」）
 - 按照jenkins里面创建从节点的配置生成符合k8s创建pod的yaml文件格式
 - 创建从节点pod
 #### 动态slave pod实战
@@ -559,8 +559,8 @@ Harbor 的 `values.yaml` 里写了 `registry.storageClass: harbor-storage-class`
 2. **派单**：K8s 内置控制器不处理这个 StorageClass，转交给注册了 `example.com/nfs` 的 Provisioner。
 3. **建目录**：Provisioner 监听到 PVC，在 NFS 共享里创建子目录 `/data/nfs/harbor/harbor-registry-pvc-<随机串>`。
 4. **建卷绑定**：生成一个指向该子目录的 NFS 类型 PV，并把它与 PVC 绑定（`Bound`）。
-5. **挂载**：Kubelet 拉起 registry 容器(Harbor里面的一个Pod,存储镜像的)时，把该 PV 挂到容器的挂载路径（如 `/storage`）。
-6. **写入**：registry 直接往这个目录写镜像数据，全程无人工建 PV。
+5. **挂载**：Kubelet 拉起 registry 容器（Harbor 里存储镜像的组件）时，沿引用链 `volumeMount(/storage) → volumes → PVC → PV → NFS 子目录` 完成挂载，volumes 里的 `persistentVolumeClaim.claimName` 指向 PVC，PVC 又 Bound 到记录了 NFS server/path 的 PV。容器内对 `/storage` 的读写最终落在 NFS 服务器的实际目录上。
+6. **写入**：registry 以为自己在写本地盘，实际数据全在 NFS 上，全程无人工建 PV。
 验证：
 ```bash
 kubectl get pvc -n harbor     # STATUS 应为 Bound
@@ -700,3 +700,70 @@ EOF'''
 3. **镜像 tag 用 commit id 而非 latest**：每次构建 tag 唯一，出问题可回滚到任意历史版本——这正是前面提到的 `latest` 标签陷阱的解法。
 4. **分支即环境**：develop 自动发布测试环境，master 走 `input` 人工确认后发布生产。
 5. **踩坑记录**：获取分支/commit 的代码必须放在 `checkout scm` 之后；Pod Template 里的 kubectl 版本要与集群版本一致
+
+
+## 补充
+### RBAC详解
+前文 Jenkins 凭证里那两份 kubeconfig（`kuber-config-test` / `kuber-config-prod`），本质上就是两把「钥匙」——Jenkins 拿着它就能对 K8s 集群执行 `kubectl set image`。这把钥匙为什么有效、能干什么、不能干什么，由 RBAC 决定。
+#### RBAC 是什么
+K8s 的所有请求都经过 API Server，RBAC（基于角色的访问控制）是 API Server 的鉴权机制：**先确认你是谁（认证），再确认你能干什么（授权）**。kubeconfig 中的用户信息完成第一步，第二步就靠 RBAC 规则判断。
+核心由四个对象组成，两两配对：
+| 对象               | 作用范围   | 说明                                                    |
+| ------------------ | ---------- | ------------------------------------------------------- |
+| Role               | 命名空间内 | 定义一组权限，如「能对 default 下的 Deployment 做读写」 |
+| ClusterRole        | 整个集群   | 定义集群级权限，或跨命名空间复用的权限模板              |
+| RoleBinding        | 命名空间内 | 把 Role 授权给某个用户/组/ServiceAccount                |
+| ClusterRoleBinding | 整个集群   | 把 ClusterRole 授权出去，作用域是全集群                 |
+关键点：**Role/RoleBinding 只在所属命名空间生效**。前文 `kubectl set image deployment/test` 能成功，是因为 kubeconfig 对应的身份在目标命名空间里有 Deployment 的写权限。
+
+#### 实战：给 Jenkins 流水线一个最小权限身份
+生产实践里不应该把管理员 kubeconfig 塞进 Jenkins，正确做法是创建专用的 ServiceAccount，只授予操作 Deployment 的权限：
+```yaml
+# 1. 创建专用 ServiceAccount（Jenkins 的身份）
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-deployer
+  namespace: test
+---
+# 2. Role：只允许操作 Deployment 的发布动作（没有删除、没有看 Secret 的权限）
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-updater
+  namespace: test
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+# 3. RoleBinding：把 Role 绑定给 jenkins-deployer
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-deployer-binding
+  namespace: test
+subjects:
+  - kind: ServiceAccount
+    name: jenkins-deployer
+    namespace: test
+roleRef:
+  kind: Role
+  name: deployment-updater
+  apiGroup: rbac.authorization.k8s.io
+```
+再基于这个 ServiceAccount 的 token 生成 kubeconfig，存入 Jenkins 凭证——这就是前文 `kuber-config-test` 的来源。测试和生产各建一份，权限范围分别限定在各自的命名空间。
+
+到这里，前文提到的两个「RBAC 授权点」就对上号了。集群里实际存在**两条并行的授权链路**，分别服务于构建和发布，各用各的身份、互不依赖：
+```
+链路一（构建）：Kubernetes 插件拉起 slave Pod
+  Jenkins Master Pod 挂载的 ServiceAccount   ← 前文「如何让jenkins可以自主创建slave pod」提到的那个
+  需要 pods 的 create/delete/exec 等权限（管 Pod 生命周期）
+
+链路二（发布）：kubectl set image 更新 Deployment
+  Jenkins 凭证里的 kubeconfig（kuber-config-test / prod）  ← 前文「凭据配置」
+  ↓ 由上面的 jenkins-deployer ServiceAccount 签发
+  只需要 deployments 的 get/patch/update 权限（管发布）
+```
+
+为什么要分成两个身份，而不是一个 ServiceAccount 全包？这正是 RBAC 最小权限原则的实际落地：链路一能 `exec` 进任意容器，一旦泄漏等于交出构建环境；链路二只能改目标命名空间的 Deployment，泄漏后攻击面有限。如果混用一个权限大而全的身份，两条链路的安全边界就都失效了——权限按「用途」切分，是共享集群里最基础的隔离手段，多团队共用集群时（各团队绑定各自命名空间的 Role）遵循的也是同一个思路。
