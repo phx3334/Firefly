@@ -67,16 +67,33 @@ export function assignBlockIds(tree) {
 	return tree;
 }
 
+// 块的「可搜索文本」：拼接文本节点但跳过 code/script/style 内的文字。
+// 搜索索引用 stripMarkdown 剔除了行内代码，若块文本保留 `code` 内容，
+// 关键字会命中正文里搜不到的代码片段，导致摘要位置与跳转小节错位。
+// 注意：仅影响收集到 file.data.blocks 的 text，不参与块 id 计算。
+function toSearchableText(node) {
+	if (node.type === "text") return node.value;
+	if (
+		node.type === "element" &&
+		(node.tagName === "code" ||
+			node.tagName === "script" ||
+			node.tagName === "style")
+	) {
+		return "";
+	}
+	return (node.children ?? []).map(toSearchableText).join(" ");
+}
+
 // 收集块索引（文档顺序）：[{ id, text, headingId }]
 // headingId = 该块上方最近标题的 id（标题块指向自身），搜索命中后据此
-// 跳到「距离关键字最近的小标题」；标题之前的块为 null（退到文章顶部）。
+// 跳到「距离关键字最近的小标题」；标题之前的块为 null（直接定位到该块）。
 export function collectBlocks(tree) {
 	const blocks = [];
 	let currentHeadingId = null;
 	visit(tree, "element", (node) => {
 		if (!BLOCK_TAGS.has(node.tagName)) return;
 		const id = node.properties?.id;
-		const text = normalize(toString(node));
+		const text = normalize(toSearchableText(node));
 		if (!id || !text) return;
 		if (HEADING_RE.test(node.tagName)) currentHeadingId = id;
 		blocks.push({ id, text, headingId: currentHeadingId });

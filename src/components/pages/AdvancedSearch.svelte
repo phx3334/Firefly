@@ -8,8 +8,7 @@ import {
 	loadSearchIndex,
 	searchPosts,
 	highlight,
-	buildSnippet,
-	buildPostUrl,
+	buildSearchResult,
 	type SearchPost,
 } from "@/utils/search-client";
 
@@ -27,11 +26,14 @@ const search = (): void => {
 	}
 	isSearching = true;
 	const posts = searchPosts(index, keyword);
-	results = posts.map((p) => ({
-		url: buildPostUrl(p, keyword),
-		titleHtml: highlight(p.title, keyword),
-		snippetHtml: buildSnippet(p.description + "\n" + p.content, keyword),
-	}));
+	results = posts.map((p) => {
+		const built = buildSearchResult(p, keyword);
+		return {
+			url: built.url,
+			titleHtml: highlight(p.title, keyword),
+			snippetHtml: built.snippetHtml,
+		};
+	});
 	isSearching = false;
 };
 

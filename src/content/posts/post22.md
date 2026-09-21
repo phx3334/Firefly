@@ -1079,10 +1079,13 @@ spec:
       - image: nginx:1.14
         name: nginx
 ```
-- metadata.name是该deployment资源的名字
+- metadata.labels.name是该deployment资源的名字
 - metadata.labels.app是deployment资源所属组的名字
 - spec.selector.matchLabels.app是认领条件，表示deployment控制器只管理app=web的pod
 - spec.template.metadata.labels.app是每个pod身上的标签。
+#### apiVersion
+- v1代表核心组，包括Pod、Service、ConfigMap、Secret、PV、PVC、Namespace、ServiceAccount等
+- apps/v1代表apps组，包括Deployment、StatefulSet、DaemonSet、ReplicaSet等
 
 ### 调谐与调度
 调谐（Reconcile）和调度（Schedule）是两件不同的事：
@@ -1096,61 +1099,3 @@ spec:
 - 调谐循环：控制器读 spec → 对比 status → 执行动作（创建/删除/更新）→ 更新 status → 再来一遍，直到 status 与 spec 一致。
 - 看 `kubectl get deployment` 的 DESIRED / CURRENT / READY 三列：DESIRED 来自 `spec.replicas`，CURRENT 和 READY 来自 `status` 里的 `replicas`、`readyReplicas`。
 - 想看填充后的 status：`kubectl get deployment web -o yaml`，最下面的 `status:` 段就是控制器写好的实际状态。
-
-### cpu亲和性和pod调度亲和性
-两者名字像，但完全是两码事：
-| | CPU 亲和性 | Pod 调度亲和性 |
-|---|---|---|
-| 绑定对象 | **CPU 核** | **节点 / 其它 Pod** |
-| 解决什么 | 性能稳定（缓存命中、减少切换） | 调度位置（Pod 放哪台机器） |
-| 谁实现 | 节点上的 **kubelet**（CPU Manager） | 集群的 **kube-scheduler** |
-| YAML 写在 | 容器 `resources`（间接触发） | Pod `spec.affinity` / `nodeSelector` |
-| Linux 对应 | `taskset` | 无（纯 K8s 概念） |
-
-##### CPU 亲和性
-把容器"绑死"在固定的 CPU 核上跑，不来回跳，换来缓存命中率高、性能稳定。
-K8s 用 CPU Manager 的 `static` 策略实现，触发条件：**Guaranteed QoS（requests == limits）+ CPU 请求是整数**：
-```yaml
-spec:
-  containers:
-  - name: app
-    resources:
-      requests:
-        cpu: "2"        # 整数 CPU，且 requests==limits → 独占 2 个核
-        memory: 1Gi
-      limits:
-        cpu: "2"
-        memory: 1Gi
-```
-Linux 上的 CPU 亲和性命令（`taskset`）：
-```bash
-nproc                     # 看机器有几个 CPU 核
-taskset -p <pid>          # 查看某个进程当前绑定在哪些核
-taskset -pc 0-3 <pid>     # 把已有进程绑定到核 0-3
-taskset -c 0-3 <命令>     # 启动命令时直接绑定核 0-3
-```
-
-##### Pod 调度亲和性
-决定"新 Pod 调度到哪台节点"，比 CPU 亲和性更常见：
-- `nodeSelector`：最简单，指定节点标签
-```yaml
-spec:
-  nodeSelector:
-    disktype: ssd        # 只调度到带 disktype=ssd 标签的节点
-```
-- `nodeAffinity`：更灵活，required（必须）/ preferred（倾向）
-```yaml
-spec:
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: disktype
-            operator: In
-            values:
-            - ssd
-```
-- `nodeAffinity` 完整示例（硬亲和 + 软亲和组合）见上文「3、节点亲和性」一节。
-
-

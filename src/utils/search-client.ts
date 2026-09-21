@@ -65,27 +65,22 @@ export function highlight(text: string, keyword: string): string {
 	return escaped.replace(re, "<mark>$1</mark>");
 }
 
-export function buildSnippet(
-	content: string,
-	keyword: string,
-	radius = 90,
-): string {
+// 从文本中最早出现的任一关键字位置开始截取摘要（最多 radius * 2 字符）并高亮
+function buildSnippetText(text: string, keyword: string, radius = 90): string {
 	const q = keyword.trim();
-	if (!q) return escapeHtml(content.slice(0, radius * 2));
-	const lower = content.toLowerCase();
+	if (!q) return escapeHtml(text.slice(0, radius * 2));
+	const lower = text.toLowerCase();
 	const terms = q.split(/\s+/).filter(Boolean);
-	// 在所有命中词中取最靠前的位置作为锚点，保证摘要一定包含并标出关键字
 	let idx = -1;
 	for (const t of terms) {
 		const i = lower.indexOf(t.toLowerCase());
 		if (i >= 0 && (idx < 0 || i < idx)) idx = i;
 	}
 	if (idx < 0) idx = 0;
-	// 摘要直接从第一个命中位置开始（最多 radius * 2 字符）
-	const end = Math.min(content.length, idx + radius * 2);
-	let snippet = content.slice(idx, end);
+	const end = Math.min(text.length, idx + radius * 2);
+	let snippet = text.slice(idx, end);
 	if (idx > 0) snippet = "…" + snippet;
-	if (end < content.length) snippet = snippet + "…";
+	if (end < text.length) snippet = snippet + "…";
 	return highlight(snippet, q);
 }
 
@@ -100,34 +95,45 @@ function escapeRegExp(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// 找到第一个包含任一关键字的块，返回它上方最近小标题的 id
-// （关键字在标题上时返回该标题；文章开头无标题时返回 null）。
-export function findNearestHeadingId(
-	blocks: SearchBlock[],
-	keyword: string,
-): string | null {
-	const terms = keyword
-		.trim()
-		.toLowerCase()
-		.split(/\s+/)
-		.filter(Boolean);
-	if (!terms.length) return null;
-	for (const block of blocks) {
-		const lower = block.text.toLowerCase();
-		if (terms.some((t) => lower.includes(t))) {
-			return block.headingId;
-		}
-	}
-	return null;
+export interface BuiltSearchResult {
+	url: string;
+	snippetHtml: string;
 }
 
-// 构造结果链接：?kw=关键字（文章页据此高亮）#最近小标题（原生锚点滚动）。
-// 无小标题时只带 kw，落到文章顶部。
-export function buildPostUrl(post: SearchPost, keyword: string): string {
-	const firstTerm = keyword.trim().split(/\s+/)[0] ?? "";
-	const headingId = findNearestHeadingId(post.blocks ?? [], keyword);
-	let target = post.url;
-	if (firstTerm) target += `?kw=${encodeURIComponent(firstTerm)}`;
-	if (headingId) target += `#${headingId}`;
-	return target;
+// 构造单条搜索结果的链接与摘要，保证「面板里看到的摘要行 / 跳转的小标题 /
+// 正文里高亮的那一块」是同一处命中，三者不再各自计算：
+// 1. 正文块命中（文档顺序第一个包含任一关键字的块）：
+//    链接 = 文章地址?kw=关键字&blk=块id#最近小标题（块在首个标题前时 hash 用块 id），
+//    摘要取自该块文本，文章页只在该块内标记关键字；
+// 2. 仅描述命中（正文无命中）：摘要取描述行，描述不渲染在正文中，链接不带定位参数；
+// 3. 仅标题/标签命中：摘要取正文开头（无高亮），链接为文章地址。
+export function buildSearchResult(
+	post: SearchPost,
+	keyword: string,
+): BuiltSearchResult {
+	const q = keyword.trim();
+	const terms = q.split(/\s+/).filter(Boolean);
+	if (terms.length) {
+		for (const block of post.blocks ?? []) {
+			const lower = block.text.toLowerCase();
+			if (terms.some((t) => lower.includes(t.toLowerCase()))) {
+				const params = new URLSearchParams({ kw: q, blk: block.id });
+				const hash = encodeURIComponent(block.headingId ?? block.id);
+				return {
+					url: `${post.url}?${params.toString()}#${hash}`,
+					snippetHtml: buildSnippetText(block.text, q),
+				};
+			}
+		}
+		const desc = post.description ?? "";
+		if (terms.some((t) => desc.toLowerCase().includes(t.toLowerCase()))) {
+			return { url: post.url, snippetHtml: buildSnippetText(desc, q) };
+		}
+	}
+	return {
+		url: post.url,
+		snippetHtml: escapeHtml(
+			(post.content || post.description || "").slice(0, 180),
+		),
+	};
 }

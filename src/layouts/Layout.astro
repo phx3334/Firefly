@@ -1396,36 +1396,40 @@ function disableAnimation() {
     document.addEventListener("swup:enable", setup);
   }
 
-  // ===== 搜索结果关键字高亮 =====
-  // 搜索链接形如 /posts/xxx/?kw=关键字#小标题：滚动到小标题完全交给浏览器/Swup
-  // 的原生锚点处理（正文标题自带 scroll-margin），这里只负责在该小标题所属
-  // section 内，把关键字标成重点色，方便辨识。
+  // ===== 搜索结果关键字高亮（只标记搜索摘要对应的那一块）=====
+  // 搜索链接形如 /posts/xxx/?kw=关键字&blk=块id#最近小标题：
+  // hash 负责滚动定位（浏览器原生锚点 / Swup 切页后补滚，正文 [id] 自带
+  // scroll-margin-top），kw+blk 只负责把搜索面板摘要所在的那一个块
+  // （段落/列表项/表格单元格/标题）里的关键字标成重点色，文章其余位置不标记。
   function highlightSearchKeyword() {
     const params = new URLSearchParams(window.location.search);
     const kw = params.get("kw")?.trim() ?? "";
-    if (!kw) return;
+    const blk = params.get("blk") ?? "";
+    if (!kw || !blk) return;
 
-    // 高亮范围：hash 小标题所在的 section（remark-sectionize 已把标题和正文包进
-    // section）；无 hash 时退到整篇文章容器
-    const hash = window.location.hash.slice(1);
-    const heading = hash ? document.getElementById(decodeURIComponent(hash)) : null;
-    const scope: ParentNode | null = heading
-      ? heading.closest("section")
-      : document.getElementById("post-container");
+    const scope = document.getElementById(blk);
     if (!scope) return;
 
+    // 多个关键字（空格分隔）逐个转义，在目标块内匹配任一词
+    const escapedTerms = kw
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    if (!escapedTerms.length) return;
+    const re = new RegExp(escapedTerms.join("|"), "gi");
+
     // 收集含关键字的文本节点（跳过代码块和已有 mark，不跨节点匹配）
-    const needle = kw.toLowerCase();
     const targets: Text[] = [];
     const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         const value = node.nodeValue ?? "";
         const parent = node.parentElement;
+        re.lastIndex = 0;
         if (
-          !value.toLowerCase().includes(needle) ||
           !parent ||
           parent.tagName === "MARK" ||
-          !!parent.closest("code, pre, script, style")
+          !!parent.closest("code, pre, script, style") ||
+          !re.test(value)
         ) {
           return NodeFilter.FILTER_REJECT;
         }
@@ -1436,37 +1440,48 @@ function disableAnimation() {
 
     targets.forEach((textNode) => {
       const value = textNode.nodeValue ?? "";
-      const lower = value.toLowerCase();
       const fragment = document.createDocumentFragment();
       let cursor = 0;
-      let idx = lower.indexOf(needle);
-      while (idx >= 0) {
-        if (idx > cursor)
-          fragment.appendChild(document.createTextNode(value.slice(cursor, idx)));
+      let match: RegExpExecArray | null;
+      re.lastIndex = 0;
+      while ((match = re.exec(value)) !== null) {
+        if (match.index > cursor)
+          fragment.appendChild(document.createTextNode(value.slice(cursor, match.index)));
         const mark = document.createElement("mark");
         mark.className = "in-post-keyword";
-        mark.textContent = value.slice(idx, idx + kw.length);
+        mark.textContent = match[0];
         fragment.appendChild(mark);
-        cursor = idx + kw.length;
-        idx = lower.indexOf(needle, cursor);
+        cursor = match.index + match[0].length;
       }
       if (cursor < value.length)
         fragment.appendChild(document.createTextNode(value.slice(cursor)));
       textNode.parentNode?.replaceChild(fragment, textNode);
     });
   }
-  // 硬加载 / 刷新进入（DOM 已解析，样式就位后立即染色）
+  // 硬加载 / 刷新进入（DOM 已解析，样式就位后立即染色；hash 滚动交给浏览器原生锚点）
   requestAnimationFrame(highlightSearchKeyword);
-  window.addEventListener("load", highlightSearchKeyword);
-  // Swup 无刷新切页后：新内容里高亮关键字，并补滚到 hash 小标题
-  // （Swup 跨页导航时自身的 scroll:anchor 可能不触发；scrollIntoView
-  // 会尊重正文 [id] 自带的 scroll-margin-top，落点与原生锚点一致）
+
+  // 补滚到 hash（最近小标题；块在首个标题前时就是该块本身）。
+  // Swup 跨页导航时自身的 scroll:anchor 可能不触发；图片 LQIP / 字体替换可能
+  // 在首帧后改变布局，故 rAF 先滚一次，350ms 后发现落点漂移再校正一次。
+  const scrollToHash = (): void => {
+    const hash = window.location.hash.slice(1);
+    if (!hash) return;
+    const el = document.getElementById(decodeURIComponent(hash));
+    if (!el) return;
+    el.scrollIntoView();
+    window.setTimeout(() => {
+      // scroll-margin-top 为 5.5rem（约 88px），落点偏离过多说明发生了布局漂移
+      const top = el.getBoundingClientRect().top;
+      if (top < -2 || top > 140) el.scrollIntoView();
+    }, 350);
+  };
   const registerKeywordHook = () => {
     window.swup?.hooks?.on("page:view", () => {
-      const hash = window.location.hash.slice(1);
-      if (hash)
-        document.getElementById(decodeURIComponent(hash))?.scrollIntoView();
-      highlightSearchKeyword();
+      requestAnimationFrame(() => {
+        scrollToHash();
+        highlightSearchKeyword();
+      });
     });
   };
   if (window?.swup?.hooks) {

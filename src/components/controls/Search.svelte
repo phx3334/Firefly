@@ -9,8 +9,7 @@ import {
 	loadSearchIndex,
 	searchPosts,
 	highlight,
-	buildSnippet,
-	buildPostUrl,
+	buildSearchResult,
 	type SearchPost,
 } from "@/utils/search-client";
 
@@ -39,11 +38,14 @@ const runSearch = (kw: string): void => {
 	debounceTimer = setTimeout(() => {
 		const posts = searchPosts(index, kw);
 		total = posts.length;
-		result = posts.slice(0, 5).map((p) => ({
-			url: buildPostUrl(p, kw),
-			titleHtml: highlight(p.title, kw),
-			snippetHtml: buildSnippet(p.description + "\n" + p.content, kw),
-		}));
+		result = posts.slice(0, 5).map((p) => {
+			const built = buildSearchResult(p, kw);
+			return {
+				url: built.url,
+				titleHtml: highlight(p.title, kw),
+				snippetHtml: built.snippetHtml,
+			};
+		});
 		isSearching = false;
 	}, 250);
 };
