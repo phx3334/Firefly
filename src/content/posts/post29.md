@@ -283,7 +283,7 @@ patches:
         path: /spec/replicas
         value: 1                 # dev环境只要1个副本
 ```
-production 环境换镜像仓库地址（对应 Jenkins 推到 Harbor 的场景），并且引用目录树里的 hpa、configmap、ingress，redis 这类高可用中间件则用 helmCharts 引入（写法见下一节）：  
+production 环境换镜像仓库地址（对应 Jenkins 推到 Harbor 的场景），并且引用目录树里的 hpa、configmap、ingress，redis 这类高可用中间件则用 helmCharts 引入：  
 ``` yaml
 # overlays/production/kustomization.yaml
 resources:
@@ -304,12 +304,11 @@ helmCharts:                                      # 高可用redis用chart引入�
     releaseName: redis
     valuesInline:
       auth:
-        enabled: false
+        enabled: false       #关闭redis密码验证
 ```
 部署命令：  
 ``` bash
-kubectl kustomize ./overlays/dev | kubectl apply -f -    # 先看渲染结果再应用
-kubectl apply -k ./overlays/production                   # -k 是内置的等价写法
+kubectl apply -k ./overlays/production                   
 ```
 ### kustomization.yaml 常用配置
 - `resources`：引用 Manifest 资源，可以是文件、目录或 URL
@@ -331,9 +330,6 @@ secretGenerator:
 上一节 production 示例中的 `helmCharts` 就是混合用法：中间件（redis/postgresql）不想手写 manifest，直接引现成的 chart，由 kustomize 统一渲染。要点：  
 - `valuesInline` 相当于 helm 的 `-f`/`--set`，用来覆写 chart 默认值  
 - 命令行要加 `--enable-helm` 才会调用 helm 渲染 chart：  
-``` bash
-kubectl kustomize ./overlays/prod --enable-helm | kubectl apply -f -
-```
 ### kustomize与helm对比
 |          | helm                                   | kustomize                                            |
 | -------- | -------------------------------------- | ---------------------------------------------------- |
