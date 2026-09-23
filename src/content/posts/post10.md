@@ -3,7 +3,7 @@ title: go与python的核心对比
 published: 2026-08-04T21:21:21+08:00
 description: '了解go与python的核心区别，并学会不同场景下对语言的选型'
 image: './images/a10.avif'
-tags: [编程语言,python,go]
+tags: [编程语言]
 category: '计算机技术'
 draft: false
 lang: '中文'

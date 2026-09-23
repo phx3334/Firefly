@@ -752,6 +752,7 @@ roleRef:
   name: deployment-updater
   apiGroup: rbac.authorization.k8s.io
 ```
+
 再基于这个 ServiceAccount 的 token 生成 kubeconfig，存入 Jenkins 凭证——这就是前文 `kuber-config-test` 的来源。测试和生产各建一份，权限范围分别限定在各自的命名空间。
 
 到这里，前文提到的两个「RBAC 授权点」就对上号了。集群里实际存在**两条并行的授权链路**，分别服务于构建和发布，各用各的身份、互不依赖：
