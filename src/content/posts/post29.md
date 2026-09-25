@@ -187,13 +187,12 @@ postgresql-ha:
       repmgrPassword: postgres
 
 ```
-> 不同环境可以采取不同的 values.yaml 文件：values-dev.yaml，values-prod.yaml,values-test.yaml。我们可以用`helm upgrade --install vote .  --namespace vote  --create-namespace -f values-prod.yaml`在values.yaml的基础上,进一步采用`values-prod.yaml`。
+> 不同环境可以采取不同的 values.yaml 文件：values-dev.yaml，values-prod.yaml,values-test.yaml。我们可以用`helm upgrade --install vote . --namespace vote  --create-namespace -f values-prod.yaml`在values.yaml的基础上,进一步采用`values-prod.yaml`。
 **-f和-set的参数**  
-两者都是用来覆盖 chart 默认 values 的手段，区别在于值的来源：  
 - `-f <文件>`：指定一个 yaml 文件（如 values-prod.yaml），会叠加在 chart 自带的 values.yaml 之上，文件中的 key 覆盖同名默认值，未提及的 key 保留默认值。适合覆盖项多、需要长期维护的场景。  
-- `--set key=value`：直接在命令行传入键值对，如`--set vote.tag=v2`，同样只覆盖指定的 key。适合临时改动、CICD 中注入镜像 tag 等少量参数。还可以传列表/嵌套值：`--set 'vote.imagePullPolicy=Always'`、`--set 'redis.auth={a,b}'`。  
+- `--set key=value`：直接在命令行传入键值对，如`--set vote.tag=v2`，同样只覆盖指定的 key。适合临时改动、CICD 中注入镜像 tag 等少量参数。
 - 优先级：`--set` > 后面的 `-f` > 前面的 `-f` > chart 默认 values.yaml。即命令行 set 的值永远最优先，多个 `-f` 按出现顺序后者覆盖前者。  
-- 缺点：`--set` 的值不会保存在任何文件中，回溯 release 配置时只能通过`helm get values <release>`查看，因此生产环境更推荐用 `-f` + 独立的 values 文件（可纳入 Git 管理）。  
+- 缺点：`--set` 的值不会保存在任何文件中，因此生产环境更推荐用 `-f` + 独立的 values 文件（可纳入 Git 管理）。  
 ### Hooks
 Hooks（钩子）是 helm 提供的一种机制，可以让某些资源不随 release 的常规生命周期安装/卸载，而是在特定时间点执行，例如数据库迁移、数据初始化、发送通知等。通过给资源添加 annotation 声明：  
 ``` yaml
