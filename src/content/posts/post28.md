@@ -741,7 +741,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: jenkins-deployer-binding
+  name: jenkins-deployer-binding         
   namespace: test
 subjects:
   - kind: ServiceAccount
@@ -753,7 +753,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ```
 
-再基于这个 ServiceAccount 的 token 生成 kubeconfig，存入 Jenkins 凭证——这就是前文 `kuber-config-test` 的来源。测试和生产各建一份，权限范围分别限定在各自的命名空间。
+再基于这个 ServiceAccount 的 token 生成 kubeconfig（只有拥有这个的机器可以调用`kubectl`这一客户端命令访问apiserver），存入 Jenkins 凭证——这就是前文 `kuber-config-test` 的来源。测试和生产各建一份，权限范围分别限定在各自的命名空间。
 
 到这里，前文提到的两个「RBAC 授权点」就对上号了。集群里实际存在**两条并行的授权链路**，分别服务于构建和发布，各用各的身份、互不依赖：
 ```
@@ -766,5 +766,33 @@ roleRef:
   ↓ 由上面的 jenkins-deployer ServiceAccount 签发
   只需要 deployments 的 get/patch/update 权限（管发布）
 ```
-
 为什么要分成两个身份，而不是一个 ServiceAccount 全包？这正是 RBAC 最小权限原则的实际落地：链路一能 `exec` 进任意容器，一旦泄漏等于交出构建环境；链路二只能改目标命名空间的 Deployment，泄漏后攻击面有限。如果混用一个权限大而全的身份，两条链路的安全边界就都失效了——权限按「用途」切分，是共享集群里最基础的隔离手段，多团队共用集群时（各团队绑定各自命名空间的 Role）遵循的也是同一个思路。
+
+### kubeconfig
+kubeconfig 默认只有主节点有，位于 `~/.kube/config`（也可用 `KUBECONFIG` 环境变量或 `--kubeconfig` 参数指定）。kubeadm 初始化时实际生成的是 `/etc/kubernetes/admin.conf`，随后自动复制一份到 `~/.kube/config`——因为 kubectl 默认只读这个路径，两份内容相同
+```yaml
+#admin.conf(主节点的kubeconfig)，运维人员自己电脑上只要有这一份配置就能用kubectl随意操作集群
+apiVersion: v1
+kind: Config
+clusters:                                        # 连谁：API Server 地址 + CA 证书
+- name: kubernetes
+  cluster:
+    server: https://172.16.10.11:6443            # 主节点 IP:6443，拿到别的机器要改成「那边能访问到的」地址
+    certificate-authority-data: LS0tLS1CRUdJTi...  # CA 公钥证书(base64)，用于校验 apiserver 身份
+users:                                           # 我是谁：客户端证书 + 私钥（认证信息在这里）
+- name: kubernetes-admin
+  user:
+    client-certificate-data: LS0tLS1CRUdJTi...   # 用户证书，CN=kubernetes-admin(用户名)、O=system:masters(超级管理员组)
+    client-key-data: LS0tLS1CRUdJTi...           # 私钥，与上面的证书配对，每次请求做 TLS 双向认证
+contexts:                                        # 配对：把「哪个集群」和「哪个用户」组合到一起
+- name: kubernetes-admin@kubernetes
+  context:
+    cluster: kubernetes
+    user: kubernetes-admin
+current-context: kubernetes-admin@kubernetes     # 当前生效的组合
+```
+**在个人电脑上操作集群**只需要两样东西：网络可达的 API Server 地址 + 一份合法的 kubeconfig。把管理员发给你的 kubeconfig 存到 `~/.kube/config`，无论人在哪，`kubectl` 都能直接操作集群。
+
+ **集群内**（Pod 容器里）：不需要 kubeconfig。每个 Pod 启动时都会自动挂载 ServiceAccount 的 token（`/var/run/secrets/kubernetes.io/serviceaccount/token`）并注入 `KUBERNETES_SERVICE_HOST` 环境变量指向集群内部 API Server，客户端拿这些现成信息即可完成认证。注意「不需要 kubeconfig」只省掉了认证环节，**能不能创建 Pod 仍由 RBAC 决定**——默认 ServiceAccount 没有任何权限，请求会被 API Server 以 403 拒绝，必须像上文那样给ServiceAccount绑定 Role/ClusterRole 才行。前文 Jenkins Master Pod 能自主创建 slave Pod，靠的正是「自动挂载的 token 认证 + 提前绑定好的 RBAC 授权」这条「集群内」通道。
+
+最后是安全惯例：kubeconfig 本质是凭证文件，等同于密码——不进 Git、不进日志，只放凭证管理系统；并按上文 RBAC 的做法，为不同用途签发不同权限的 kubeconfig，而不是共享管理员凭证。举例，同一个集群里典型的身份切分：

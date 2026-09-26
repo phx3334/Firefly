@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 545" width="720" height="545" role="img" aria-label="Informer 架构：API Server 经 Reflector、DeltaFIFO 到 Indexer，再回调 Custom Controller">
+  <style>
+    .t { fill: #171717; font: 500 14px/20px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .ts { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .tsl { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: start; }
+    .tb { fill: #004D26; }
+    .flow { stroke: #0FDC78; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .read { stroke: #52525B; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 4 4; fill: none; }
+    .boundary { fill: none; stroke: rgba(23, 23, 23, 0.12); stroke-dasharray: 6 6; }
+    .node-neutral { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+    .node-external { fill: #EFEFF2; stroke: rgba(23, 23, 23, 0.16); }
+    .node-brand { fill: #E5FFF2; stroke: #0FDC78; }
+    .capsule { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+  </style>
+
+  <defs>
+    <marker id="arrB" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#0FDC78"/>
+    </marker>
+    <marker id="arrM" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#52525B"/>
+    </marker>
+  </defs>
+
+  <!-- 背景 -->
+  <rect x="0" y="0" width="720" height="545" rx="16" fill="#F7F7F8"/>
+
+  <!-- client-go 边界 -->
+  <rect x="40" y="150" width="640" height="330" rx="12" class="boundary"/>
+  <text x="60" y="176" class="tsl">client-go 原生组件</text>
+
+  <!-- 主流程连接线 -->
+  <path d="M 330 104 L 330 172 L 185 172 L 185 200" class="flow" marker-end="url(#arrB)"/>
+  <path d="M 270 232 L 400 232" class="flow" marker-end="url(#arrB)"/>
+  <path d="M 485 264 L 485 340" class="flow" marker-end="url(#arrB)"/>
+  <path d="M 400 356 L 270 356" class="flow" marker-end="url(#arrB)"/>
+  <path d="M 270 388 L 400 388" class="read" marker-end="url(#arrM)"/>
+
+  <!-- 连接线标签 -->
+  <rect x="206" y="174" width="102" height="20" rx="8" class="capsule"/>
+  <text x="257" y="188" class="ts">① List&amp;Watch</text>
+  <rect x="287" y="204" width="95" height="20" rx="8" class="capsule"/>
+  <text x="335" y="218" class="ts">② 存入 Delta</text>
+  <rect x="497" y="292" width="56" height="20" rx="8" class="capsule"/>
+  <text x="525" y="306" class="ts">③ 弹出</text>
+  <rect x="295" y="326" width="80" height="20" rx="8" class="capsule"/>
+  <text x="335" y="340" class="ts">④ 事件回调</text>
+  <rect x="299" y="412" width="72" height="20" rx="8" class="capsule"/>
+  <text x="335" y="426" class="ts">GetByKey</text>
+
+  <!-- API Server（外部） -->
+  <rect x="260" y="40" width="200" height="64" rx="8" class="node-external"/>
+  <text x="360" y="66" class="t">API Server</text>
+  <text x="360" y="87" class="ts">Kubernetes 集群</text>
+
+  <!-- Reflector -->
+  <rect x="100" y="200" width="170" height="64" rx="8" class="node-neutral"/>
+  <text x="185" y="226" class="t">Reflector</text>
+  <text x="185" y="247" class="ts">List&amp;Watch 监听</text>
+
+  <!-- DeltaFIFO -->
+  <rect x="400" y="200" width="170" height="64" rx="8" class="node-neutral"/>
+  <text x="485" y="226" class="t">DeltaFIFO</text>
+  <text x="485" y="247" class="ts">变化事件队列</text>
+
+  <!-- Indexer（焦点：本地缓存） -->
+  <rect x="400" y="340" width="170" height="64" rx="8" class="node-brand"/>
+  <text x="485" y="366" class="t tb">Indexer</text>
+  <text x="485" y="387" class="ts tb">本地缓存 · 加锁 map</text>
+
+  <!-- Custom Controller -->
+  <rect x="100" y="340" width="170" height="64" rx="8" class="node-neutral"/>
+  <text x="185" y="366" class="t">Custom Controller</text>
+  <text x="185" y="387" class="ts">业务逻辑处理</text>
+
+  <!-- 图例 -->
+  <path d="M 60 515 L 100 515" class="flow"/>
+  <text x="108" y="519" class="tsl">主流程事件（①→④）</text>
+  <path d="M 250 515 L 290 515" class="read"/>
+  <text x="298" y="519" class="tsl">GetByKey 读缓存</text>
+</svg>

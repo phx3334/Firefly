@@ -53,7 +53,7 @@ loki:
     s3:
       endpoint: cos.ap-hongkong.myqcloud.com
       region: ap-hongkong
-      secretAccessKey: <your-secret-access-key>   # 密钥别写进配置文件，用环境变量或 CI 凭证注入
+      secretAccessKey: <your-secret-access-key>  
       accessKeyId: <your-access-key-id>
   schemaConfig:
     configs:
