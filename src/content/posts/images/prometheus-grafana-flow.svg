@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 545" width="760" height="545" role="img" aria-label="Prometheus+Grafana 指标采集与查询流程：CRD 声明服务发现，Prometheus 定时拉取各监控目标指标存入 TSDB，Grafana 通过 PromQL 查询展示">
+  <style>
+    .t { fill: #171717; font: 500 14px/20px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .ts { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .tsl { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: start; }
+    .tb { fill: #004D26; }
+    .flow { stroke: #0FDC78; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .read { stroke: #52525B; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 4 4; fill: none; }
+    .boundary { fill: none; stroke: rgba(23, 23, 23, 0.12); stroke-dasharray: 6 6; }
+    .node-neutral { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+    .node-external { fill: #EFEFF2; stroke: rgba(23, 23, 23, 0.16); }
+    .node-brand { fill: #E5FFF2; stroke: #0FDC78; }
+    .capsule { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+  </style>
+
+  <defs>
+    <marker id="arrB" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#0FDC78"/>
+    </marker>
+    <marker id="arrM" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#52525B"/>
+    </marker>
+  </defs>
+
+  <!-- 背景 -->
+  <rect x="0" y="0" width="760" height="545" rx="16" fill="#F7F7F8"/>
+
+  <!-- CRD 边界 -->
+  <rect x="40" y="30" width="680" height="90" rx="12" class="boundary"/>
+  <text x="60" y="52" class="tsl">监控规则 CRD（由 Prometheus Operator 管理）</text>
+
+  <!-- ① 服务发现：CRD → Prometheus -->
+  <path d="M 410 120 L 410 210" class="read" marker-end="url(#arrM)"/>
+  <rect x="355" y="152" width="110" height="20" rx="8" class="capsule"/>
+  <text x="410" y="166" class="ts">① 服务发现</text>
+
+  <!-- 三类 CRD -->
+  <rect x="60" y="60" width="170" height="48" rx="8" class="node-neutral"/>
+  <text x="145" y="80" class="t">ServiceMonitor</text>
+  <text x="145" y="98" class="ts">发现 Service 背后的 Pod</text>
+
+  <rect x="290" y="60" width="170" height="48" rx="8" class="node-neutral"/>
+  <text x="375" y="80" class="t">PodMonitor</text>
+  <text x="375" y="98" class="ts">直接发现 Pod</text>
+
+  <rect x="520" y="60" width="170" height="48" rx="8" class="node-neutral"/>
+  <text x="605" y="80" class="t">Probe</text>
+  <text x="605" y="98" class="ts">黑盒探测外部目标</text>
+
+  <!-- 监控目标列 -->
+  <text x="45" y="188" class="tsl">监控目标（白盒 + 黑盒 + K8s 内置）</text>
+
+  <rect x="45" y="200" width="180" height="46" rx="8" class="node-neutral"/>
+  <text x="135" y="219" class="t">业务应用 /metrics</text>
+  <text x="135" y="237" class="ts">白盒 · SDK 暴露</text>
+
+  <rect x="45" y="256" width="180" height="46" rx="8" class="node-external"/>
+  <text x="135" y="275" class="t">blackbox-exporter</text>
+  <text x="135" y="293" class="ts">黑盒 · 探测外部网站</text>
+
+  <rect x="45" y="312" width="180" height="46" rx="8" class="node-neutral"/>
+  <text x="135" y="331" class="t">kubelet / cAdvisor</text>
+  <text x="135" y="349" class="ts">容器与节点指标</text>
+
+  <rect x="45" y="368" width="180" height="46" rx="8" class="node-neutral"/>
+  <text x="135" y="387" class="t">node-exporter</text>
+  <text x="135" y="405" class="ts">节点内核指标</text>
+
+  <!-- ② 定时拉取：目标 → Prometheus -->
+  <text x="272" y="216" class="ts">② 定时拉取</text>
+  <path d="M 225 223 L 320 223" class="flow" marker-end="url(#arrB)"/>
+  <path d="M 225 279 L 320 279" class="flow" marker-end="url(#arrB)"/>
+  <path d="M 225 335 L 320 335" class="flow" marker-end="url(#arrB)"/>
+  <path d="M 225 391 L 320 391" class="flow" marker-end="url(#arrB)"/>
+
+  <!-- Prometheus -->
+  <rect x="320" y="210" width="180" height="190" rx="8" class="node-brand"/>
+  <text x="410" y="272" class="t tb">Prometheus</text>
+  <text x="410" y="298" class="ts tb">pull 抓取 · scrape_interval</text>
+  <text x="410" y="320" class="ts tb">TSDB 时序存储</text>
+  <text x="410" y="342" class="ts tb">持久化：PVC 云盘</text>
+
+  <!-- ③ 查询与返回：Prometheus ↔ Grafana -->
+  <path d="M 600 290 L 500 290" class="read" marker-end="url(#arrM)"/>
+  <path d="M 500 320 L 600 320" class="flow" marker-end="url(#arrB)"/>
+  <text x="550" y="282" class="ts">③ PromQL 查询</text>
+  <text x="550" y="340" class="ts">返回数据</text>
+
+  <!-- Grafana -->
+  <rect x="600" y="270" width="120" height="70" rx="8" class="node-neutral"/>
+  <text x="660" y="298" class="t">Grafana</text>
+  <text x="660" y="318" class="ts">可视化查询</text>
+
+  <!-- ④ 告警：Prometheus → Alertmanager -->
+  <path d="M 410 400 L 410 455 L 600 455" class="read" marker-end="url(#arrM)"/>
+  <text x="505" y="447" class="ts">④ 告警（PrometheusRule 触发）</text>
+
+  <rect x="600" y="430" width="120" height="50" rx="8" class="node-neutral"/>
+  <text x="660" y="450" class="t">Alertmanager</text>
+  <text x="660" y="468" class="ts">告警通知</text>
+
+  <!-- 图例 -->
+  <path d="M 60 520 L 100 520" class="flow"/>
+  <text x="108" y="524" class="tsl">指标数据流（pull 采集 / 查询返回）</text>
+  <path d="M 400 520 L 440 520" class="read"/>
+  <text x="448" y="524" class="tsl">声明与请求（CRD / PromQL / 告警）</text>
+</svg>

@@ -262,23 +262,27 @@ for event := range w.ResultChan() {
 
 
 ## 实现一个简单的CRD
+先向 API Server 注册一种新资源类型（CRD），再创建一个实例（CR），最后用 client-go 写个小程序查询它——正好把 DynamicClient 和 DiscoveryClient 串起来用。
+
 ```yaml
-#crd.yaml
-apiVersion: apiextensions.k8s.io/v1
+#crd.yaml —— 向 API Server 注册一种全新的资源类型
+apiVersion: apiextensions.k8s.io/v1   # CRD 本身由 apiextensions 组提供，不属于业务资源
 kind: CustomResourceDefinition
 metadata:
+  # 命名强制规范：<plural>.<group>，必须与下面 spec 里的两个字段严格一致
   name: myresources.mygroup.example.com
 spec:
-  group: mygroup.example.com
+  group: mygroup.example.com          # 自定义 API 组，注册后 URL 为 /apis/mygroup.example.com/v1alpha1/...
   versions:
-    - name: v1alpha1
-      served: true
-      storage: true
+    - name: v1alpha1                  # 版本号，v1alpha1 表示试验性版本
+      served: true                    # 是否对外提供该版本的 API（能否通过 API Server 访问）
+      storage: true                   # 是否用该版本格式存进 etcd（多版本并存时只能有一个 true）
       schema:
+        # 结构校验：定义 spec 的字段与类型，不合法的 CR（该资源类型的实例） 提交时会被 API Server 直接拒绝
         openAPIV3Schema:
           type: object
           properties:
-            spec:
+            spec:                     # 期望状态，用户提交时填写
               type: object
               properties:
                 field1:
@@ -287,32 +291,48 @@ spec:
                 field2:
                   type: string
                   description: Second example field
-            status:
+            status:                   # 实际状态，通常由控制器回写（这里只声明结构）
               type: object
-  scope: Namespaced
+  scope: Namespaced                   # 作用域：Namespaced（属于命名空间）/ Cluster（全局）
   names:
-    plural: myresources
-    singular: myresource
-    kind: MyResource
+    plural: myresources              # 复数名，REST URL 里的 resource，kubectl get myresources
+    singular: myresource             # 单数名，kubectl 输出里显示
+    kind: MyResource                 # Kind，YAML 里 apiVersion+kind 填的就是它
     shortNames:
-      - myres
+      - myres                        # 短名别名，kubectl get myres 等价于全名
 ```
-```yaml
-#myresource.yaml
 
+写好后一条命令完成注册：
+
+```bash
+kubectl apply -f crd.yaml
+
+kubectl get crd myresources.mygroup.example.com   # 确认 CRD 已创建
+kubectl api-resources | grep myres                # 能看到 myres 说明新资源已可用
+```
+背后的机制：CRD 本身也是 etcd 里的一个资源对象，内嵌在 kube-apiserver 里的 apiextensions-apiserver 检测到它后，**动态把 `/apis/mygroup.example.com/v1alpha1` 这个 API 端点挂载**到 API Server 上——不用重启、不用重新编译任何组件。之后提交的 CR 会被这个端点接收，按 schema 校验后存进 etcd。这就是「声明式扩容」：K8s 的 API 可以被 K8s 自己扩展，一条 CRD 就让 kubectl、client-go、Informer 这些现有工具全部认识你的新资源。
+
+```yaml
+#myresource.yaml —— 基于上面的 CRD 创建一个资源实例（CR），kubectl apply 后即可被 API Server 接收
+
+# apiVersion = CRD 里声明的 group/version，kind = CRD 里声明的 Kind
+# 这两个字段一写，API Server 就知道去找 myresources.mygroup.example.com 这条 CRD 校验
 apiVersion: mygroup.example.com/v1alpha1
 kind: MyResource
 metadata:
   name: my-resource-instance
-  namespace: default
+  namespace: default                 # CRD 的 scope 是 Namespaced，所以必须指定命名空间
 spec:
+  # 字段必须符合 CRD 的 openAPIV3Schema 定义（详见下方合法/非法写法对比）
   field1: "ExampleValue1"
   field2: "ExampleValue2"
 ```
+
+另外两条隐形规则：schema 没声明 `required` 时字段可省略（想强制必填就在 schema 里加 `required: ["field1"]`）；scope 是 Namespaced 的 CR 必须写 `metadata.namespace`，写集群级（Cluster）CRD 的实例时则不允许写。
 ```go
-// main.go
+//下面是kubectl get myresources底层代码的大致原理
 func main() {
-	// 解析命令行参数
+	// 解析命令行参数：os.Args[0]=程序名 [1]=get [2]=MyResource
 	if len(os.Args) != 3 {
 		fmt.Printf("Usage: %s get <resource>\n", os.Args[0])
 		os.Exit(1)
@@ -325,7 +345,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 加载 kubeconfig 配置
+	// 加载 kubeconfig 配置：优先用 $HOME/.kube/config（本地调试），否则用 --kubeconfig 指定
+	// kubeconfig 里装着 API Server 地址 + 身份凭证，是访问集群的「钥匙」
 	var kubeconfig *string
 	if home := homedir.HomeDir(); home != "" {
 		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
@@ -334,56 +355,137 @@ func main() {
 	}
 	flag.Parse()
 
+	// 把 kubeconfig 解析成 rest.Config（含地址、TLS、认证信息），这是所有客户端的入口
 	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
 		panic(err.Error())
 	}
 
-	// 创建 dynamic client
+	// 创建 dynamic client：ClientSet只能对强类型结构体起作用，自定义CRD只能用DynamicClient
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		panic(err)
 	}
 
-	// 获取客户端和映射器
+	// DiscoveryClient 不单独创建，而是从 clientset 里拿——所以这里先建一个 clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		panic(err)
 	}
 
+	// ① 发现：问 API Server 「你这个集群有哪些 group/version/resource」
 	discoveryClient := clientset.Discovery()
 	apiGroupResources, err := restmapper.GetAPIGroupResources(discoveryClient)
 	if err != nil {
 		panic(err)
 	}
 
+	// ② 构建 RESTMapper：封装成映射器，专门干 GVK → GVR 的转换
 	mapper := restmapper.NewDiscoveryRESTMapper(apiGroupResources)
 
 	// 动态映射 Kind 到 GVR
 	// gvk := schema.FromAPIVersionAndKind("mygroup.example.com/v1alpha1", kind)
 	// 还可以用这个方法
+	// ③ 手工拼出 GVK（对应 CR 实例 YAML 里的 apiVersion + kind 两个字段）
 	gvk := schema.GroupVersionKind{
 		Group:   "mygroup.example.com",
 		Version: "v1alpha1",
-		Kind:    kind,
+		Kind:    kind,   // 命令行传入的 MyResource
 	}
 
+	// ④ 执行转换：拿 GVK 去映射器里查 REST 信息
 	mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		panic(err)
 	}
 	// mapping.Resource 就是 GVR，这样就实现 GVK->GVR 的转化
+	// （这里得到 {Group: "mygroup.example.com", Version: "v1alpha1", Resource: "myresources"}）
 
-	// 获取资源
+	// ⑤ 用 GVR 定位资源接口，限定 default 命名空间——相当于 kubectl get myresources -n default
 	resourceInterface := dynamicClient.Resource(mapping.Resource).Namespace("default")
+
+	// ⑥ 发起 List 请求：GET /apis/mygroup.example.com/v1alpha1/namespaces/default/myresources
 	resources, err := resourceInterface.List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		panic(err)
 	}
 
-	// 打印资源
+	// 打印资源：Unstructured 对象的元数据有现成的 Get 方法，取业务字段才需要 NestedString 按路径挖
 	for _, resource := range resources.Items {
 		fmt.Printf("Name: %s, Namespace: %s, UID: %s\n", resource.GetName(), resource.GetNamespace(), resource.GetUID())
 	}
 }
 ```
+
+
+## operator介绍
+前面的 CRD 只解决了"**存**"的问题——CR 实例提交后躺在 etcd 里，没有任何程序管它。要让这种新资源像 Deployment 一样"提交期望状态，系统自动达成"，还需要一个**持续监听并处理 CR 的控制器**，这就是 Operator。
+
+> **Operator = CRD（自定义资源）+ Custom Controller（自定义控制器）**
+
+### CR 实例与 Operator 的关系：一个例子
+以自研的 `RedisCluster` CRD 为例，看两者如何分工。
+
+用户提交的只是**一份期望状态的声明**（CR 实例）：
+```yaml
+apiVersion: cache.example.com/v1alpha1
+kind: RedisCluster
+metadata:
+  name: shop-redis
+spec:                  # 期望状态：用户只管"要什么"
+  replicas: 3
+  version: "7.2"
+  storage: 10Gi
+```
+
+Operator 是**实现这个期望的程序**（Go 代码），内部循环就是经典的控制器模式：
+```go
+func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    // ① 从本地缓存取 CR 实例（Informer 已把 shop-redis 缓存在内存，O(1) 命中）
+    var redis cachev1alpha1.RedisCluster
+    if err := r.Get(ctx, req.NamespacedName, &redis); err != nil {
+        return ctrl.Result{}, client.IgnoreNotFound(err)   // 实例被删了，直接结束
+    }
+
+    // ② 对比期望与实际：spec.replicas=3，但实际只有 2 个 Pod → 需要补 1 个
+    podList := &corev1.PodList{}
+    r.List(ctx, podList, client.InNamespace(req.Namespace), client.MatchingLabels{"redis-cluster": redis.Name})
+
+    // ③ 实际比期望少：创建 Pod；实际比期望多：删除 Pod（调谐）
+    for i := len(podList.Items); i < int(redis.Spec.Replicas); i++ {
+        pod := newRedisPod(redis.Name, i, redis.Spec.Version)
+        r.Create(ctx, pod)      // 底层就是 ClientSet 发 POST 请求
+    }
+
+    // ④ 回写实际状态到 CR 的 status 字段
+    redis.Status.ReadyReplicas = int32(len(podList.Items))
+    r.Status().Update(ctx, &redis)
+    return ctrl.Result{}, nil
+}
+```
+两者的关系一句话：**CR 实例是"数据"，Operator 是"代码"；CR 记录期望（spec）与实际（status），Operator 负责消灭两者的差距**。
+
+```mermaid
+flowchart LR
+    U["用户 kubectl apply<br/>只写一份 CR YAML"] -->|期望状态 spec| CR[("etcd 中的 CR 实例")]
+    subgraph OP["Operator（一个 Pod）"]
+        I["Informer<br/>Watch CR 变化"] --> Q["WorkQueue"] --> R["Reconcile 调谐循环"]
+    end
+    CR -->|变更事件| I
+    R -->|"发现差距：3 个期望 vs 2 个实际"| K["调 API Server 创建/删除 Pod"]
+    R -->|"回写实际状态"| CR
+    K --> REAL["真实的 Redis Pod ×3"]
+```
+
+所以 Operator 并不神秘：**它就是一个用 client-go 写的、监听自定义资源的 Deployment 控制器**。K8s 只内置了通用资源的运维逻辑，把特定软件（Redis、ETCD、Kafka）的专业运维知识——主从选举、故障转移、备份恢复——编码进 Operator，这些软件就获得了和原生资源同等的待遇：`kubectl get redisclusters`、改 spec 自动扩容、删 Pod 自动重建。
+
+这也解释了为什么生产上推荐 Prometheus Operator、而不是手动维护 scrape 配置（见 [post30](/posts/post30/)）：Prometheus 的抓取规则被建模成 ServiceMonitor CR，Prometheus Operator 持续监听这些 CR，一旦 apply 新的 ServiceMonitor，自动生成对应的抓取配置——运维知识从"文档里的人肉步骤"变成了"代码里的自动调谐"。
+
+
+## 补充
+| 集群级（全集群唯一，不属于任何 namespace）       | 命名空间级（每个 namespace 各自一份）            |
+| ----------------------------------------------- | ------------------------------------------------ |
+| Node（节点）                                    | Pod                                              |
+| Namespace 自身                                  | Service / Deployment                             |
+| CRD（类型定义）                                 | ServiceMonitor / Probe 等 CR 实例                |
+| StorageClass                                    | PVC、ConfigMap、Secret                           |

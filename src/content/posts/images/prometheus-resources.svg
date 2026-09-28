@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 600" width="760" height="600" role="img" aria-label="Prometheus 相关资源关系：Operator Watch 监控 CR，创建 StatefulSet 运行 Pod（prometheus 主容器 + config-reloader Sidecar），生成配置写入 Secret 并挂载进 Pod，Service 暴露 9090，数据写入 PVC 云盘">
+  <style>
+    .t { fill: #171717; font: 500 14px/20px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .ts { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .tsl { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: start; }
+    .tb { fill: #004D26; }
+    .flow { stroke: #0FDC78; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .read { stroke: #52525B; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 4 4; fill: none; }
+    .boundary { fill: none; stroke: rgba(23, 23, 23, 0.12); stroke-dasharray: 6 6; }
+    .node-neutral { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+    .node-external { fill: #EFEFF2; stroke: rgba(23, 23, 23, 0.16); }
+    .node-brand { fill: #E5FFF2; stroke: #0FDC78; }
+    .capsule { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+  </style>
+
+  <defs>
+    <marker id="arrB" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#0FDC78"/>
+    </marker>
+    <marker id="arrM" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#52525B"/>
+    </marker>
+  </defs>
+
+  <!-- 背景 -->
+  <rect x="0" y="0" width="760" height="600" rx="16" fill="#F7F7F8"/>
+
+  <!-- CR 实例边界 -->
+  <rect x="40" y="28" width="680" height="72" rx="12" class="boundary"/>
+  <text x="60" y="48" class="tsl">监控 CR 实例（用户 kubectl apply）</text>
+
+  <rect x="60" y="54" width="150" height="36" rx="8" class="node-neutral"/>
+  <text x="135" y="77" class="ts">ServiceMonitor</text>
+  <rect x="230" y="54" width="150" height="36" rx="8" class="node-neutral"/>
+  <text x="305" y="77" class="ts">Probe</text>
+  <rect x="400" y="54" width="150" height="36" rx="8" class="node-neutral"/>
+  <text x="475" y="77" class="ts">PrometheusRule</text>
+  <rect x="570" y="54" width="130" height="36" rx="8" class="node-neutral"/>
+  <text x="635" y="77" class="ts">PodMonitor</text>
+
+  <!-- ① Watch -->
+  <path d="M 150 100 L 150 140" class="read" marker-end="url(#arrM)"/>
+  <rect x="100" y="108" width="100" height="20" rx="8" class="capsule"/>
+  <text x="150" y="122" class="ts">① Watch</text>
+
+  <!-- ② Operator → StatefulSet -->
+  <path d="M 255 170 L 380 170" class="flow" marker-end="url(#arrB)"/>
+  <rect x="275" y="150" width="90" height="20" rx="8" class="capsule"/>
+  <text x="320" y="164" class="ts">② 创建</text>
+
+  <!-- ③ StatefulSet → Pod -->
+  <path d="M 480 200 L 480 260" class="flow" marker-end="url(#arrB)"/>
+  <rect x="425" y="216" width="110" height="20" rx="8" class="capsule"/>
+  <text x="480" y="230" class="ts">③ 运行为 Pod</text>
+
+  <!-- ④ Operator → Secret -->
+  <path d="M 150 200 L 150 270" class="flow" marker-end="url(#arrB)"/>
+  <rect x="92" y="222" width="116" height="20" rx="8" class="capsule"/>
+  <text x="150" y="236" class="ts">④ 生成配置</text>
+
+  <!-- ⑤ Secret → Pod 挂载 -->
+  <path d="M 255 302 L 320 302 L 320 340 L 380 340" class="flow" marker-end="url(#arrB)"/>
+  <rect x="268" y="312" width="96" height="20" rx="8" class="capsule"/>
+  <text x="316" y="326" class="ts">⑤ 卷挂载</text>
+
+  <!-- ⑥ Pod → Service -->
+  <path d="M 380 408 L 255 408" class="flow" marker-end="url(#arrB)"/>
+  <rect x="268" y="388" width="104" height="20" rx="8" class="capsule"/>
+  <text x="320" y="402" class="ts">⑥ 暴露 :9090</text>
+
+  <!-- ⑦ Pod → PVC -->
+  <path d="M 545 490 L 545 510" class="flow" marker-end="url(#arrB)"/>
+  <text x="450" y="505" class="ts">⑦ TSDB 数据写入云盘</text>
+
+  <!-- Prometheus Operator -->
+  <rect x="45" y="140" width="210" height="60" rx="8" class="node-external"/>
+  <text x="150" y="163" class="t">Prometheus Operator</text>
+  <text x="150" y="183" class="ts">Watch CR · 调谐 · 渲染配置</text>
+
+  <!-- StatefulSet -->
+  <rect x="380" y="140" width="200" height="60" rx="8" class="node-neutral"/>
+  <text x="480" y="163" class="t">StatefulSet</text>
+  <text x="480" y="183" class="ts">prometheus-xxx-0</text>
+
+  <!-- Secret -->
+  <rect x="45" y="270" width="210" height="64" rx="8" class="node-neutral"/>
+  <text x="150" y="293" class="t">Secret</text>
+  <text x="150" y="313" class="ts">渲染后的 prometheus.env.yaml</text>
+  <text x="150" y="329" class="ts">+ 告警规则文件</text>
+
+  <!-- Service -->
+  <rect x="45" y="380" width="210" height="60" rx="8" class="node-neutral"/>
+  <text x="150" y="403" class="t">Service</text>
+  <text x="150" y="423" class="ts">集群内访问入口 → Grafana 查询</text>
+
+  <!-- Pod -->
+  <rect x="380" y="260" width="330" height="230" rx="12" class="boundary"/>
+  <text x="400" y="284" class="tsl">Pod（2 个容器）</text>
+
+  <rect x="398" y="300" width="180" height="72" rx="8" class="node-brand"/>
+  <text x="488" y="324" class="t tb">prometheus 主容器</text>
+  <text x="488" y="346" class="ts tb">抓取 · TSDB 存储 · :9090</text>
+  <text x="488" y="363" class="ts tb">查询服务</text>
+
+  <rect x="398" y="392" width="180" height="56" rx="8" class="node-neutral"/>
+  <text x="488" y="414" class="t">config-reloader</text>
+  <text x="488" y="434" class="ts">配置热加载 Sidecar</text>
+
+  <text x="650" y="340" class="ts">挂载 Secret 卷</text>
+  <text x="650" y="360" class="ts">配置变更 → 热加载</text>
+
+  <!-- PVC -->
+  <rect x="380" y="510" width="330" height="56" rx="8" class="node-neutral"/>
+  <text x="545" y="532" class="t">PVC（values 里 storageSpec 声明）</text>
+  <text x="545" y="552" class="ts">绑定云盘持久化，Pod 重建数据不丢</text>
+
+  <!-- 图例 -->
+  <path d="M 60 588 L 100 588" class="flow"/>
+  <text x="108" y="592" class="tsl">创建 / 挂载 / 数据流</text>
+  <path d="M 280 588 L 320 588" class="read"/>
+  <text x="328" y="592" class="tsl">Watch 监听（声明式）</text>
+</svg>
