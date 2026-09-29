@@ -176,6 +176,9 @@ kubectl describe node node01
 kubectl scale deployment nginx --replicas=0
 #改镜像版本、加配置。这个和上面那个改的都是etcd里面存的yaml文件，本地yaml文件不变，再次apply -f可以重置
 kubectl edit deployment nginx
+#set 系列：不开编辑器，直接修改 etcd 里 yaml 的某个字段，适合脚本化操作，本地yaml不变，可apply -f再次覆盖
+#pod 内有多个容器时，一次性指定多个容器的镜像,c2是pod里面的第二个容器
+kubectl set image deployment/nginx nginx=nginx:1.25 c2=busybox:1.27
 #删除
 kubectl delete deployment xxx
 #按配置文件删
@@ -203,13 +206,13 @@ kubectl cp egon.txt web-77887cf499-4spwp:/tmp -c c2
 ### 创建与删除资源
 K8S的资源有Pod、Service、Volume、Namespace、ReplicaSet、Deployment、StatefulSet、DaemonSet、Job等等，如
 下：  
-| 类别名称 | 资源对象 |
-|---------|---------|
+| 类别名称           | 资源对象                                                                                 |
+| ------------------ | ---------------------------------------------------------------------------------------- |
 | 工作负载型资源对象 | Pod、ReplicaSet、ReplicationController、Deployment、StatefulSet、DaemonSet、Job、CronJob |
-| 服务发现及负载均衡 | Service、Ingress |
-| 配置与存储 | Volume、PersistentVolume、CSI、ConfigMap、Secret |
-| 集群资源 | Namespace、Node、Role、ClusterRole、RoleBinding、ClusterRoleBinding |
-| 元数据资源 | HPA（HorizontalPodAutoscaler）、PodTemplate、LimitRange |
+| 服务发现及负载均衡 | Service、Ingress                                                                         |
+| 配置与存储         | Volume、PersistentVolume、CSI、ConfigMap、Secret                                         |
+| 集群资源           | Namespace、Node、Role、ClusterRole、RoleBinding、ClusterRoleBinding                      |
+| 元数据资源         | HPA（HorizontalPodAutoscaler）、PodTemplate、LimitRange                                  |
 **强调**：我们通常不会只拉起一个裸pod（怎么叫裸pod就是没有任何管理者的pod，注意静态pod是有管理者的它的管理者是kubelet）
 #### 什么是静态Pod
 **静态 Pod** 是指由 **kubelet 直接管理、不经过 API Server** 的 Pod。kubelet 会自动监听节点上的固定目录：
@@ -217,12 +220,12 @@ K8S的资源有Pod、Service、Volume、Namespace、ReplicaSet、Deployment、St
 /etc/kubernetes/manifests/
 ```
 往这个目录放 YAML 文件，kubelet 就自动创建对应 Pod；改文件自动重启；删文件自动删除。整个生命周期由 kubelet 管理，不经过 API Server。
-| 对比项 | 普通 Pod | 静态 Pod |
-|--------|---------|---------|
-| 管理者 | Deployment、ReplicaSet 等控制器 | **kubelet** |
-| 创建方式 | `kubectl apply -f xxx.yaml` | 文件放进 manifests 目录 |
-| 能否 `kubectl delete` | 能 | **不能**（kubelet 会重建） |
-| 名字特征 | 随机后缀 | **后面带节点名**（如 `kube-apiserver-master01`） |
+| 对比项                | 普通 Pod                        | 静态 Pod                                         |
+| --------------------- | ------------------------------- | ------------------------------------------------ |
+| 管理者                | Deployment、ReplicaSet 等控制器 | **kubelet**                                      |
+| 创建方式              | `kubectl apply -f xxx.yaml`     | 文件放进 manifests 目录                          |
+| 能否 `kubectl delete` | 能                              | **不能**（kubelet 会重建）                       |
+| 名字特征              | 随机后缀                        | **后面带节点名**（如 `kube-apiserver-master01`） |
 **为什么存在（自举）**：控制面组件 apiserver、etcd 等本身也是容器，但需要 API Server 才能创建——集群初始化时 API Server 还不存在，怎么办？静态 Pod 绕开这个死循环：**kubelet 直接读文件拉起控制面，不依赖 API Server**。所以 `kubectl get pods -n kube-system` 里名字带节点名后缀的就是静态 Pod。
 **两个坑**：
 ```bash
@@ -242,11 +245,11 @@ vim /etc/kubernetes/manifests/kube-apiserver.yaml   # 保存后 kubelet 自动�
 - 专用节点：只跑 GPU 任务，不希望普通任务来抢资源
 - 故障节点：磁盘要坏了，别再往这调度了
 **污点就是实现这种"拒绝/限制调度"的机制**。
-| effect | 中文理解 | 对未调度 Pod | 对已在跑的 Pod |
-| --- | --- | --- | --- |
-| NoSchedule | 一定不被调度 | 新 Pod 不调度过来 | 不影响 |
-| PreferNoSchedule | 尽量不被调度 | 尽量不调度（资源不足时可能调过来） | 不影响 |
-| NoExecute | 驱赶 | 新 Pod 不调度过来 | 驱逐节点上已有的、不容忍的 Pod |
+| effect           | 中文理解     | 对未调度 Pod                       | 对已在跑的 Pod                 |
+| ---------------- | ------------ | ---------------------------------- | ------------------------------ |
+| NoSchedule       | 一定不被调度 | 新 Pod 不调度过来                  | 不影响                         |
+| PreferNoSchedule | 尽量不被调度 | 尽量不调度（资源不足时可能调过来） | 不影响                         |
+| NoExecute        | 驱赶         | 新 Pod 不调度过来                  | 驱逐节点上已有的、不容忍的 Pod |
 
 ```bash
 kubectl get nodes
@@ -396,14 +399,14 @@ spec:
 - **required（硬）**：条件不满足 → 根本不调度，Pod 一直 Pending
 - **preferred（软）**：条件不满足也能调度，`weight` 越大优先级越高（多个候选节点里挑权重高的）
 操作符表达式（`matchExpressions` 里的 `operator`）：
-| operator | 含义 | 需要 values 吗 |
-|---|---|---|
-| `In` | 键的值在给定列表里 | 要 |
-| `NotIn` | 键的值不在列表里 | 要 |
-| `Exists` | 键存在（值无所谓） | 不要 |
-| `DoesNotExist` | 键不存在 | 不要 |
-| `Gt` | 值大于（数值比较） | 要 |
-| `Lt` | 值小于（数值比较） | 要 |
+| operator       | 含义               | 需要 values 吗 |
+| -------------- | ------------------ | -------------- |
+| `In`           | 键的值在给定列表里 | 要             |
+| `NotIn`        | 键的值不在列表里   | 要             |
+| `Exists`       | 键存在（值无所谓） | 不要           |
+| `DoesNotExist` | 键不存在           | 不要           |
+| `Gt`           | 值大于（数值比较） | 要             |
+| `Lt`           | 值小于（数值比较） | 要             |
 组合逻辑：
 - `nodeSelectorTerms` 里多个 term 之间是 **或（OR）**：满足任意一个即可
 - 单个 term 里多个 `matchExpressions` 是 **且（AND）**：必须全部满足
@@ -558,11 +561,11 @@ volumeMounts:
   subPath: nginx.conf        # 挂单文件，避免整个目录被覆盖
 ```
 #### 应用场景
-| 场景 | 说明 |
-|------|------|
-| 多环境配置 | 同一个镜像 + 不同 ConfigMap（dev/prod），不用各打一个镜像 |
-| 配置文件管理 | Nginx、application.yml 等挂载进容器 |
-| 环境变量注入 | 数据库地址、端口、开关标志、日志级别 |
+| 场景         | 说明                                                      |
+| ------------ | --------------------------------------------------------- |
+| 多环境配置   | 同一个镜像 + 不同 ConfigMap（dev/prod），不用各打一个镜像 |
+| 配置文件管理 | Nginx、application.yml 等挂载进容器                       |
+| 环境变量注入 | 数据库地址、端口、开关标志、日志级别                      |
 #### 注意事项
 - ConfigMap 必须**先创建**再部署 Pod，否则 Pod 报 `CreateContainerConfigError`
 - 环境变量注入的配置**修改后不会自动生效**，需 `kubectl rollout restart deployment xxx`
@@ -784,11 +787,11 @@ curl 10.96.0.5:80          # 集群内访问 ClusterIP
 curl web:80                # 集群内用 DNS 名访问（更方便）
 ```
 #### Service 的三种类型
-| 类型 | 作用 | 访问方式 |
-|------|------|---------|
-| ClusterIP（默认） | 集群内部访问 | 只能在集群内通过 ClusterIP 或 DNS 访问 |
-| NodePort | 暴露到集群外 | 每个节点上开一个端口，`节点IP:NodePort` 即可访问 |
-| LoadBalancer | 云平台负载均衡 | 云厂商分配公网 IP，流量经负载均衡器进来 |
+| 类型              | 作用           | 访问方式                                         |
+| ----------------- | -------------- | ------------------------------------------------ |
+| ClusterIP（默认） | 集群内部访问   | 只能在集群内通过 ClusterIP 或 DNS 访问           |
+| NodePort          | 暴露到集群外   | 每个节点上开一个端口，`节点IP:NodePort` 即可访问 |
+| LoadBalancer      | 云平台负载均衡 | 云厂商分配公网 IP，流量经负载均衡器进来          |
 ```yaml
 # web-svc-nodeport.yaml：把 Service 暴露到节点端口
 apiVersion: v1
@@ -822,10 +825,10 @@ pod-a (前端) ──请求 web:80──> Service web (ClusterIP 10.96.0.5)
 - Service 根据 `selector: app=web` 找到后端 Pod，自动做负载均衡（轮询）
 - 后端 Pod 增减、IP 变化，Service 无感知地继续转发——这就是"服务发现"
 #### kube-proxy 的工作模式
-| 模式 | 原理 | 特点 |
-|------|------|------|
-| iptables（默认） | 用 iptables 规则转发 | 简单可靠，性能一般 |
-| ipvs | 用内核 IPVS 模块 | 性能好、支持多种负载均衡算法（rr/wrr/lc 等），大集群推荐 |
+| 模式             | 原理                 | 特点                                                     |
+| ---------------- | -------------------- | -------------------------------------------------------- |
+| iptables（默认） | 用 iptables 规则转发 | 简单可靠，性能一般                                       |
+| ipvs             | 用内核 IPVS 模块     | 性能好、支持多种负载均衡算法（rr/wrr/lc 等），大集群推荐 |
 #### 细节知识
 - **DNS 服务发现**：集群内置 CoreDNS，任何 Service 自动获得 `服务名.命名空间.svc.cluster.local` 域名，同命名空间内直接用服务名即可
 - **Endpoints**：Service 通过 Endpoints 对象记录"当前有哪些后端 Pod IP"。`kubectl get endpoints web` 可查看
@@ -844,13 +847,13 @@ pod-a (前端) ──请求 web:80──> Service web (ClusterIP 10.96.0.5)
 - Always：当容器终止退出后，总是重启容器，默认策略（spec.restartPolicy: Always）
 - OnFailure：当容器异常退出（退出状态码非0）时，才重启
 - Never：当容器终止退出，从不重启容器  
-| 对比维度 | restartPolicy: Always（重启策略） | Deployment 控制器（副本维护） |
-| --- | --- | --- |
-| 作用对象 | Pod 内部的容器 | 整个 Pod |
-| 谁来执行 | kubelet | controller-manager（通过 ReplicaSet） |
-| 触发条件 | 容器进程崩溃/异常退出 | Pod 整个消失（被删、节点宕机、被驱逐） |
-| 动作 | 在同一个 Pod 里重启那个容器 | 创建一个全新的 Pod（新名字、新 IP） |
-| Pod 会变吗 | 不变，Pod 还是原来那个 | 变，是另一个 Pod |
+| 对比维度   | restartPolicy: Always（重启策略） | Deployment 控制器（副本维护）          |
+| ---------- | --------------------------------- | -------------------------------------- |
+| 作用对象   | Pod 内部的容器                    | 整个 Pod                               |
+| 谁来执行   | kubelet                           | controller-manager（通过 ReplicaSet）  |
+| 触发条件   | 容器进程崩溃/异常退出             | Pod 整个消失（被删、节点宕机、被驱逐） |
+| 动作       | 在同一个 Pod 里重启那个容器       | 创建一个全新的 Pod（新名字、新 IP）    |
+| Pod 会变吗 | 不变，Pod 还是原来那个            | 变，是另一个 Pod                       |
 #### Pod健康检查
 健康检查顾名思义就是检查Pod是否健康，怎么来定义健康呢?下述两种情况下服务均无法访问，为不健康状态
 - 1、当程序内部发生了错误已经不能对外提供服务了，但此时主程序仍在运行，这种情况就是不健康的
@@ -1042,11 +1045,11 @@ Pod IP :80（spec.ports[].targetPort，转发给 Pod 里 nginx 实际监听的�
   ▼
 nginx 容器
 ```
-| 字段 | 名称 | 作用 | 访问方式 |
-| --- | --- | --- | --- |
-| port | Service 端口 | Service 自己的端口（ClusterIP 上监听），集群内入口 | 集群内 `curl nginx-balance:8080` |
-| targetPort | 目标端口 | 流量转发到 Pod 内容器实际监听的端口 | 由 kube-proxy 转发，无需直接访问 |
-| nodePort | 节点端口 | 暴露在每个节点上，供集群外部访问，范围 30000-32767 | 集群外 `curl <节点IP>:30080` |
+| 字段       | 名称         | 作用                                               | 访问方式                         |
+| ---------- | ------------ | -------------------------------------------------- | -------------------------------- |
+| port       | Service 端口 | Service 自己的端口（ClusterIP 上监听），集群内入口 | 集群内 `curl nginx-balance:8080` |
+| targetPort | 目标端口     | 流量转发到 Pod 内容器实际监听的端口                | 由 kube-proxy 转发，无需直接访问 |
+| nodePort   | 节点端口     | 暴露在每个节点上，供集群外部访问，范围 30000-32767 | 集群外 `curl <节点IP>:30080`     |
 
 要点：
 - `port` 是 Service 的端口、`targetPort` 是容器的端口、`nodePort` 是节点的端口，三者可以各不相同。
