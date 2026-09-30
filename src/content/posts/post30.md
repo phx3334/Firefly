@@ -555,7 +555,7 @@ def setting_otlp(app, app_name, endpoint):
         "service.name": app_name,
         "app": app_name,                  # 自定义标签，Grafana 面板筛选用
     })
-    # TracerProvider + 批量处理器：Span 攒一批经 OTLP (gRPC) 推给 Tempo
+    # TracerProvider + 批量处理器：Span 攒一批经 OTLP (gRPC)v 推给 Tempo
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
     trace.set_tracer_provider(provider)

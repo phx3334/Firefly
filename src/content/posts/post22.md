@@ -14,7 +14,6 @@ kubeadm部署见https://egonlin.com/?p=10762（对于Ubuntu来说默认不用net
 ## 手动二进制包部署
 
 
-
 ## 常用操作
 ### containerd客户端命令介绍
 #### crictl
