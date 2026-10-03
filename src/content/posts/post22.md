@@ -15,6 +15,57 @@ kubeadm部署见https://egonlin.com/?p=10762（对于Ubuntu来说默认不用net
 
 
 ## 常用操作
+### events和logs
+events 是 K8s 系统组件（kubelet、scheduler、controller）自动记录的"事件日志"，记录调度、拉镜像、重启、探针失败等管理层面的动作；logs 是容器里应用程序自己输出的日志。排障时先看 events 定位"卡在哪一步"，再看 logs 定位"为什么"。
+
+| 对比项   | events                                     | logs                                  |
+| -------- | ------------------------------------------ | ------------------------------------- |
+| 谁产生   | K8s 系统组件（kubelet、scheduler 等）      | 容器内的应用程序自己                  |
+| 记录内容 | 调度、拉镜像、重启、探针失败等管理层面动作 | 应用运行的业务输出（stdout/stderr）   |
+| 粒度     | 离散事件条目，每条带 reason（如 BackOff）  | 连续文本流                            |
+| 查看命令 | `kubectl get events` / `describe pod`      | `kubectl logs <pod>`                  |
+| 存储     | 存在 etcd，默认只保留约 1 小时             | 容器运行时写节点磁盘，随 Pod 删除消失 |
+| 回答问题 | "为什么 Pod 没起来/被重启？"               | "程序内部发生了什么？"                |
+
+常见事件 reason：
+
+| reason                 | 含义                          |
+| ---------------------- | ----------------------------- |
+| Scheduled              | 调度器把 Pod 分配到节点       |
+| Pulling / Pulled       | 正在/已完成拉取镜像           |
+| FailedScheduling       | 调度失败（资源不足等）        |
+| ImagePullBackOff       | 镜像拉取失败（名字错/无权限） |
+| CrashLoopBackOff       | 容器反复崩溃重启              |
+| Readiness probe failed | 就绪探针失败                  |
+| OOMKilled              | 内存超限被杀                  |
+
+```bash
+# 查看事件流（默认按命名空间）
+kubectl get events -n default
+# 按时间排序，最新的在下面
+kubectl get events --sort-by='.lastTimestamp'
+# describe 底部的 Events 段 = 只属于这个 Pod 的事件，排障第一步
+kubectl describe pod nginx-7d8b9c5c4f-abcde
+
+# 查看应用日志
+kubectl logs nginx-7d8b9c5c4f-abcde
+# 实时滚动跟踪日志
+kubectl logs -f nginx-7d8b9c5c4f-abcde
+# 崩溃容器重启前的日志还在，能看到崩溃瞬间的堆栈
+kubectl logs --previous nginx-7d8b9c5c4f-abcde
+# Pod 内有多个容器时需指定 -c
+kubectl logs <pod名> -c <容器名>
+```
+
+排障配合思路：
+```text
+pod 异常
+ ├─ 先看 events（describe pod）→ 定位"卡在哪一步"
+ │    例：CrashLoopBackOff → 说明容器启动就崩
+ └─ 再看 logs（kubectl logs --previous）→ 定位"为什么崩"
+      例：看到 panic: missing DB_HOST → 原因是环境变量没配
+```
+
 ### containerd客户端命令介绍
 #### crictl
 > K8s 官方推荐的节点调试工具，通过 CRI 协议与 containerd 交互，天然理解"Pod 沙箱 + 容器"的抽象。默认连接 `/run/containerd/containerd.sock`。

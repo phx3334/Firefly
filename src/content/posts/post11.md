@@ -391,5 +391,18 @@ mypkg/
 - 模块名运行：`python -m mypkg.sub.mod`（在 `mypkg` 的上一级目录执行）
   解释器按 `sys.path` 找到 `mypkg` → 加载它、再加载 `mypkg.sub` → 最后加载 `mod`，`__name__ == "mypkg.sub.mod"`。`from . import helper` 的 `.` 锚定到 `mypkg.sub`，顺利找到同包的 `helper.py` → 正常运行。
 对照：`mod.py` 这个文件**内容完全一样**，区别只在「怎么启动」——裸路径启动丢掉了包身份，`-m` 启动保留了包身份。
-#### sys.path的查找顺序
-入口脚本所在目录->PYTHONPATH->标准库目录->第三方包目录（site-packages）  
+### 虚拟环境（venv）
+- **是什么**：一个隔离 site-packages（第三方包存放目录）的普通文件夹，**不是虚拟机**——没有独立解释器、没有操作系统层，只是"包目录 + 指向系统解释器的软链接"。
+```
+.venv/
+├── bin/ (Windows 是 Scripts/)
+│   ├── python          → 指向系统 Python 的软链接，不是新解释器
+│   ├── pip             → 本环境专属的 pip
+│   └── pip install -e . 生成的命令入口脚本也在这
+├── lib/python3.x/site-packages/   ← 本环境装的第三方包，全在这
+└── pyvenv.cfg          → 记录"我基于哪个系统 Python"
+```
+- **隔离的只有 site-packages**：激活 venv 后，`python`/`pip` 命中 `.venv/bin/` 下的版本（activate 的本质是把该目录加进当前终端的 PATH），装包只装进本环境的 site-packages；删除 `.venv` 目录 = 环境彻底消失，系统毫无影响。
+- **三步用法**：`python -m venv .venv` 建盒子 → `source .venv/bin/activate` 进盒子 → `pip install xxx` 往盒子里装。顺序严格：install 永远装进"当前激活的那个环境"，不激活就会装进系统全局。
+- **为什么需要**：不同项目依赖不同版本（A 项目 typer 0.12、B 项目 0.9），全局只有一份 site-packages 必然冲突；对照 Go（编译型，依赖进二进制）和 Node（node_modules 随项目放），venv 是 Python 的对应解法。
+- **与 sys.path 的衔接**：激活 venv 后，第三方包查找走的 site-packages 是 `.venv/lib/.../site-packages`——venv 没改变查找顺序，只是把其中一环的目录换掉了。
