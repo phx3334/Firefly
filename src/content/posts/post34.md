@@ -1,6 +1,6 @@
 ---
 title: 编写go和python的CLI
-published: 2026-09-26T23:11:23+08:00
+published: 2026-10-03T23:11:23+08:00
 description: 学习如何使用go和python编写CLI工具.以及集成ai操作集群的辅助功能。
 image: './images/a34.avif'
 tags: [CLI]

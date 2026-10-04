@@ -300,7 +300,3 @@ hubble observe --protocol http      # 只看 HTTP 层调用（可看到方法、
 ```
 
 > 收尾呼应：这一整套零侵入能力——L7 调用拓扑、策略审计、RED 指标——数据源头全是前文讲的 **TC/XDP 钩子上的 eBPF 程序和 eBPF Map**。Cilium 是"把 eBPF 能力产品化成网络基础设施"，Hubble 是"把 eBPF 能力产品化成可观测性"，原理和工具在这里合上了。
-
-
-
-

@@ -446,9 +446,10 @@ spec:
                 values:
                 - yyy-zzz-mmm
 ```
-- **required（硬）**：条件不满足 → 根本不调度，Pod 一直 Pending
-- **preferred（软）**：条件不满足也能调度，`weight` 越大优先级越高（多个候选节点里挑权重高的）
-操作符表达式（`matchExpressions` 里的 `operator`）：
+- **required（硬）**：条件不满足 → 根本不调度，Pod 一直 Pending   
+- **preferred（软）**：条件不满足也能调度，`weight` 越大优先级越高（多个候选节点里挑权重高的）  
+操作符表达式（`matchExpressions` 里的 `operator`）：  
+
 | operator       | 含义               | 需要 values 吗 |
 | -------------- | ------------------ | -------------- |
 | `In`           | 键的值在给定列表里 | 要             |
@@ -457,11 +458,12 @@ spec:
 | `DoesNotExist` | 键不存在           | 不要           |
 | `Gt`           | 值大于（数值比较） | 要             |
 | `Lt`           | 值小于（数值比较） | 要             |
+
 组合逻辑：
 - `nodeSelectorTerms` 里多个 term 之间是 **或（OR）**：满足任意一个即可
 - 单个 term 里多个 `matchExpressions` 是 **且（AND）**：必须全部满足
 **IgnoredDuringExecution（名字后半段）** 的含义：规则只在**调度那一刻**生效。Pod 已经调度到某节点后，如果该节点标签后来变了（比如 `xxx` 标签被删了），**已运行的 Pod 不会被移走**——规则只对新建/更新的 Pod 有效。所以完整意思是"调度时强制/优先满足，运行期忽略"。
-为什么搞这么多策略（污点、节点标签、亲和性、反亲和性）？一推一拉组合出各种调度需求，让 Pod 尽量"塞"进合适的节点，**提高整体资源利用率**——这就是"自动装箱（bin packing）"。
+
 **按pod标签进行调度**：  
 场景：缓存 Pod 要跟业务 Pod 放同一台机器，减少网络延迟。  
 ```yaml

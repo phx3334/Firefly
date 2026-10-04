@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" width="760" height="470" role="img" aria-label="Reconciler 架构：Builder 注册到 Manager，Source 监听变化入队，Controller 取出后调用 Reconciler">
+  <style>
+    .t { fill: #171717; font: 500 14px/20px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .ts { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .tsl { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: start; }
+    .flow { stroke: #0FDC78; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .read { stroke: #52525B; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 4 4; fill: none; }
+    .boundary { fill: none; stroke: rgba(23, 23, 23, 0.12); stroke-dasharray: 6 6; }
+    .node-neutral { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+    .node-external { fill: #EFEFF2; stroke: rgba(23, 23, 23, 0.16); }
+    .node-brand { fill: #E5FFF2; stroke: #0FDC78; }
+    .capsule { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+  </style>
+  <defs>
+    <marker id="arrB3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#0FDC78"/>
+    </marker>
+    <marker id="arrM3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#52525B"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="760" height="470" rx="16" fill="#F7F7F8"/>
+
+  <!-- 事件流 -->
+  <rect x="50" y="50" width="150" height="56" rx="10" class="node-external"/>
+  <text x="125" y="73" class="t">API Server</text>
+  <text x="125" y="93" class="ts">CR / 原生资源变化</text>
+
+  <rect x="270" y="40" width="200" height="76" rx="10" class="node-brand"/>
+  <text x="370" y="64" class="t">Source（Informer 实现）</text>
+  <text x="370" y="84" class="ts">Manager 启动时创建</text>
+  <text x="370" y="102" class="ts">监听指定 Kind 的资源变化</text>
+
+  <rect x="540" y="40" width="170" height="76" rx="10" class="node-neutral"/>
+  <text x="625" y="64" class="t">工作队列</text>
+  <text x="625" y="84" class="ts">存 NamespacedName</text>
+  <text x="625" y="102" class="ts">（事件被收敛成 Key）</text>
+
+  <rect x="270" y="170" width="200" height="60" rx="10" class="node-neutral"/>
+  <text x="370" y="194" class="t">Controller</text>
+  <text x="370" y="214" class="ts">订阅队列，转发事件</text>
+
+  <rect x="270" y="290" width="200" height="70" rx="10" class="node-brand"/>
+  <text x="370" y="314" class="t">Reconciler</text>
+  <text x="370" y="334" class="ts">Reconcile(ctx, req)</text>
+  <text x="370" y="352" class="ts">开发者只需实现这里</text>
+
+  <!-- Builder 注册 -->
+  <rect x="50" y="290" width="150" height="70" rx="10" class="node-neutral"/>
+  <text x="125" y="314" class="t">Builder 注册</text>
+  <text x="125" y="334" class="ts">指定 For(&amp;CRD{})</text>
+  <text x="125" y="352" class="ts">监控的资源类型</text>
+  <path d="M 200 325 L 270 325" class="flow" marker-end="url(#arrB3)"/>
+  <text x="235" y="316" class="ts">注册</text>
+
+  <!-- 主流程连线 -->
+  <path d="M 200 78 L 270 78" class="flow" marker-end="url(#arrB3)"/>
+  <text x="235" y="70" class="ts">Watch</text>
+  <path d="M 470 78 L 540 78" class="flow" marker-end="url(#arrB3)"/>
+  <text x="505" y="70" class="ts">入队</text>
+  <path d="M 625 116 L 625 200 L 470 200" class="flow" marker-end="url(#arrB3)"/>
+  <text x="560" y="192" class="ts">取出触发</text>
+  <path d="M 370 230 L 370 290" class="flow" marker-end="url(#arrB3)"/>
+  <text x="404" y="264" class="tsl">调用</text>
+
+  <!-- 右侧核心组件 -->
+  <rect x="540" y="290" width="180" height="140" rx="10" class="boundary"/>
+  <text x="558" y="314" class="tsl" style="font-weight:600">Reconciler 可用组件</text>
+  <text x="558" y="338" class="tsl">· Client：读缓存 + 写</text>
+  <text x="558" y="360" class="tsl">· APIReader：绕过缓存</text>
+  <text x="558" y="382" class="tsl">  直读 API Server</text>
+  <text x="558" y="404" class="tsl">· Scheme：GVK ↔ Go 类型</text>
+  <path d="M 470 325 C 510 325 520 330 540 340" class="read" marker-end="url(#arrM3)"/>
+
+  <!-- 回写状态 -->
+  <path d="M 370 360 C 370 420 180 420 125 106" class="read" marker-end="url(#arrM3)"/>
+  <text x="180" y="430" class="ts">更新 CR 的 status / 操作原生资源</text>
+</svg>
