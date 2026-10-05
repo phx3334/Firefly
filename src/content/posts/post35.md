@@ -1,7 +1,7 @@
 ---
 title: operator
 published: 2026-10-04T23:11:23+08:00
-description: 学习operator的工作原理和最佳实践，还有kubebuilder，Reconciler和Controller架构
+description: 学习operator的工作原理和用处
 image: './images/a35.jpg'
 tags: [k8s]
 category: '计算机技术'
@@ -9,220 +9,251 @@ draft: false
 lang: '中文'
 ---
 
-## 什么是 Operator
+## Operator
 
-### 本质定义
+### 为什么需要 Operator
 
-Operator 是一种特殊的控制器（Controller），能够将控制循环机制应用到自定义资源（CRD）的状态管理中。
+K8s 原生的 Deployment 已经能很好地管理无状态应用：副本挂了自动重建、滚动更新、扩缩容一条龙。但 Deployment 建出来的 Pod 本质上是"可替换的零件"，它无法理解一个 MySQL 或 Redis 集群的内部逻辑——主从关系、数据备份、故障转移、扩容时该先动谁，这些属于**领域运维知识**，K8s 自己不知道。
 
-- 核心组成：**Operator = Controller + CRD**
-- 工作流程：
-  1. 监控（Watch）CRD 变更
-  2. 根据 CRD 声明创建原生资源（如 Deployment/ConfigMap/Service 等）
-  3. 通过控制循环（Control Loop）将操作结果更新到 status 字段
+Operator 的思路很直接：把这些运维知识写成代码，做成一个自定义控制器。它由两部分组成：
 
+- **CRD（自定义资源定义）**：向 API Server 注册一种新的资源类型，比如 `RedisCluster`，让我们可以像写 Deployment YAML 一样声明期望状态
+- **自定义控制器**：一个持续运行的 Pod，Watch 这种新资源的变化，把"声明"翻译成真正的 K8s 操作
 
+一句话总结：**Operator = CRD + 自定义控制器**，CRD 负责存期望状态，控制器负责让现实向期望收敛。
 
-![Operator 控制循环](./images/operator-loop.svg)
+### Operator 的不同用处
 
-### 示例：Redis Operator 如何"翻译"声明
+Operator 并不只用于管数据库，凡是"需要一套固定操作流程才能维持运行"的东西都适合：
 
-以部署一个 Redis 集群为例。用户只需提交一份 RedisCluster CR，声明期望状态即可：
+- **有状态中间件**：Redis Operator、PostgreSQL Operator（Zalando）。创建 CR 后自动生成 StatefulSet、Service、ConfigMap，处理主从复制、故障转移、备份
+- **监控**：Prometheus Operator。声明一个 `Prometheus` CR，Operator 自动拉起 Prometheus 实例并生成抓取配置，`ServiceMonitor` CR 则声明"要抓哪些 Service"
+- **证书管理**：cert-manager。声明 `Certificate` CR，Operator 自动向 Let's Encrypt 申请证书并自动续期，续期后替换 Secret
+- **定时扩缩容**：自定义 CronHPA CR，Operator 在指定时间修改 Deployment 的 `spec.replicas`（工作日晚高峰扩容、凌晨缩容）
+- **应用发布**：Argo Rollout 的 `Rollout` CR，提供金丝雀发布、蓝绿发布等 Deployment 不具备的能力
 
-```yaml
-apiVersion: cache.example.com/v1
-kind: RedisCluster
-metadata:
-  name: my-redis
-spec:                      # 期望状态
-  shards: 3                # 期望 3 个分片
-  replicasPerShard: 1      # 每个分片 1 个副本
-  image: redis:7.2         # 使用的 Redis 镜像
-  storage: 10Gi            # 每个节点持久化存储大小
-status:                    # 实际状态：由 Operator 回写
-  phase: Ready
-  readyShards: 3
+它们的共同模式都是：**用户写 CR 声明"我想要什么"，Operator 负责回答"怎么做到"**。
+
+### 工作机制
+
+先看 CRD 是怎么变成一种"真资源"的。提交一个 CRD 后，API Server 会为它动态注册一组 REST 端点（`apis/example.com/v1/namespaces/default/redisclusters`），数据照常存进 etcd。从此 `kubectl get redisclusters` 就是合法命令，权限、校验、事件机制与原生资源完全一致。
+
+Operator 控制器内部是一个标准的**Reconcile 调谐循环**：
+
 ```
-Redis Operator 的工作过程正是上面三步的落地：
-1. **Watch**：Operator 监听到 `my-redis` 这个 CR 被创建，读取其 `spec`（3 分片、10Gi 存储）
-2. **创建原生资源**：Operator 调用 API Server，把 spec "翻译"成一组原生资源——创建 StatefulSet（拉起 3 个 Redis Pod）、ConfigMap（写入 redis.conf 集群模式配置）、Service（提供稳定的访问地址）
-3. **回写 status**：Operator 持续检查实际运行的 Redis 节点数，确认 3 个分片全部就绪后，把 `status.phase` 更新为 `Ready`
-关键点在于：**CR 本身只是数据，不会运行任何东西**；真正拉起 Pod 的是 StatefulSet 的内置控制器，Operator 只是那个把"用户的愿望"翻译成"原生资源"的中间人。若用户把 `spec.shards` 从 3 改成 5，控制循环会检测到差异，Operator 便修改 StatefulSet 的 `replicas` 进行扩容——全程无需人工介入。
-
-
-## Operator 开发模式的好处
-1. **控制循环复用**：直接复用 Controller 的控制循环逻辑，开发者无需自行实现复杂的控制循环机制，只需专注于业务逻辑代码的编写
-2. **声明式资源管理**：继承 Kubernetes 原生的声明式资源管理能力，所有自定义资源（CRD）对象都存储在 etcd 中，可通过 kubectl 工具进行增删改查操作
-3. **API 原生集成**：与 Kubernetes API 深度集成，支持通过 kubectl 直接管理自定义资源，实现与原生资源相同的操作体验
-4. **有状态应用简化**：特别简化了有状态应用（如数据库、中间件等）的开发和管理流程，通过 CRD 声明即可部署完整实例
-5. **平台能力继承**：自动获得 Kubernetes 平台提供的应用管理能力，包括自愈机制、滚动更新、自动重启等特性
-
-## Operator 的使用场景
-- **自定义资源定义**：支持定义各类业务资源，如数据库实例（Redis/Memcached/ClickHouse 等）、云资源（通过 Crossplane 定义 VPC、云数据库等）
-- **自动化运维**：实现备份恢复等运维自动化任务，可针对 K8s 集群内任意资源设计自动化操作流程
-- **CI/CD 工作流**：构建自定义的持续集成/持续部署流水线，将复杂的发布流程抽象为 CRD 资源
-- **存储系统管理**：典型案例如 Rook、Ceph 等存储系统的 Operator 实现，通过声明式 API 管理分布式存储集群
-- **云资源编排**：通过 Crossplane 等方案实现多云资源编排，声明云服务资源（如腾讯云 VPC、云数据库）即可自动创建对应资源
-
-## Kubebuilder 和 Operator SDK
-
-### Kubebuilder 介绍
-
-- 官方框架：Kubernetes 官方提供的 Operator 开发框架
-- 底层实现：基于 controller-runtime 和 controller-tools 这两个核心库构建
-- 代码生成：内置了复杂的代码生成能力，简化 Operator 开发流程
-
-### Operator SDK 及其与 Kubebuilder 的关系
-
-- 底层依赖：Operator SDK 底层直接使用了 Kubebuilder 的代码生成能力
-- 封装关系：可以理解为 Operator SDK 是对 Kubebuilder 的二次封装
-- 开发语言：两者都支持使用 Golang 进行 Operator 开发
-
-### Operator SDK 的额外能力
-
-- **OLM 支持**：提供 Operator Lifecycle Manager（OLM），简化 Operator 打包和分发流程
-- **发布中心**：内置 OperatorHub，类似 Docker Hub 的 Operator 发布平台
-- **质量检测**：包含 scorecard 工具，确保开发过程符合最佳实践
-- **多语言支持**：除 Golang 外，还支持基于 Ansible 脚本和 Helm chart 创建 Operator
-
-### 生产环境中的选择
-
-- 项目结构：两者生成的项目布局基本相同，没有本质区别
-- 选择考量：生产环境中选择任一方都不会有显著差异
-- 部署方式：Kubebuilder 需要将 Operator 包装成 Customized 或 Helm chart 部署
-
-### Kubebuilder 的核心地位
-
-- 基础地位：无论使用 Kubebuilder 还是 Operator SDK，本质上都是在使用 Kubebuilder
-- 核心组件：提供 Operator 开发所需的核心功能和代码生成能力
-- 统一标准：两种框架最终生成的 Operator 实现标准一致
-
-## Kubebuilder 架构
-
-![Kubebuilder 架构](./images/kubebuilder-arch.svg)
-
-- **Manager 核心功能**：初始化 Controller Manager，每个集群运行一个实例（HA 模式下可多个），负责处理 leader 选举、暴露 metrics、管理 webhook 证书、缓存事件、持有客户端连接和广播事件
-- **Controller 特性**：具备 Cache、队列和失败重试能力，每个被协调的 Kind 对应一个 Controller 实例，内部封装 Reconciler 业务逻辑
-- **Reconciler 定位**：开发者只需实现这部分业务逻辑，通过 Controller 调用，每次获取事件时触发
-- **Client/Cache 使用**：这两个组件通常不直接使用，Client 负责与 API Server 通信并处理认证协议，Cache 缓存 GET 过的对象
-- **Webhook 作用**：用于开发 AdmissionWebHook（准入控制器），包括 Defaulter（设置 spec 未定义字段）和 Validator（拒绝格式错误对象）
-
-## Reconciler 架构
-
-![Reconciler 架构](./images/reconciler-arch.svg)
-
-- **注册机制**：通过 Builder 注册到 Manager，注册时需要指定监控的资源类型（如 CRD 或 K8s 标准资源）
-- **事件处理流程**：
-  1. Manager 启动时创建 Source 组件（基于 Informer 实现）
-  2. Source 监听资源变化并传递消息到工作队列
-  3. Controller 订阅工作队列消息并转发给 Reconciler
-- **核心组件交互**：
-  - APIReader：直接读取 API Server（绕过 Cache）
-  - Scheme：管理 GVK 与 Go 类型的映射
-  - Client：包含读缓存和写 API Server 能力
-
-### 触发机制
-
-触发本质：从工作队列获取元素的过程，包含四种处理结果：
-
-1. 成功无需重试：从队列删除
-2. 失败需要重试：重新入队
-3. 成功但需重试：标记 requeue
-4. 延迟重试：设置 RequeueAfter
-
-### 重试策略
-
-```go
-// 成功无重试
-return ctrl.Result{}, nil
-
-// 失败需重试：err 自动触发重新入队（带限速）
-return ctrl.Result{}, err
-
-// 成功需重试：可跟踪重试次数
-return ctrl.Result{Requeue: true}, nil
-
-// 延迟重试：实现定时任务
-return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+Watch CR 变化（Informer 监听 etcd 事件流）
+   │
+   ▼
+事件进入工作队列
+   │
+   ▼
+Reconcile 被触发，拿到最新 CR
+   │
+   ├── 读取 spec（期望状态）
+   ├── 读取集群实际状态
+   ├── 有差异 → 调 API Server 创建/修改原生资源（StatefulSet、Service...）
+   └── 回写 status（实际状态）
+   │
+   ▼
+结束并返回，等待下一次触发
 ```
 
-## Controller 架构
+两个关键设计：
 
-![Controller 架构](./images/controller-arch.svg)
+- **水平触发（level-triggered）**：Reconcile 不是"收到事件执行一次就完"的边缘触发，而是随时可以被再次触发。哪怕 Operator 重启、错过事件，下一次 Reconcile 依然会对比 spec 与现实并补齐差异，所以逻辑必须**幂等**——执行一次和执行十次结果相同
+- **只写自己的账本**：Reconcile 中对实际状态的判断不能只靠内存变量，一切以从 API Server 读到的数据为准
 
-### 核心处理链
+### 用 kubebuilder 搭脚手架
 
-1. Source（Informer）监听资源变化并入队
-2. `ProcessNextWorkItem()` 从队列取出元素
-3. `ReconcileHandler()` 调用 Reconcile 方法
-4. 结果处理：业务成功则元素从队列删除；业务失败则元素重新入队；支持延迟重试机制
-
-### 实现细节
-
-- 队列类型：使用 RateLimitQueue（与 client-go 实现类似）
-- 关键配置：
-  - `MaxConcurrentReconciles`：控制并发协调数
-  - `CacheSyncTimeout`：缓存同步超时设置
-  - `RecoverPanic`：异常恢复机制
-- 自动生成：通过 kubebuilder 自动创建 main.go 中的基础组件
-
-## 最佳实践
-
-### Reconcile 最佳实践
-
-- **事件无关性**：Reconcile 逻辑不应关注具体事件类型（创建/更新/删除），避免针对不同事件编写不同逻辑
-- **幂等性设计**：无论运行多少次都应产生相同结果，因为事件可能因网络等原因被重复触发
-- **状态驱动**：只需关注期望状态和当前状态的差异（Diff），基于状态差异执行业务逻辑
-
-### Operator 端到端测试
-
-#### 测试环境搭建
-
-核心组件：使用 envtest.Environment 模拟 K8s API Server
+kubebuilder 是官方推荐的开发框架，两步生成项目骨架：
 
 ```bash
-go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-setup-envtest use 1.28        # 获取二进制文件路径
-# 创建软链接到标准目录 /usr/local/kubebuilder/bin
+# 初始化项目（生成 Go module、manager 入口、Makefile 等）
+kubebuilder init --domain example.com --repo github.com/example/redis-operator
+
+# 创建 API：新增一种 CRD 类型 RedisCluster，并生成配套的控制器
+kubebuilder create api --group cache --version v1 --kind RedisCluster --resource --controller
 ```
 
-#### 测试用例编写
+生成的项目结构如下（省略非核心文件）：
 
-文件组织：
+```
+redis-operator/
+├── main.go                          # 程序入口：启动 manager
+├── api/v1/
+│   └── rediscluster_types.go        # CRD 的 Go 定义：Spec、Status、GVK
+├── internal/controller/
+│   └── rediscluster_controller.go   # 控制器核心：Reconcile 逻辑写在这里
+├── config/
+│   ├── crd/                         # 由 types.go 自动生成的 CRD YAML（make manifests）
+│   ├── rbac/                        # Operator 自身需要的权限（能 watch/list CR、能改 StatefulSet）
+│   └── manager/                     # Operator 自身的 Deployment
+└── Makefile                         # 封装生成代码、构建镜像、部署等命令
+```
 
-- `e2e_suite_test.go`：测试入口文件
-- `e2e_test.go`：测试用例实现文件
-- `cluster.go`：自定义测试逻辑文件
+### 各文件职责详解
 
-关键步骤：
+**`api/v1/rediscluster_types.go`——声明"资源长什么样"**
 
-1. 初始化 envtest 环境并加载 CRD
-2. 注册自定义资源 Scheme
-3. 创建 K8s 客户端
-4. 编写资源创建/验证逻辑
+这是 CRD 的源头，Go 结构体会通过 controller-gen 转换成 CRD YAML。核心是 `Spec`（用户填的期望状态）和 `Status`（Operator 回写的实际状态）：
 
-#### 测试环境初始化
+```go
+// api/v1/rediscluster_types.go
+// RedisClusterSpec 定义用户声明的期望状态
+type RedisClusterSpec struct {
+	// Shards 是分片数量，即最终要有几个 Redis 节点
+	// +kubebuilder:validation:Minimum=1
+	Shards int `json:"shards"`
+	// Image 是 Redis 容器镜像
+	Image string `json:"image"`
+	// Storage 是每个节点的存储大小，如 "10Gi"
+	Storage string `json:"storage"`
+}
 
-- 日志配置：使用 zap 日志库并开启开发模式
-- CRD 加载：通过 CRDDirectoryPaths 指定 CRD 文件路径
-- Scheme 注册：使用 AddToScheme 方法注册自定义 API 类型
+// RedisClusterStatus 定义 Operator 观察到的实际状态
+type RedisClusterStatus struct {
+	// ReadyShards 是当前已就绪的节点数，与 spec.Shards 对比即可判断是否收敛
+	ReadyShards int `json:"readyShards"`
+	// Conditions 记录各阶段状态，kubectl describe 时能看到
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
 
-#### 资源操作测试
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// RedisCluster 是整个 CR 的顶层结构，spec/status 分开存
+type RedisCluster struct {
+	metav1.TypeMeta   `json:",inline"`   // 记录 apiVersion 和 kind
+	metav1.ObjectMeta `json:"metadata,omitempty"` // 名字、namespace 等元信息
+	Spec   RedisClusterSpec   `json:"spec,omitempty"`
+	Status RedisClusterStatus `json:"status,omitempty"`
+}
+```
 
-- 资源创建：在测试中创建 CR 对象
-- 资源获取：通过客户端读取并断言
-- 字段验证：可验证 Spec/Status 等字段是否符合预期
+`+kubebuilder:validation:Minimum=1` 这类注释不是普通注释，是 marker，`make manifests` 时会转成 CRD 的字段校验规则，用户写错值时 API Server 直接拒绝。
 
-#### envtest 特性与限制
+**`internal/controller/rediscluster_controller.go`——控制器的大脑**
 
-核心特性：
+Reconciler 只有一个核心方法 `Reconcile`，所有逻辑都围绕"让集群状态等于 spec"展开：
 
-- 无需真实 K8s 集群
-- 包含 etcd 存储但无控制器
-- 支持 CRUD 操作验证
+```go
+// RedisClusterReconciler 负责调谐 RedisCluster CR
+type RedisClusterReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
 
-主要限制：
+// +kubebuilder:rbac:groups=cache.example.com,resources=redisclusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// 上面的 rbac marker 会生成 config/rbac/role.yaml，声明 Operator 需要的权限
 
-- 不会实际创建 Pod 等工作负载
-- 仅适用于 API 交互逻辑测试
-- 需要手动模拟控制器行为
+func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// 1. 按 req（namespace/name）取出 CR；NotFound 说明被删除了，直接返回即可
+	var cluster cachev1.RedisCluster
+	if err := r.Get(ctx, req.NamespacedName, &cluster); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// 2. 期望的 StatefulSet：由 CR 的 spec 翻译而来
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: ptr.To(int32(cluster.Spec.Shards)), // 副本数来自 CR
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": cluster.Name},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": cluster.Name},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "redis",
+						Image: cluster.Spec.Image, // 镜像来自 CR
+					}},
+				},
+			},
+		},
+	}
+
+	// 3. CreateOrUpdate：已存在则按新 spec 更新，不存在则创建，天然幂等
+	if err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
+		sts.Spec.Replicas = ptr.To(int32(cluster.Spec.Shards)) // 每次 Reconcile 强制对齐
+		return controllerutil.SetControllerReference(&cluster, sts, r.Scheme) // 建立归属关系，CR 删除时级联删除
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 4. 回写 status：把实际就绪数写到 CR 上，kubectl get 时可见
+	cluster.Status.ReadyShards = int(sts.Status.ReadyReplicas)
+	if err := r.Status().Update(ctx, &cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 5. 就绪数还没追上期望数时，30 秒后再触发一次 Reconcile 继续观察
+	if sts.Status.ReadyReplicas != cluster.Spec.Shards {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	return ctrl.Result{}, nil
+}
+```
+
+注意第 3 步：我们从不判断"这个 StatefulSet 是不是我自己创建的"，`SetControllerReference` 通过 ownerReference 建立归属后，CR 被删除时 K8s 会级联清理它创建的所有资源。
+
+**`main.go`——程序入口**
+
+main.go 做的事情很单一：创建 manager，把 Reconciler 和 CRD 注册进去，然后启动。manager 内部封装了 client、informer 缓存和工作队列，我们不需要手写 Watch 逻辑：
+
+```go
+func main() {
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+
+	// 把 Reconciler 注册进 manager，SetupWithManager 内部声明了"我要 Watch RedisCluster"
+	if err := (&controller.RedisClusterReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller")
+		os.Exit(1)
+	}
+
+	setupLog.Info("starting manager")
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		setupLog.Error(err, "problem running manager")
+		os.Exit(1)
+	}
+}
+```
+
+`SetupWithManager` 里的关键一行是 `For(&cachev1.RedisCluster{}).Complete(r)`，它声明了 Watch 的对象类型。如果 CR 的变化会间接影响其他资源（比如 StatefulSet 被人手动改了），还可以用 `.Owns(&appsv1.StatefulSet{})` 让这些资源的变化也触发 Reconcile。
+
+### 部署与验证
+
+```bash
+# 把 types.go 里的 marker 转换成 CRD YAML 和 RBAC 清单
+make manifests
+
+# 安装 CRD 到集群
+make install
+
+# 本地运行 Operator（直接跑在终端，连的是当前 kubeconfig 集群，方便调试）
+make run
+
+# 另开终端创建一个 CR
+kubectl apply -f config/samples/cache_v1_rediscluster.yaml
+kubectl get redisclusters
+# NAME          READYSHARDS   AGE
+# redis-sample   2/3          5m    # READYSHARDS 就是 Reconcile 回写的 status
+```
+
+生产部署时 `make docker-build docker-push` 把 Operator 打成镜像，`make deploy` 会在集群里创建一个 Deployment 跑这个镜像，外加 CRD 和 RBAC。此时 Operator 自身就是一个普通工作负载，它 Watch 的 CR 和它创建的 StatefulSet 都在同一套 API Server 之下。
+
+### 小结
+回到最初的问题：Operator 解决的是"K8s 不懂你的应用"这个矛盾。CRD 把领域知识翻译成 API Server 能存储的声明，控制器把声明翻译成集群能执行的操作。写一个生产级 Operator 的复杂度主要在故障处理和升级逻辑上，但骨架始终是本文这一套：**定义 Spec/Status → 实现 Reconcile → 保持幂等 → 依赖水平触发自动收敛**。
+
