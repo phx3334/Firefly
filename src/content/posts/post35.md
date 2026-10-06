@@ -39,7 +39,6 @@ Operator 并不只用于管数据库，凡是"需要一套固定操作流程才�
 先看 CRD 是怎么变成一种"真资源"的。提交一个 CRD 后，API Server 会为它动态注册一组 REST 端点（`apis/example.com/v1/namespaces/default/redisclusters`），数据照常存进 etcd。从此 `kubectl get redisclusters` 就是合法命令，权限、校验、事件机制与原生资源完全一致。
 
 Operator 控制器内部是一个标准的**Reconcile 调谐循环**：
-
 ```
 Watch CR 变化（Informer 监听 etcd 事件流）
    │
@@ -59,7 +58,6 @@ Reconcile 被触发，拿到最新 CR
 ```
 
 两个关键设计：
-
 - **水平触发（level-triggered）**：Reconcile 不是"收到事件执行一次就完"的边缘触发，而是随时可以被再次触发。哪怕 Operator 重启、错过事件，下一次 Reconcile 依然会对比 spec 与现实并补齐差异，所以逻辑必须**幂等**——执行一次和执行十次结果相同
 - **只写自己的账本**：Reconcile 中对实际状态的判断不能只靠内存变量，一切以从 API Server 读到的数据为准
 
@@ -76,7 +74,6 @@ kubebuilder create api --group cache --version v1 --kind RedisCluster --resource
 ```
 
 生成的项目结构如下（省略非核心文件）：
-
 ```
 redis-operator/
 ├── main.go                          # 程序入口：启动 manager
@@ -92,11 +89,8 @@ redis-operator/
 ```
 
 ### 各文件职责详解
-
 **`api/v1/rediscluster_types.go`——声明"资源长什么样"**
-
 这是 CRD 的源头，Go 结构体会通过 controller-gen 转换成 CRD YAML。核心是 `Spec`（用户填的期望状态）和 `Status`（Operator 回写的实际状态）：
-
 ```go
 // api/v1/rediscluster_types.go
 // RedisClusterSpec 定义用户声明的期望状态
