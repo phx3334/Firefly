@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 820" width="760" height="820" role="img" aria-label="Ceph 业务全链路：业务用户创建云盘挂给虚拟机，宿主机客户端经公共网向 MON 认证并获取集群地图，本地完成切片哈希与 CRUSH 定位后，写请求经公共网直达主 OSD，主 OSD 自己落盘并经集群网把数据复制给两个副本 OSD，全部落盘后确认返回客户端；管理网络独立于 Ceph 之外，三张网均为内网">
+  <style>
+    .t { fill: #171717; font: 500 14px/20px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .tb { fill: #004D26; }
+    .tt { fill: #0F766E; }
+    .ts { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: middle; }
+    .tsl { fill: #52525B; font: 400 12px/18px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; text-anchor: start; }
+    .flow { stroke: #0FDC78; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .flow-a { stroke: #0D9488; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .read { stroke: #52525B; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 4 4; fill: none; }
+    .node-neutral { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); }
+    .node-external { fill: #EFEFF2; stroke: rgba(23, 23, 23, 0.16); }
+    .node-brand { fill: #E5FFF2; stroke: #0FDC78; }
+    .node-cluster { fill: #EAFBF8; stroke: #0D9488; }
+    .node-dash { fill: #FFFFFF; stroke: rgba(23, 23, 23, 0.16); stroke-dasharray: 6 4; }
+  </style>
+
+  <defs>
+    <marker id="arrB" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#0FDC78"/>
+    </marker>
+    <marker id="arrA" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#0D9488"/>
+    </marker>
+    <marker id="arrM" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#52525B"/>
+    </marker>
+  </defs>
+
+  <!-- 背景 -->
+  <rect x="0" y="0" width="760" height="820" rx="16" fill="#F7F7F8"/>
+
+  <!-- 业务用户 → 虚拟机 -->
+  <rect x="40" y="24" width="160" height="52" rx="26" class="node-external"/>
+  <text x="120" y="46" class="t">业务用户</text>
+  <text x="120" y="66" class="ts">应用 / 运维平台</text>
+
+  <path d="M200 50 L244 50" class="read" marker-end="url(#arrM)"/>
+  <text x="222" y="38" class="ts">创建云盘</text>
+
+  <rect x="250" y="24" width="220" height="52" rx="8" class="node-neutral"/>
+  <text x="360" y="46" class="t">虚拟机</text>
+  <text x="360" y="66" class="ts">云盘 /dev/vdb（RBD image）</text>
+
+  <!-- 虚拟机 → 宿主机客户端 -->
+  <path d="M360 76 L360 130" class="flow" marker-end="url(#arrB)"/>
+  <text x="372" y="106" class="tsl">读写请求</text>
+
+  <!-- 客户端（宿主机） -->
+  <rect x="110" y="136" width="330" height="120" rx="8" class="node-neutral"/>
+  <text x="275" y="164" class="t">客户端 = 宿主机</text>
+  <text x="275" y="186" class="ts">librados / RBD 驱动 · 挂载云盘 /dev/rbd0</text>
+  <text x="275" y="208" class="ts">② 本地计算：切 4MB Object → 哈希进 PG</text>
+  <text x="275" y="228" class="ts">→ CRUSH 算出 {osd.3, osd.7, osd.11}</text>
+
+  <!-- ① 客户端 → MON -->
+  <path d="M440 176 L554 176" class="flow" marker-end="url(#arrB)"/>
+  <text x="497" y="164" class="ts">① 认证 · 拿地图</text>
+  <text x="497" y="196" class="ts">公共网 · 仅一次</text>
+
+  <!-- MON 集群 -->
+  <rect x="560" y="136" width="160" height="80" rx="8" class="node-neutral"/>
+  <text x="640" y="162" class="t">MON 集群 ×3</text>
+  <text x="640" y="182" class="ts">认证 · 发布集群地图</text>
+  <text x="640" y="202" class="ts">奇数部署（Paxos）</text>
+
+  <!-- MON 接入公共网 -->
+  <path d="M640 216 L640 294" class="flow"/>
+
+  <!-- ③ 客户端 → 公共网络 → 主 OSD -->
+  <path d="M275 256 L275 294" class="flow" marker-end="url(#arrB)"/>
+  <text x="287" y="280" class="tsl">③ 写请求</text>
+
+  <!-- 公共网络 -->
+  <rect x="110" y="300" width="540" height="48" rx="24" class="node-brand"/>
+  <text x="380" y="322" class="t tb">公共网络 · public_network</text>
+  <text x="380" y="340" class="ts">客户端读写 · MON 服务 · OSD 状态 Push 上报</text>
+
+  <path d="M190 348 L190 404" class="flow" marker-end="url(#arrB)"/>
+  <text x="202" y="382" class="tsl">直达主 OSD</text>
+
+  <!-- OSD 三副本 -->
+  <rect x="110" y="410" width="160" height="84" rx="8" class="node-brand"/>
+  <text x="190" y="438" class="t tb">osd.3（主）</text>
+  <text x="190" y="458" class="ts">Primary · 列表首位</text>
+  <text x="190" y="476" class="ts">③ 先写自己本地盘</text>
+
+  <rect x="300" y="410" width="160" height="84" rx="8" class="node-neutral"/>
+  <text x="380" y="438" class="t">osd.7（副本）</text>
+  <text x="380" y="458" class="ts">Replica</text>
+  <text x="380" y="476" class="ts">④ 收到复制落盘</text>
+
+  <rect x="490" y="410" width="160" height="84" rx="8" class="node-neutral"/>
+  <text x="570" y="438" class="t">osd.11（副本）</text>
+  <text x="570" y="458" class="ts">Replica</text>
+  <text x="570" y="476" class="ts">④ 收到复制落盘</text>
+
+  <!-- ④ 主 OSD → 集群网络 → 副本 -->
+  <path d="M190 494 L190 554" class="flow-a" marker-end="url(#arrA)"/>
+  <text x="202" y="530" class="tsl">④ 推 2 份副本</text>
+
+  <!-- 集群网络 -->
+  <rect x="110" y="560" width="540" height="48" rx="24" class="node-cluster"/>
+  <text x="380" y="582" class="t tt">集群网络 · cluster_network</text>
+  <text x="380" y="600" class="ts">复制 · 落盘确认 · 恢复搬运 · 心跳探活</text>
+
+  <path d="M380 554 L380 500" class="flow-a" marker-end="url(#arrA)"/>
+  <path d="M570 554 L570 500" class="flow-a" marker-end="url(#arrA)"/>
+  <text x="582" y="530" class="tsl">副本落盘</text>
+
+  <!-- ⑤ 确认返回：主 OSD → 客户端（绕公共网条左侧） -->
+  <path d="M110 452 L70 452 L70 196 L104 196" class="read" marker-end="url(#arrM)"/>
+  <text x="80" y="372" class="tsl">⑤ 确认返回</text>
+
+  <!-- 管理网络 -->
+  <rect x="110" y="672" width="540" height="48" rx="8" class="node-dash"/>
+  <text x="380" y="694" class="t">管理网络（Ceph 之外）</text>
+  <text x="380" y="712" class="ts">SSH · 监控 · cephadm 编排 · 接入所有节点</text>
+
+  <!-- 图例与脚注 -->
+  <rect x="110" y="756" width="24" height="4" rx="2" fill="#0FDC78"/>
+  <text x="142" y="764" class="tsl">公共网 · 客户端流量</text>
+  <rect x="300" y="756" width="24" height="4" rx="2" fill="#0D9488"/>
+  <text x="332" y="764" class="tsl">集群网 · OSD 间流量</text>
+  <path d="M520 758 L544 758" class="read"/>
+  <text x="552" y="764" class="tsl">确认返回</text>
+  <text x="380" y="796" class="ts">三张网均为内网 · 三副本：公共网进 1 份 → 集群网出 2 份</text>
+</svg>
