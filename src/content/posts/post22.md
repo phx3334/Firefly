@@ -12,7 +12,7 @@ lang: '中文'
 kubeadm部署见https://egonlin.com/?p=10762（对于Ubuntu来说默认不用networkmanager和selinux，前端防火墙命令用ufw）
 
 ## 手动二进制包部署
-
+太复杂了，目前不做展示。
 
 ## 常用操作
 ### events和logs
@@ -1081,7 +1081,48 @@ kubectl rollout pause deployment nginx-balance    # 暂停滚动，先观察新 
 kubectl rollout resume deployment nginx-balance   # 恢复滚动
 ```
 
-## 补充
+### CoreDNS
+
+CoreDNS 是 Kubernetes 自 1.13 版本起默认的集群 DNS 服务器，以 Deployment + Service 的形式部署在 kube-system 命名空间。它对应的 Service 名字叫 kube-dns——这是 kube-dns 时代留下的历史名称，实际背后跑的早已是 CoreDNS。
+
+它解决的就是前文 Service 章节的隐含问题：`curl nginx-balance:8080` 为什么能通？Pod 里的进程先把名字发给 CoreDNS，解析出 Service 的 ClusterIP，然后才由 kube-proxy 完成 IP 层面的转发。没有 DNS，集群内就只能写死 Pod IP，Pod 一重建 IP 就变，Service 的“稳定访问入口”也就失去意义了。
+
+**解析规则**：Service 名字有三种写法，按作用域从短到长：
+
+| 写法 | 解析结果 | 适用范围 |
+| --- | --- | --- |
+| `nginx-balance` | ClusterIP | 同 namespace 内，最常用 |
+| `nginx-balance.default` | ClusterIP | 跨 namespace（default 换成对方所在 ns） |
+| `nginx-balance.default.svc.cluster.local` | ClusterIP | 全集群唯一 FQDN |
+| `pod-ip`（headless Service） | 各 Pod IP，不做负载均衡 | StatefulSet 场景 |
+
+普通 Service 解析成 ClusterIP；只有 clusterIP 为 None 的 headless Service 才会把名字直接解析成后端 Pod IP 列表，这也是 StatefulSet 能靠稳定域名互相寻址的基础。集群外部域名则不会被拦截，CoreDNS 配置里的 forward 插件会把它转发给宿主机上游 DNS。
+
+**工作链路**：每个 Pod 启动时，kubelet 会在容器的 /etc/resolv.conf 里写入 CoreDNS 的地址和搜索域：
+
+```text
+nameserver 10.96.0.10          # kube-dns Service 的 ClusterIP
+search default（根据所处命名空间来写）.svc.cluster.local svc.cluster.local cluster.local  
+options ndots:5
+```
+
+Pod 里访问 `nginx-balance` 这种短名字时，会依次拼接 search 域尝试：先 `nginx-balance.default.svc.cluster.local`，命中即返回。ndots:5 表示“少于 5 个点的域名先当集群内名字处理”——这是排障时的一个知名坑：访问外部域名如 `mysql.example.com`会先被拼上 search 域查询若干次、全部失败后才回退到外部解析，每次都多耗几个 DNS 请求，写全 FQDN（末尾加点 `mysql.example.com.`）可跳过这一步。
+
+**配置与排查**：CoreDNS 的核心配置叫 Corefile（本质是一份插件配置清单，“指挥”已经内置在 coredns 可执行文件里的插件），通过 ConfigMap 形式挂载到pod里，kubernetes 插件负责解析集群内名字，forward 插件负责外部转发：
+
+```bash
+kubectl get pods -n kube-system -l k8s-app=kube-dns          # 查看 CoreDNS 实例
+kubectl get cm coredns -n kube-system -o yaml                # 查看 Corefile
+kubectl edit cm coredns -n kube-system                       # 修改后 Pod 自动热加载
+```
+
+DNS 解析问题是最常见的集群疑难杂症之一，标准排查手法是起一个临时容器直接验证：
+
+```bash
+#kubectl run <pod名> [kubectl的参数] -- <容器内要执行的命令> [命令的参数]，nslookup测试请求nginx-balance并输出重要的信息到屏幕。
+kubectl run -it --rm dns-test --image=busybox --restart=Never -- nslookup nginx-balance 
+# 或进入业务 Pod 内 cat /etc/resolv.conf，确认 nameserver 和 search 域是否正常注入
+```
 
 ### Service 端口详解（8080 vs 30080 的疑惑）
 一次完整的访问链路：

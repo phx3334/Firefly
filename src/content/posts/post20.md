@@ -87,6 +87,7 @@ kubelet有以下功能
 行的副本数量、网络或者存储、容器的存活和健康检测等容器整个生命周期都归kubelet管）
 关于容器的创建：kubelet是通过CRI（container runtime interface）接口来调用容器引擎实现
 的，具体见docker文章  
+- kubelet还管理控制节点的静态pods 。
 kubelet的GC机制会负责定期清理工作节点上的镜像以及退出的容器
 #### kube-proxy组件与service资源
 运行有kubelet的节点都会运行kube-proxy组件，kube-proxy负责管理service资源以实现pod的负载均
@@ -310,9 +311,6 @@ k8s中各组件间协同都采用list-watch机制进行通信。
 与简单的短轮询相比，这种机制可以更有效地获取资源状态的更新，并减少了网络流量和API服务器的负载。
 ```
 - 首先在controller-manager/scheduler/kubelet启动的时候都会去watch自己关注的资源。
-controller-manager对api-server发起ReplicaSet的watch
-scheduler发起对Pod desNode=""的watch
-kubelet发起对pod destNode="myNode"的watch。
 - 用户kubectl创建一个ReplicaSet请求调用Api-server，Api-server将创建replicaSet存储到etcd
 中,Api-server同时也获取到创建replicaset的created事件
 - controller-manager此刻watch到replicaset创建时间后通过pod模版进行pod创建并持久化到etcd中
