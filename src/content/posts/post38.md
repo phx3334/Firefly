@@ -34,8 +34,11 @@ lang: '中文'
 - 提供监听机制，客户端可以监听某个key或者某些key的变更（v2和v3的机制不同，参看后面文章）。用于监听和推送变更。
 - 提供key的过期以及续约机制，客户端通过定时刷新来实现续约（v2和v3的实现机制也不一样）。用于集群监控以及服务注册发现。
 - 提供原子的CAS（Compare-and-Swap）和 CAD（Compare-and-Delete）支持（v2通过接口参数实现，v3通过批量事务实现）。用于分布式锁以及leader选举。
-**适用场景**：
+**适用场景**：etcd 最重要的场景就是**作为 Kubernetes 集群的元数据存储**——集群里所有的 Pod、Service、Deployment、Secret、节点信息全部存在 etcd 里，apiserver 是它唯一的读写入口，所有控制器通过 apiserver 的 watch 感知变更。可以说 etcd 的运维重要性在今天之所以被抬到这么高，完全是因为 K8s：etcd 挂了，整个集群就是一具只能看不能动的尸体（存量 Pod 还在跑，但创建、调度、伸缩、探活恢复全部瘫痪）——前面讲的所有 quota、compaction、defrag、备份，本质上都是 K8s 运维工程师的必修课。
 
+**业务微服务的场景则一般不选 etcd**，主流选择是 **Nacos**：注册中心+配置中心一体，自带控制台和服务健康检查，支持推送模式切换（推/拉），SDK 对国内技术栈友好——服务注册发现的量级通常是"每个实例秒级心跳 + 秒级状态推送"，这种高频心跳场景让上千个服务实例去打 etcd 的 Raft 写日志，纯属用大炮打蚊子还把炮管打坏（心跳写压垮集群，参考 lease 小节的分析），Nacos 的心跳探活走的是自己内存态的 Distro 协议，不走分布式共识存储，天生适合这个量级。一句话定位：**etcd 管"集群的命"（强一致的元数据，量小但一条都不能丢），Nacos 管"业务的调用量"（服务发现，量大但短暂不一致可容忍）**—— CAP 取向不同，不是替代关系。
+
+**ZooKeeper 为什么被淘汰**了？它曾经是元数据存储/注册中心/配置中心的三合一事实标准（Kafka、Hadoop、Dubbo 生态都靠它），衰落有几个原因：一是**技术栈老旧**——Java 客户端重、API 面向的是"节点树 + 临时节点"这种文件系统抽象，用起来繁琐，且原生不支持多租户和完善的运维控制台；二是**CAP 与性能取向不适合新场景**——每次写都要过 ZAB 协议（类似 Raft 的多数派），而且**写吞吐受单 Leader 串行限制**，服务注册这种高频心跳场景同样会被写压砸；三是**生态迁移**——Cloud Native 时代 K8s 自带元数据存储（就是 etcd），云原生中间件原生对接 etcd 的注册发现协议，新项目没有理由再引入一个独立 ZK 集群；四是**运维复杂度**——JVM 调优、会话管理、脑裂处理都是额外成本，而 etcd 单二进制 + Nacos 控制台化运维都比它轻。Kafka 自己也意识到了这一点，从 2.8 开始去 ZK 化（KRaft 模式，用自己的 Raft 实现替代 ZK 元数据管理），这基本宣告了 ZK 在新一代基础设施里的退场。
 
 
 ## etcd集群部署
@@ -63,48 +66,6 @@ etcd --name infra0 \
 ### DNS SRV 记录（了解即可）
 这种方式需要一个自己可控的 DNS 服务器来承载集群记录：SRV 记录列出成员的 peer 通信端口（`_etcd-server._tcp`）和客户端端口（`_etcd-client._tcp`），TXT 记录保存集群名，A 记录把成员域名解析到实际 IP。节点启动时改用 `--discovery-srv example.com` 替代 `--initial-cluster`，etcd 自己去查询这些记录拼出成员名单，效果与静态配置完全一致——本质上只是把写死的名单搬进了 DNS，好处是后续扩容只需追加 DNS 记录、不用改存量节点配置，代价是引入了一个 DNS 组件。除了域名已由 DNS 统一管理、或成员 IP 无法提前固定的场景，一般直接用静态配置即可。
 **DNS SRV是一种除了ip解析，还多解析出端口号（包括优先级）的记录，专门用来定位某域名下某个服务跑在哪个机器的哪个端口**
-
-## etcd 架构及常见问题
-![etcd主要架构图](./images/etcd-arch.webp)
-
-### 整体分层与核心组件
-按照分层模型，etcd 可分为 Client 层、API 网络层、Raft 算法层、逻辑层和存储层。这些层的功能如下：
-- Client 层：Client 层包括 client v2 和 v3 两个大版本 API 客户端库，提供了简洁易用的 API，同时支持负载均衡、节点间故障自动转移，可极大降低业务使用 etcd 复杂度，提升开发效率、服务可用性。
-API 网络层：API 网络层主要包括 client 访问 server 和 server 节点之间的通信协议。一方面，client 访问 etcd server 的 API 分为 v2 和 v3 两个大版本。v2 API 使用 HTTP/1.x 协议，v3 API 使用 gRPC 协议。同时 v3 通过 etcd grpc-gateway 组件也支持 HTTP/1.x 协议，便于各种语言的服务调用。另一方面，server 之间通信协议，是指节点间通过 Raft 算法实现数据复制和 Leader 选举等功能时使用的 HTTP 协议。
-- Raft 算法层：Raft 算法层实现了 Leader 选举、日志复制、ReadIndex 等核心算法特性，用于保障 etcd 多个节点间的数据一致性、提升服务可用性等，是 etcd 的基石和亮点。
-- 逻辑层：etcd 核心特性实现层，如典型的 KVServer 模块、MVCC 模块、Auth 鉴权模块、Lease 租约模块、Compactor 压缩模块等，其中 MVCC 模块主要由 treeIndex 模块和 boltdb 模块组成。
-- 存储层：存储层包含预写日志 (WAL) 模块、快照 (Snapshot) 模块、boltdb 模块。其中 WAL 可保障 etcd crash 后数据不丢失，boltdb 则保存了集群元数据和用户写入的数据
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-### 网关与代理：grpc-gateway、gateway 与 grpc-proxy
-客户端和集群之间还有三类可选的中间组件。grpc-gateway 在 gRPC Server 旁边挂了一个 HTTP/JSON 接口，把 RESTful 请求翻译成 gRPC，方便 curl 或不支持 gRPC 的语言直接访问；etcd gateway 是一个简单的 TCP 代理，客户端连它、它转发给集群成员，适合客户端不方便配置多 endpoint 或没有负载均衡的场景，成员故障时由它切换转发目标；gRPC 代理模式（etcd grpc-proxy start 启动）则是更高级的无状态反向代理，最有价值的是合并能力：多个客户端 Watch 同一个 key、续约同一个 Lease 时，代理在后端只维护一条 Watch 连接和一次心跳，几十上百个客户端的流量被收敛成对集群的少量连接。生产中把大量客户端指向一组 grpc-proxy 实例，代理之间互不感知、可随意增减，这就是"可伸缩的 etcd API"——集群不用扩容，API 服务能力先水平扩展了。
-
-### 运行时重配置：在线增减成员
-etcd 集群的成员增减不需要停机，通过 member 命令在线完成。以生产中最常见的"替换故障节点"为例：某台机器磁盘即将报废，先用 etcdctl member list 确认成员 ID，等新机器就绪后 etcdctl member remove 移除旧成员（quorum 依然满足，集群继续服务），再 etcdctl member add newinfra --peer-urls=http://10.0.1.13:2380 预注册新成员，最后在新机器上以 --initial-cluster-state existing 启动 etcd，它会从 Leader 同步全部历史数据直到追平。扩容同理，把 3 节点扩到 5 节点可以容忍任意 2 台故障，读可用性更好；新加入的节点也可以先用 --learner 以 Learner 身份加入，只同步数据不参与投票，追平后再 promote 成正式成员，避免大量数据同步期间的日志追赶拖垮 Raft。两条红线必须遵守：一次只变更一个成员，变更后确认集群健康再做下一次；一旦多数派同时故障，member 命令救不了，只能用最近一次快照加 WAL 恢复，这就是快照必须定期备份的原因。缩容时 member remove 的目标如果恰好是 Leader，集群会先触发一次重新选举，请求短暂抖动，建议先手动迁移 Leader 或在业务低峰操作。
-
-### 集群调优：让 etcd 处于最佳状态
-调优的目标是让每条写请求在磁盘和网络上的延迟尽可能低且稳定。硬件上 etcd 对 fsync 极其敏感，必须用 SSD，官方建议 WAL fsync 延迟低于 10ms，生产环境通常把 etcd 独立部署在控制面机器上不与重负载业务混布，Kubernetes 场景下干脆用独立的静态 Pod 单独跑。参数上，--heartbeat-interval 和 --election-timeout 决定故障感知速度，默认 100ms/1000ms 适合同机房，跨机房或网络抖动大的环境要调大选举超时，避免频繁误选主；--quota-backend-bytes 默认 2GB，生产建议调到 8GB 并配合告警；--snapshot-count 控制快照频率，内存充裕时可以调大以减少快照开销。数据治理上，避免放大于 1MB 的 value（官方建议 1KB 级别），开启 --auto-compaction-mode periodic --auto-compaction-retention 1h 定期清理历史 revision，压缩后 boltdb 会留下空洞，需要在低峰期对各节点轮流执行 etcdctl defrag 回收空间（defrag 会短暂阻塞该节点的读写，绝不能同时对所有成员执行）。监控上重点盯 etcd_disk_wal_fsync_duration、etcd_disk_backend_commit_duration 和 etcd_server_proposal_duration 三个指标的 P99，任何一条持续超标都意味着集群离不可用不远。
-
-### 一条命令贯穿架构全流程
-最后用一条最有代表性的命令把整个架构串起来：etcdctl put /app/config/db "postgres://10.0.0.2:5432"。命令敲下后，etcdctl 通过 gRPC 向某个 endpoint 发起 KV.Put 请求，gRPC Server 校验后交给 EtcdServer，后者判定自己是 Leader 且集群健康；请求被包装成 proposal 交给 raftNode，先追加写入本地 WAL 并 fsync 落盘，同时通过 AppendEntries 复制到两个 Follower，它们同样先写 WAL 再返回确认；Leader 收到多数派确认后提交这条日志，applier 模块将其应用到状态机——MVCC 为这次写入分配一个新的 revision，在 treeIndex 里记录 key 与该 revision 的映射，再把数据交给 boltdb 批量合并后落盘；applier 完成的同时，watchableStore 检查有哪些客户端正在 Watch /app/config/db 或其前缀，把变更事件推送到对应的 gRPC Watch 流，配置中心场景下所有订阅方在毫秒级收到新值；随后 Leader 沿着来路把成功响应返回给 etcdctl。这条链路覆盖了架构图的每一层：客户端层发起请求、API 层调度、Raft 层复制、WAL 落盘、applier 应用、MVCC 存储、Watch 广播。理解了这条路径，读请求的差异（ReadIndex 走 Raft 层校验、串行读直接读状态机）和故障场景（Leader 宕机后未提交日志的去向）都能顺着它推导出来。
-
-
-
 
 
 ## etcd常见机制的原理
@@ -170,6 +131,40 @@ boltdb 是一个**嵌入式 KV 存储**，理解这个词要对照着"独立服�
 **手动 defrag** 就是针对前面说的"compaction 后空洞占用文件大小"的空间回收操作：`etcdctl defrag --cluster` 对整个集群执行，或 `etcdctl --endpoints=<节点地址> defrag` 对单个节点执行。操作逻辑是把每个 bucket 的有效数据重写进一个新文件，替换旧文件，空洞随之消失，`etcdctl endpoint status` 里能直接看到 DB size 和 DB size in use 的差值来决定是否需要执行。三条红线：defrag 期间该节点的读写请求会短暂失败或阻塞，**绝不能对多个节点同时执行**（要轮流做、做完确认健康再做下一个）；defrag 不会释放 quota 告警，还需要手动 `etcdctl alarm disarm`；生产上建议把 defrag 写进低峰期例行脚本（结合 auto-compaction 的节奏），而不是等 backend 接近上限才临时抱佛脚。
 
 
+## etcd 架构及流程详解
+![etcd主要架构图](./images/etcd-arch.webp)
+
+### 整体分层与核心组件
+按照分层模型，etcd 可分为 Client 层、API 网络层、Raft 算法层、逻辑层和存储层。这些层的功能如下：
+- Client 层：Client 层包括 client v2 和 v3 两个大版本 API 客户端库，提供了简洁易用的 API，同时支持负载均衡、节点间故障自动转移，可极大降低业务使用 etcd 复杂度，提升开发效率、服务可用性。
+API 网络层：API 网络层主要包括 client 访问 server 和 server 节点之间的通信协议。一方面，client 访问 etcd server 的 API 分为 v2 和 v3 两个大版本。v2 API 使用 HTTP/1.x 协议，v3 API 使用 gRPC 协议。同时 v3 通过 etcd grpc-gateway 组件也支持 HTTP/1.x 协议，便于各种语言的服务调用。另一方面，server 之间通信协议，是指节点间通过 Raft 算法实现数据复制和 Leader 选举等功能时使用的 HTTP 协议。
+- Raft 算法层：Raft 算法层实现了 Leader 选举、日志复制、ReadIndex 等核心算法特性，用于保障 etcd 多个节点间的数据一致性、提升服务可用性等，是 etcd 的基石和亮点。
+- 逻辑层：etcd 核心特性实现层，如典型的 KVServer 模块、MVCC 模块、Auth 鉴权模块、Lease 租约模块、Compactor 压缩模块等，其中 MVCC 模块主要由 treeIndex 模块和 boltdb 模块组成。
+- 存储层：存储层包含预写日志 (WAL) 模块、快照 (Snapshot) 模块、boltdb 模块。其中 WAL 可保障 etcd crash 后数据不丢失，boltdb 则保存了集群元数据和用户写入的数据
+
+### 读请求
+- 串行 (Serializable) 读：直接读状态机数据返回、无需通过 Raft 协议与集群进行交互，适合对数据一致性要求不高的场景。
+- 线性读：需要经过 Raft 协议模块，反应的是集群共识，因此在延时和吞吐量上相比串行读略差一点，适用于对数据一致性要求高的场景。
+![线性读请求过程](./images/etcd-read.webp)
+上图展示的是一次线性读（ReadIndex）的完整流程，画的是 **Follower 处理读请求**的场景（比 Leader 处理多一步，更有讲解价值）
+
+① Client 的get请求打到某个节点的 gRPC Server——本例是 Follower；② gRPC 层为请求创建唯一 requestID 用于追踪，然后阻塞等待 raft 回应；③ Follower 向 Leader 请求最新的 ReadIndex（即 Leader 当前已提交的日志位置 committedIndex）；④ **Leader 向所有 Follower 发心跳确认自己的 Leader 身份**——注意图右侧的自环：Leader 必须等多数派跟随者在心跳里回复确认，才能证明"我确实是多数派认可的现任 Leader"，这一步是 ReadIndex 防止已被废黜的旧 Leader 返回旧数据的关键；⑤ Leader 把 ReadIndex 返回给 Follower；⑥ Follower 的 raft 模块拿着 readindex 挂起一个等待 channel，**直到本地状态机已应用的进度追上这个 committedIndex**——Follower 的应用进度通常落后 Leader 几拍，必须追平才能保证读到"不落后于本次请求之前所有已提交写入"的数据；⑦ 等待 readIndex 之前的所有日志条目都应用到 MVCC；⑧ 向 MVCC 查询 range 请求对应的 key；⑨ MVCC 用追平后的新数据计算结果返回；⑩ 响应返回给 Client。
+
+图里最有价值的是③④⑥三步的组合：一次线性读**既不产生写日志、也不触发选举轮次**，只靠"Leader 心跳确认多数派 + 本地追平 applied index"两个动作就拿到了线性一致性——这正是 ReadIndex 相比"把读请求也走一遍 Raft 写日志"便宜得多的原因。对照前面串行读的描述，两者的差异现在可以精确量化：串行读只走⑧⑨⑩三步（直接读本地状态机，零网络往返、无等待），线性读多了 ③⑥ 的网络与追平开销，这就是"线性读比串行读慢、但远比写快"的机制根源。etcdctl 的 `get` 默认就是线性读，加 `--consistency="s"` 才是串行读；Kubernetes apiserver 对元数据的读默认走的也是线性读，这就是 etcd fsync 变慢时整个集群的 List/Get 都跟着变慢的又一环。
+
+- **网络**：一次线性读的链路里其实用了两套网络通道。Client → etcd 节点走的是 gRPC（HTTP/2 + protobuf，2379 端口）；节点之间传递 ReadIndex 请求、心跳确认、日志复制走的是 etcd 内部的 rafthttp 传输层（2380 端口）——也是 protobuf 序列化、HTTP 承载，但不是 gRPC 服务，而是 etcd 自定义的 raft 消息格式，ReadIndex（MsgReadIndex）、心跳（MsgHeartbeat）、日志复制（MsgApp）都是同一族消息。2379/2380 两个端口分开也是有意为之：节点间的日志复制、心跳这类关键流量不和海量客户端请求抢连接。至于流程图里的⑧⑨两步（向 MVCC 查询）和⑥的"等待追平"是进程内部行为，不涉及任何网络。所以一次 Follower 线性读的网络开销 = 1 次客户端往返（gRPC）+ 1 次 peer 往返（rafthttp）+ 心跳轮次的等待——这也解释了为什么 `--heartbeat-interval` 不只影响故障检测速度，还轻微影响线性读的延迟分布：ReadIndex 的多数派确认依附在周期性心跳上，请求如果恰好赶在上一轮心跳刚结束，就要等下一轮。
+- **readindex**：ReadIndex 的本质是一个"读水位线"——Leader 当前已提交日志的位置 committedIndex。它为什么能保证线性一致？逻辑链条是：任何在客户端读请求发起之前完成的写，其日志位置必然 ≤ 这个 committedIndex；而 Follower 在返回结果前强制等待本地 applied 追平这个位置，就保证了本次读一定能看到发起前所有已提交的写入——这正是线性一致性的定义。它解决的经典问题是"已废弃的旧 Leader 读旧数据"：网络分区时旧 Leader 可能还以为自己在职，客户端连到它读到的可能是几个版本前的数据；有了 ReadIndex，任何节点返回读结果前都要经过"Leader 用多数派心跳自证"+"本地追平 committedIndex"两道关卡，旧 Leader 过不了第一关，落后节点过不了第二关。代价就是上面流程图里的网络往返与追平等待，收益是**读路径完全绕开了 Raft 写日志**——如果不用 ReadIndex，想保证线性一致只能把读请求也当成一条日志走完"WAL 落盘 → 复制 → 提交"全流程，延迟和一次写相当；ReadIndex 用一次轻量的多数派确认换掉了整个写日志流程，这就是它成为 etcd 默认线性读实现的原因（默认开启，无需配置）。
+
+
+![写流程](./images/etcd-write.webp)
+
+上图是写请求的完整流程，画的是 **Follower 接收写请求**的场景（客户端连到了 Follower，它自己无权处理写），按编号串一遍：
+
+① Client 的写请求打到 etcd 的 gRPC endpoint（本例落在 Follower）；② gRPC 层转发给本节点的 RAFT 子系统；③ Follower **把写请求转发给 Leader**——写必须由 Leader 统一编号发起，这是 Raft 的基本约束，也是"客户端连到任何节点都能写"的实现方式；④ Leader 把这条写**持久化到自己的 WAL**（fsync 落盘）；④' Leader 通过 rafthttp 要求所有 peer 节点把这条事务**复制到它们各自的 WAL**——对应图中右下角的 Follower，它同样要先写 WAL 落盘；⑤ Leader 自己再把这条事务标记为已持久化；⑥ Follower 确认 WAL 复制完成；⑦ Leader 收到多数派的确认后，**把这条事务标记为 committed**——提交点就在这一刻；⑧ 通知本节点 raft 子系统事务已提交；⑨ raft 通知 etcdserver 应用已提交的日志；⑩ etcdserver 把日志条目应用到 MVCC store 和 backend——MVCC 分配 revision、更新 treeIndex、数据写入 boltdb（注意图下方的虚线：boltdb 落盘是**异步批量**的，每 100ms 同步一次最新数据，**不阻塞写路径**——写路径的持久化由 WAL 保证，boltdb 只是最终仓库）；⑪ gRPC 成功响应返回给 Client。
+
+对照读流程，几个关键差异值得圈出来：写流程**必须走 WAL 落盘**（读流程完全碰不到 WAL），一次写的延迟主要由两串串行的 fsync 决定——Leader 自己落盘 + 等 Follower 落盘 + 网络往返，这就是磁盘 fsync 性能是写延迟天花板的流程级解释；提交点（⑦）和应用点（⑩）是分开的——多数派确认后就算提交，应用到状态机是之后的事，中间宕机靠 WAL 回放补上，这就是"WAL 可保障 crash 后数据不丢失"的流程级含义；boltdb 的 100ms 批量合并解释了为什么它自己的提交开销不直接压在每条写请求上。
+
+
 ## 补充
 ### 五个系统调用的写函数
 | 函数 | 同步对象 | 是否等待 I/O 完成 | 是否同步元数据 | 说明 |
@@ -180,3 +175,16 @@ boltdb 是一个**嵌入式 KV 存储**，理解这个词要对照着"独立服�
 | fdatasync | 数据和必要的元数据 | 是（等待） | 部分（仅必要的元数据） | 同步指定文件的数据和必要的元数据，减少不必要的 I/O 操作，等待所有磁盘 I/O 操作完成后返回 |
 
 这张表正好回答了前面遗留的一个问题：为什么强调 WAL "必须 fsync 落盘"。write 只写页缓存就返回，断电即丢，而 Raft 的"多数派确认才算提交"里，确认的前提是数据真的进了磁盘，所以日志落盘必须用会阻塞等待的 fsync/fdatasync——调优章节盯的 `etcd_disk_wal_fsync_duration` 指标，衡量的就是这一步的耗时，它直接构成每条写请求延迟的下限。fdatasync 和 fsync 的差别在于元数据同步的范围：fdatasync 只同步读取数据所必需的元数据（如文件大小），跳过修改时间这类无关字段，所以更快；WAL 顺序追加、每次只增长不改属性，正好适合 fdatasync 的模式，boltdb 的 backend 提交部分场景也用它来降延迟。一个运维视角的提醒：既然每条写都要等一次 fsync，那么磁盘的 fsync 性能就是集群写入能力的天花板——这就是云盘/网络盘容易拖垮 etcd、而本地 NVMe SSD 备受推荐的根本原因。
+
+### 网关与代理：grpc-gateway 与 grpc-proxy
+前面读写流程图里的 Client 都是直连某个节点——但生产中客户端和集群之间往往还隔着中间层。对照流程图理解这三个组件最清楚，它们分别作用在链路的不同位置：
+
+**grpc-gateway 作用在最入口**：它不是独立进程，而是每个 etcd 节点自己内置的一个翻译层（挂在 gRPC Server 旁边，监听同一端口的 HTTP 路径）。读写流程图的①如果是 curl 发来的 HTTP/JSON 请求，就先被它翻译成 gRPC 再进入后续流程，翻译完的链路和图上完全一样。价值在于让不支持 gRPC 的语言（或调试用的 curl）也能访问 v3 API，代价只是多一层转换，不改任何行为。
+
+**gRPC 代理（grpc-proxy start）作用在连接合并这一层**，这是三者中唯一真正改变请求行为的：它理解协议，最有价值的是合并能力——前面读流程里说过线性读要走 Leader 心跳确认，写流程里要走 WAL 复制，那如果 500 个客户端都 Watch 同一个配置 key、都持有同 TTL 的租约呢？没有代理就是 500 条 Watch 流 + 500 份续约写请求打向集群；挂上代理后，它在后端只维护一条 Watch 流和一次续约心跳，收到事件后分发给 500 个客户端——集群侧的 Watch 连接数和 lease 续约写请求都从 500 降到 1。写流程里每条续约都是真实走 Raft 的写请求（见 lease 小节），所以这个合并直接减轻的是集群的 WAL 落盘压力。代理实例无状态、可随意增减，这就是"可伸缩的 etcd API"——集群 quorum 不变，API 服务能力先水平扩展了。
+
+### 运行时重配置：在线增减成员
+etcd 集群的成员增减不需要停机，通过 member 命令在线完成。以生产中最常见的"替换故障节点"为例：某台机器磁盘即将报废，先用 etcdctl member list 确认成员 ID，等新机器就绪后 etcdctl member remove 移除旧成员（quorum 依然满足，集群继续服务），再 etcdctl member add newinfra --peer-urls=http://10.0.1.13:2380 预注册新成员，最后在新机器上以 --initial-cluster-state existing 启动 etcd，它会从 Leader 同步全部历史数据直到追平。扩容同理，把 3 节点扩到 5 节点可以容忍任意 2 台故障，读可用性更好；新加入的节点也可以先用 --learner 以 Learner 身份加入，只同步数据不参与投票，追平后再 promote 成正式成员，避免大量数据同步期间的日志追赶拖垮 Raft。两条红线必须遵守：一次只变更一个成员，变更后确认集群健康再做下一次；一旦多数派同时故障，member 命令救不了，只能用最近一次快照加 WAL 恢复，这就是快照必须定期备份的原因。缩容时 member remove 的目标如果恰好是 Leader，集群会先触发一次重新选举，请求短暂抖动，建议先手动迁移 Leader 或在业务低峰操作。
+
+### 集群调优：让 etcd 处于最佳状态
+调优的目标是让每条写请求在磁盘和网络上的延迟尽可能低且稳定。硬件上 etcd 对 fsync 极其敏感，必须用 SSD，官方建议 WAL fsync 延迟低于 10ms，生产环境通常把 etcd 独立部署在控制面机器上不与重负载业务混布，Kubernetes 场景下干脆用独立的静态 Pod 单独跑。参数上，--heartbeat-interval 和 --election-timeout 决定故障感知速度，默认 100ms/1000ms 适合同机房，跨机房或网络抖动大的环境要调大选举超时，避免频繁误选主；--quota-backend-bytes 默认 2GB，生产建议调到 8GB 并配合告警；--snapshot-count 控制快照频率，内存充裕时可以调大以减少快照开销。数据治理上，避免放大于 1MB 的 value（官方建议 1KB 级别），开启 --auto-compaction-mode periodic --auto-compaction-retention 1h 定期清理历史 revision，压缩后 boltdb 会留下空洞，需要在低峰期对各节点轮流执行 etcdctl defrag 回收空间（defrag 会短暂阻塞该节点的读写，绝不能同时对所有成员执行）。监控上重点盯 etcd_disk_wal_fsync_duration、etcd_disk_backend_commit_duration 和 etcd_server_proposal_duration 三个指标的 P99，任何一条持续超标都意味着集群离不可用不远。
