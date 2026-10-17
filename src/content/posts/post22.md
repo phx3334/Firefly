@@ -9,6 +9,7 @@ draft: false
 lang: '中文'
 ---
 
+
 kubeadm部署见https://egonlin.com/?p=10762（对于Ubuntu来说默认不用networkmanager和selinux，前端防火墙命令用ufw）
 
 ## 手动二进制包部署
@@ -67,93 +68,8 @@ pod 异常
 ```
 
 ### containerd客户端命令介绍
-#### crictl
-> K8s 官方推荐的节点调试工具，通过 CRI 协议与 containerd 交互，天然理解"Pod 沙箱 + 容器"的抽象。默认连接 `/run/containerd/containerd.sock`。
-**环境配置**（可选，配置后可省略 `--runtime-endpoint`）：
-```bash
-cat > /etc/crictl.yaml <<EOF
-runtime-endpoint: unix:///run/containerd/containerd.sock
-image-endpoint: unix:///run/containerd/containerd.sock
-timeout: 10
-debug: false
-EOF
-```
-**常用命令：**
-
-```bash
-# Pod 沙箱（crictl 独有能力）
-crictl pods                      # 列出所有 Pod 沙箱
-crictl runp <config.json>        # 创建 Pod 沙箱（调试用）
-crictl stopp <pod-id>            # 停止沙箱
-crictl rmp <pod-id>              # 删除沙箱
-crictl inspectp <pod-id>         # 查看沙箱详情
-
-# 容器
-crictl ps                        # 查看运行中的容器
-crictl ps -a                     # 查看所有容器（含已退出）
-crictl exec -it <container-id> sh    # 进入容器
-crictl logs <container-id>       # 查看日志
-crictl logs -f <container-id>    # 实时跟踪日志
-crictl stop <container-id>       # 停止容器
-crictl rm <container-id>         # 删除容器
-crictl inspect <container-id>    # 查看容器详情
-
-# 镜像
-crictl pull <image>              # 拉取镜像
-crictl images                    # 列出镜像
-crictl rmi <image>               # 删除镜像
-crictl inspecti <image>          # 查看镜像详情
-
-# 其他
-crictl stats                     # 查看资源使用（CPU/内存）
-```
-
-#### ctr
-
-> containerd 自带的原生 CLI，直接调用 containerd 的 gRPC API，能看到并管理所有命名空间及底层内容仓库。它是"底层调试器"，不推荐日常使用。
-
-**命名空间概念**：K8s 的容器都在 `k8s.io` 命名空间，默认命名空间是 `default`，用 `-n` 指定：
-
-```bash
-ctr -n k8s.io ps          # 查看 k8s 的容器
-ctr -n default ps         # 查看 default 命名空间
-```
-
-**常用命令：**
-
-```bash
-# 命名空间管理
-ctr namespaces ls         # 列出所有命名空间
-ctr namespaces create <name>
-ctr namespaces rm <name>
-
-# 镜像
-ctr images pull <image>             # 拉取镜像
-ctr images list                     # 列出镜像
-ctr images rm <image>               # 删除镜像
-ctr images tag <image> <new-tag>    # 打标签
-ctr images import <file.tar>        # 导入镜像（crictl 没有的能力）
-ctr images export <file.tar> <image> # 导出镜像
-
-# 容器（ctr 里容器和任务是分开的）
-ctr containers list                 # 列出容器
-ctr containers rm <id>              # 删除容器
-ctr run <image> <name> <cmd>        # 创建并启动容器
-ctr tasks list                      # 列出任务（运行中的容器进程）
-ctr tasks exec -t <task-id> sh      # 进入任务
-ctr tasks kill <task-id>            # 终止任务
-
-# 底层仓库（crictl 完全没有）
-ctr content ls                      # 查看内容仓库（blob）
-ctr snapshots ls                    # 查看快照层
-ctr plugins ls                      # 查看 containerd 插件
-ctr events                          # 监听事件流
-```
-
 #### nerdctl
 > containerd 的 docker 兼容 CLI，几乎把 `docker` 命令 1:1 搬到 containerd 上，支持构建镜像、compose。**日常操作最推荐的工具**。
-
-**命名空间**：默认操作 `default` 命名空间，查看 K8s 容器需加 `-n k8s.io`：
 
 ```bash
 nerdctl ps                # 默认命名空间（通常为空）
@@ -189,10 +105,6 @@ nerdctl network ls                # 网络管理
 nerdctl inspect <id>              # 查看详情
 nerdctl -n k8s.io exec -it <id> sh  # 进入 k8s 容器
 ```
-**使用提示：**
-- 在 K8s 节点上排查问题优先 `crictl`；测试/构建镜像用 `nerdctl`；`ctr` 只在 containerd 本身出问题时才用。
-- `nerdctl` 在 K8s 节点上通常不需要装，它是给日常开发和调试用的。
-- 三个工具可以共存，互不影响。
 
 ### kubectl
 #### 基本语法
@@ -552,8 +464,6 @@ cat /etc/secret-volume/username   # 显示 egon
 cat /etc/secret-volume/password   # 显示 123456
 ```
 
-
-
 ### ConfigMap
 **ConfigMap** 用于把**非敏感配置**（配置文件、环境变量、参数）从镜像里抽出来，实现**配置与代码分离**——改配置不用重新构建镜像。
 #### 创建方式
@@ -665,7 +575,7 @@ spec:
 
 创建后验证（以下为 shell 命令与输出，不在 YAML 内）：
 ```bash
-kubectl apply -f PVC.yaml
+kubectl apply -f PV.yaml
 
 # 输出示例：
 # NAME   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM   STORAGECLASS   REASON   AGE
@@ -780,6 +690,65 @@ spec:
     server: 192.168.88.100
 ```
 
+#### 动态存储：StorageClass + CSI
+上面手工创建 PV 的方式叫**静态供应**：管理员提前建好一堆 PV，等用户来申请。缺点很明显——PV 要手动一个个建，容量分配靠猜（建多了闲置、建少了不够），底层存储换了还要重写 PV。生产环境更常用的是**动态供应**：PVC 一创建，存储自动就到位了，管理员只提前配置一次"规则"就行。
+
+这套机制由两个角色配合完成：
+- **StorageClass（存储类）**：不是存储本身，而是一份"供应模板"——声明用哪个 Provisioner（供应者）、什么参数（存储类型/副本数/回收策略等），相当于存储的"分类标签"
+- **CSI（Container Storage Interface）**：存储供应商实现的标准插件接口。阿里云云盘、Ceph、NFS 等各写一个 CSI 驱动部署到集群里，K8s 通过统一接口调用它们真正去创建/挂载/卸载磁盘。类比：CRI 之于容器运行时（containerd），CNI 之于网络插件，CSI 之于存储——都是 K8s 立的行业标准
+
+**动态供应全流程**：用户创建 PVC → PVC 里有 storageClassName 指向某个 StorageClass → PV 控制器（PV controller）发现这是个没有现成 PV 匹配的 PVC，就找它对应的 CSI 驱动 → CSI 驱动去后端存储（云盘/Ceph）真正创建一块磁盘 → 自动生成一个 PV 对象和 PVC 绑定 → Pod 调度后 kubelet 再调 CSI 完成挂载。全程不需要管理员碰 PV。
+
+以下用一个 NFS 动态供应的完整例子演示。前提：NFS 服务器（192.168.88.100）已就绪，且集群已部署 NFS CSI 驱动（`nfs-csi-provisioner`，一行 Helm 命令的事，此处从略）。
+
+第一步，创建 StorageClass（sc.yaml）：
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-sc
+  # 加这个注解，它就是集群默认存储类，PVC 里可以不写 storageClassName
+  annotations: storageclass.kubernetes.io/is-default-class: "true"
+provisioner: nfs.csi.k8s.io        # 告诉 K8s 找哪个 CSI 驱动干活
+parameters:                        # 传给 CSI 驱动的参数，因驱动而异
+  server: 192.168.88.100           # NFS 服务器地址
+  share: /data/nfs                 # NFS 共享目录
+reclaimPolicy: Delete             # PV 回收策略：Delete（删PVC连带删存储）/ Retain（保留数据，默认）
+allowVolumeExpansion: true        # 允许扩容；仅对块存储类驱动有效（云盘/Ceph RBD），NFS驱动不支持，写了也无效
+volumeBindingMode: WaitForFirstConsumer   # 延迟绑定：等 Pod 调度到节点再建卷，避免卷和 Pod 不在同一可用区
+```
+
+第二步，创建 PVC（my-pvc-dynamic.yaml）——注意看，没有提前建任何 PV，只声明需求：
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc-dynamic
+spec:
+  storageClassName: nfs-sc        # 指向 StorageClass，触发动态供应
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+第三步，apply 并验证——PVC 创建的瞬间，PV 就被自动造出来了：
+```bash
+kubectl apply -f sc.yaml
+kubectl apply -f my-pvc-dynamic.yaml
+
+kubectl get pvc
+# NAME             STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+# my-pvc-dynamic   Pending   pvc-3d5f8c2a-9b4e-4c1d-a7f2-6e8d0b1c2a3e   1Gi        RWX            nfs-sc         5s
+
+kubectl apply -f web-deploy.yaml #创建对应pod之后，pvc才会显示Bound状态
+
+kubectl get pv
+# NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM                    STORAGECLASS   AGE
+# pvc-3d5f8c2a-9b4e-4c1d-a7f2-6e8d0b1c2a3e   1Gi        RWX            Delete           Bound    default/my-pvc-dynamic   nfs-sc         5s
+```
+注意对比静态供应的输出差异：PV 的名字不再是手写的 `my-pv`，而是 `pvc-` 加一串随机 ID——这个 PV 是 CSI 驱动自动生成的，名字和生命周期都跟 PVC 绑定。VolumeName 那串 ID 实际也是后端存储（这里是 NFS 子目录）的标识，删 PVC 时 CSI 驱动顺着它去后端把对应资源也清掉（reclaimPolicy: Delete 的效果）。
 
 ### 服务发现与负载均衡
 Service 的定位：**给一组 Pod 提供稳定的访问入口**。Pod 的 IP 是临时的（删了重建就变），但 Service 的 IP 是稳定的——客户端只认 Service，不用关心后端 Pod 是谁、在哪、什么时候换过。
@@ -1195,3 +1164,127 @@ spec:
 - 调谐循环：控制器读 spec → 对比 status → 执行动作（创建/删除/更新）→ 更新 status → 再来一遍，直到 status 与 spec 一致。
 - 看 `kubectl get deployment` 的 DESIRED / CURRENT / READY 三列：DESIRED 来自 `spec.replicas`，CURRENT 和 READY 来自 `status` 里的 `replicas`、`readyReplicas`。
 - 想看填充后的 status：`kubectl get deployment web -o yaml`，最下面的 `status:` 段就是控制器写好的实际状态。
+
+### Job与CronJob
+前面讲的 Deployment 管的都是"长驻服务"——Pod 挂了就补，永远保持副本数。但有些任务天生是"跑完就走"的：数据备份、批量计算、发一次通知。这类工作负载就是 **Job**（一次性任务）：
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: batch-calc
+spec:
+  completions: 5          # 总共要成功运行5次（默认1次）
+  parallelism: 2          # 最多同时跑2个Pod
+  backoffLimit: 4         # 失败重试上限（默认6），超过后整个Job标记为Failed
+  template:               # 下面就是Pod模板，和Deployment里的一样
+    spec:
+      restartPolicy: Never    # Job必填，只能是Never或OnFailure，Never表示跑完就退出，OnFailure表示容器异常退出则原地重试
+      containers:
+      - name: calc
+        image: busybox
+        command: ["sh", "-c", "echo calculating...; sleep 10"]
+```
+```bash
+kubectl apply -f batch-calc.yaml
+kubectl get job
+# NAME         STATUS    COMPLETIONS   DURATION   AGE 
+# batch-calc   Running   3/5           90s        90s
+kubectl get pods -l job-name=batch-calc
+#看事件和失败详情
+kubectl describe job batch-calc
+```
+### CronJob详解
+**CronJob 则是"定时版 Job"**：它自己不创建 Pod，而是按 cron 表达式周期性地创建 Job 对象，再由 Job 去拉起 Pod——两层嵌套。最典型的两个生产场景：定期备份 MySQL、定期重启服务。
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mysql-backup
+spec:
+  schedule: "0 2 * * *"             # 每天凌晨2点（时区问题见下文）
+  timeZone: "Asia/Shanghai"          # 显式指定时区，如果不写这里，会因为服务器本地时间与控制器时区不一致而导致定时任务的时间错误。
+  successfulJobsHistoryLimit: 3     # 保留最近3次成功的Job记录（默认3）
+  failedJobsHistoryLimit: 1         # 保留最近1次失败的Job记录（默认1）
+  concurrencyPolicy: Forbid         # 三种并发策略：Forbid：不允许并发运行，如果之前的任务尚未完成，新的任务不会被创建Allow：允许同时运行多个任务。Replace：如果之前的任务尚未完成，新的任务会替换的之前的任务
+                                    
+  startingDeadlineSeconds: 300      # 错过调度时间5分钟内还允许补跑，超过就不跑了
+  jobTemplate:                      # 下面就是Job的定义，同上节
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: backup
+            image: mysql:8.0
+            env:
+            - name: MYSQL_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: password
+            command:
+            - /bin/sh
+            - -c
+            - mysqldump -h mysql-svc -uroot -p$MYSQL_PWD --all-databases
+              | gzip > /backup/db-$(date +%Y%m%d).sql.gz
+```
+
+定期重启服务则更简单，借用 kubectl 镜像执行滚动重启命令：
+```yaml
+# 上面spec里相同字段省略，只看jobTemplate,名字是restart-deploy
+#此外这里也省略了RBAC权限配置。
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: restart
+            image: bitnami/kubectl:1.28
+            command:
+            - /bin/sh 
+            - -c    #把下一个字符串当作 shell 脚本来执行
+            - kubectl rollout restart deployment/web -n default
+```
+```bash
+kubectl apply -f restart-deploy.yaml
+kubectl get cronjob
+#NAME             SCHEDULE     LAST SCHEDULE   ...
+#restart-deploy   0 2 * * *    <none> 
+
+#凌晨2点后
+kubectl get job
+#NAME                     STATUS     COMPLETIONS   AGE
+#restart-deploy-28793100  Complete   1/1           5s
+```
+**任务执行记录**靠两组 history limit 控制：successfulJobsHistoryLimit/failedJobsHistoryLimit 各自保留最近多少个已结束的 Job 对象（默认3/1），留这些记录就是为了事后排查——`kubectl get jobs` 看job哪次成功了哪次失败，`kubectl get pods -l job-name=job-failed` 查对应Pod，`kubectl logs` 查到对应 Pod 看输出。注意留太多会堆积 etcd 里的 Job/Pod 对象（每个 Job 还带着 Pod），备份频率高的集群适当调小。
+**cronjob如何操控job**：靠 cronjob 控制器定时召唤。它每隔约10秒检查一遍所有 CronJob 的 schedule 表达式，到点就把 jobTemplate 里的内容抄一份，组装成真实的 Job 对象提交给 API Server——名字是 CronJob 名加时间戳（如 restart-deploy-28793100），保证每次触发的 Job 唯一；同时记下 ownerReference（属主是哪个 CronJob），所以删除 CronJob 时名下的 Job 和 Pod 会被级联清掉。它只管"到点造 Job"，Job 怎么跑交给 Job 控制器，和自己每轮顺手清理超出 historyLimit 的历史 Job，互不越界。
+
+
+## 补充
+### containerd、K8s、Linux内核命名空间
+这三个"命名空间"名字一样，却是三套完全不同的东西，混在一起是容器排障时最常见的迷惑点：
+
+**containerd 命名空间**：镜像和容器的隔离分组，防止不同使用方的资源互相可见。Docker 用的叫 `moby`，kubelet 通过 CRI 调 containerd 时固定用 `k8s.io`，手工操作默认是 `default`。所以 `nerdctl ps` 看不到 K8s 的容器，必须 `nerdctl -n k8s.io ps`。
+
+**K8s 命名空间**：集群内资源对象的逻辑隔离（`default`、`kube-system`、业务 ns），由 API Server 管理。**它和 containerd 命名空间没有任何映射关系**——Pod 部署在哪个 K8s ns，容器都一样躺在 containerd 的 `k8s.io` 里。
+
+**Linux 内核命名空间**：进程级的系统资源隔离（pid/net/mnt/uts/ipc/user），每个容器一套，这是容器"看起来像独立小机器"的底层功臣。
+
+最容易踩的坑有两个。一是 `-n` 参数两边含义完全不同：
+
+```bash
+nerdctl -n k8s.io ps       # -n 是 containerd 命名空间
+kubectl -n kube-system get pods   # -n 是 K8s 命名空间
+```
+二是镜像也随 containerd 命名空间隔离。手工测试拉下来的镜像进了 `default`，K8s 调度到这个节点后看不到它，会重新拉一份存两份。想共用就显式带命名空间操作：
+
+```bash
+nerdctl -n k8s.io pull nginx:1.25    # 直接拉进 K8s 用的命名空间
+nerdctl -n k8s.io tag nginx:1.25 myrepo/nginx:1.25   # 或跨命名空间打标签迁移
+```
+一句话记忆：`nerdctl -n` 管镜像和容器存哪，`kubectl -n` 管 K8s 对象放哪，容器里面的隔离是内核的事。
+

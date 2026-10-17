@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 680" width="800" height="680" role="img" aria-label="PG 堆表与行内 MVCC：堆表页里行不排序、更新即追加新版本，同一行的三个版本靠 t_ctid 串成版本链散落在页内，旧版本标上 xmax 成为死元组，autovacuum 在没有事务需要时回收空间">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#98a2b3"/></marker>
+    <marker id="ahO" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ff7a45"/></marker>
+  </defs>
+  <rect width="800" height="680" fill="#ffffff"/>
+  <g font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <text x="400" y="32" text-anchor="middle" font-size="17" font-weight="bold" fill="#222">PG 堆表与行内 MVCC：更新 = 追加新版本，死元组留给 autovacuum</text>
+
+    <!-- 堆表页 -->
+    <rect x="30" y="64" width="470" height="392" rx="8" fill="#fbfcfe" stroke="#4a6fa5" stroke-width="1.8"/>
+    <text x="265" y="88" text-anchor="middle" font-size="13" font-weight="bold" fill="#4a6fa5">堆表的一页（8KB）—— 行不排序，新版本追加到有空位的地方</text>
+
+    <!-- v1 死元组 -->
+    <rect x="46" y="100" width="380" height="56" rx="5" fill="#f2f5fa" stroke="#98a2b3" stroke-width="1.4" stroke-dasharray="5 3"/>
+    <text x="58" y="122" font-size="13" font-weight="bold" fill="#5a6478">订单 id=5 · 待付款</text>
+    <text x="58" y="142" font-size="11" fill="#98a2b3">v1 · 第一版</text>
+    <rect x="196" y="110" width="70" height="36" rx="4" fill="#ffffff" stroke="#c3cad6"/>
+    <text x="231" y="133" text-anchor="middle" font-size="12" fill="#5a6478">xmin=100</text>
+    <rect x="272" y="110" width="70" height="36" rx="4" fill="#ffffff" stroke="#c3cad6"/>
+    <text x="307" y="133" text-anchor="middle" font-size="12" font-weight="bold" fill="#b3541e">xmax=200</text>
+    <text x="384" y="133" font-size="11" fill="#b3541e">死元组</text>
+
+    <!-- id=7 正常行 -->
+    <rect x="46" y="168" width="380" height="56" rx="5" fill="#eef8ee" stroke="#4a8a5c" stroke-width="1.6"/>
+    <text x="58" y="190" font-size="13" font-weight="bold" fill="#1a6b33">订单 id=7 · 已发货</text>
+    <text x="58" y="210" font-size="11" fill="#7fa184">其他订单行</text>
+    <rect x="196" y="178" width="70" height="36" rx="4" fill="#ffffff" stroke="#9dbfa6"/>
+    <text x="231" y="201" text-anchor="middle" font-size="12" fill="#33502c">xmin=210</text>
+    <rect x="272" y="178" width="70" height="36" rx="4" fill="#ffffff" stroke="#9dbfa6"/>
+    <text x="307" y="201" text-anchor="middle" font-size="12" fill="#7fa184">xmax=—</text>
+
+    <!-- v2 死元组 -->
+    <rect x="46" y="236" width="380" height="56" rx="5" fill="#f2f5fa" stroke="#98a2b3" stroke-width="1.4" stroke-dasharray="5 3"/>
+    <text x="58" y="258" font-size="13" font-weight="bold" fill="#5a6478">订单 id=5 · 已付款</text>
+    <text x="58" y="278" font-size="11" fill="#98a2b3">v2 · 第二版</text>
+    <rect x="196" y="246" width="70" height="36" rx="4" fill="#ffffff" stroke="#c3cad6"/>
+    <text x="231" y="269" text-anchor="middle" font-size="12" fill="#5a6478">xmin=200</text>
+    <rect x="272" y="246" width="70" height="36" rx="4" fill="#ffffff" stroke="#c3cad6"/>
+    <text x="307" y="269" text-anchor="middle" font-size="12" font-weight="bold" fill="#b3541e">xmax=300</text>
+    <text x="384" y="269" font-size="11" fill="#b3541e">死元组</text>
+
+    <!-- id=6 正常行 -->
+    <rect x="46" y="304" width="380" height="56" rx="5" fill="#eef8ee" stroke="#4a8a5c" stroke-width="1.6"/>
+    <text x="58" y="326" font-size="13" font-weight="bold" fill="#1a6b33">订单 id=6 · 待付款</text>
+    <text x="58" y="346" font-size="11" fill="#7fa184">其他订单行</text>
+    <rect x="196" y="314" width="70" height="36" rx="4" fill="#ffffff" stroke="#9dbfa6"/>
+    <text x="231" y="337" text-anchor="middle" font-size="12" fill="#33502c">xmin=260</text>
+    <rect x="272" y="314" width="70" height="36" rx="4" fill="#ffffff" stroke="#9dbfa6"/>
+    <text x="307" y="337" text-anchor="middle" font-size="12" fill="#7fa184">xmax=—</text>
+
+    <!-- v3 当前版本 -->
+    <rect x="46" y="372" width="380" height="56" rx="5" fill="#eef8ee" stroke="#4a8a5c" stroke-width="2.4"/>
+    <text x="58" y="394" font-size="13" font-weight="bold" fill="#1a6b33">订单 id=5 · 已完成</text>
+    <text x="58" y="414" font-size="11" fill="#1a6b33">v3 · 当前版本</text>
+    <rect x="196" y="382" width="70" height="36" rx="4" fill="#ffffff" stroke="#9dbfa6"/>
+    <text x="231" y="405" text-anchor="middle" font-size="12" fill="#33502c">xmin=300</text>
+    <rect x="272" y="382" width="70" height="36" rx="4" fill="#ffffff" stroke="#9dbfa6"/>
+    <text x="307" y="405" text-anchor="middle" font-size="12" fill="#7fa184">xmax=—</text>
+    <text x="376" y="405" font-size="11" fill="#1a6b33">当前版本</text>
+
+    <!-- t_ctid 版本链 -->
+    <path d="M426,128 C466,128 466,264 430,264" fill="none" stroke="#ff7a45" stroke-width="2" marker-end="url(#ahO)"/>
+    <path d="M426,264 C492,264 492,400 430,400" fill="none" stroke="#ff7a45" stroke-width="2" marker-end="url(#ahO)"/>
+    <text x="470" y="176" font-size="10" fill="#b3541e">t_ctid</text>
+    <text x="470" y="330" font-size="10" fill="#b3541e">t_ctid</text>
+
+    <!-- 右侧：快照读 -->
+    <rect x="520" y="64" width="250" height="188" rx="8" fill="#f7f9fc" stroke="#d8dee8"/>
+    <text x="536" y="92" font-size="13" font-weight="bold" fill="#1d4e89">快照读：可见性判断</text>
+    <text x="536" y="116" font-size="12" fill="#333">每行自带 xmin（插入事务）与</text>
+    <text x="536" y="135" font-size="12" fill="#333">xmax（删除事务）两个标记</text>
+    <text x="536" y="158" font-size="12" fill="#333">事务按自己的快照逐版本判断</text>
+    <text x="536" y="177" font-size="12" fill="#333">可见性；不可见就顺着 t_ctid</text>
+    <text x="536" y="196" font-size="12" fill="#333">找更旧的版本，读不阻塞写</text>
+    <text x="536" y="224" font-size="11.5" fill="#b3541e">例：快照早于事务 300 的连接读 id=5</text>
+    <text x="536" y="242" font-size="11.5" fill="#b3541e">→ v3 不可见 → 顺链读到 v1：待付款</text>
+
+    <!-- 右侧：autovacuum -->
+    <rect x="520" y="272" width="250" height="184" rx="8" fill="#f7f9fc" stroke="#d8dee8"/>
+    <text x="536" y="300" font-size="13" font-weight="bold" fill="#1d4e89">autovacuum：回收死元组</text>
+    <text x="536" y="324" font-size="12" fill="#333">旧版本留在堆里不会立刻消失；</text>
+    <text x="536" y="343" font-size="12" fill="#333">等没有任何事务再需要它时，</text>
+    <text x="536" y="362" font-size="12" fill="#333">autovacuum 才回收其空间</text>
+    <text x="536" y="390" font-size="12" fill="#b3541e">一个长事务就能拖停回收——</text>
+    <text x="536" y="409" font-size="12" fill="#b3541e">死元组堆积，就是表膨胀</text>
+    <text x="536" y="436" font-size="11" fill="#8a93a6">监控：死元组占比 / 最后 vacuum 时间</text>
+
+    <!-- 底部说明 -->
+    <rect x="24" y="486" width="752" height="176" rx="8" fill="#f7f9fc" stroke="#d8dee8"/>
+    <text x="40" y="512" font-size="13" fill="#333"><tspan font-weight="bold">图中元素：</tspan>绿色行是活跃版本；灰色虚线行是死元组（已标 xmax、等待回收）；橙色箭头是 t_ctid 版本链</text>
+    <text x="40" y="536" font-size="13" fill="#333"><tspan font-weight="bold">为什么这样设计：</tspan>多版本直接存在堆表里，快照读不阻塞写，读历史版本不用跳出堆去别处回溯</text>
+    <text x="40" y="560" font-size="13" fill="#333"><tspan font-weight="bold">代价：</tspan>一次更新 = 追加一整行新版本 + 每个索引补一条新指针（写放大），死元组堆积是表膨胀的根源</text>
+    <text x="40" y="584" font-size="13" fill="#333"><tspan font-weight="bold">定时炸弹：</tspan>xmin 是 32 位计数器，全库约 42 亿个事务，用尽前必须靠 vacuum 冻结最老的行，否则整库拒写</text>
+    <text x="40" y="608" font-size="13" fill="#333"><tspan font-weight="bold">运维盯什么：</tspan>pg_stat_user_tables 死元组占比与最后 vacuum 时间、长事务时长、事务 ID 年龄（age）</text>
+  </g>
+</svg>

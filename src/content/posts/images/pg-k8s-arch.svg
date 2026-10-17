@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 620" width="800" height="620" role="img" aria-label="PG 在 K8s 上的部署架构：应用只连 Service 实现读写分离，主从 Pod 由 StatefulSet 托管、各挂独立 PVC 落块存储，WAL 流从主库异步推给从库，Secret 与 ConfigMap 以卷的方式注入">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#98a2b3"/></marker>
+    <marker id="ahO" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ff7a45"/></marker>
+  </defs>
+  <rect width="800" height="620" fill="#ffffff"/>
+  <g font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <text x="400" y="32" text-anchor="middle" font-size="16.5" font-weight="bold" fill="#222">PG 在 K8s 上的部署架构：StatefulSet 托管主从，Service 读写分离，独立 PVC 落块存储</text>
+
+    <!-- 应用 -->
+    <rect x="170" y="56" width="260" height="46" rx="8" fill="#fbfcfe" stroke="#4a6fa5" stroke-width="1.8"/>
+    <text x="182" y="76" font-size="13" font-weight="bold" fill="#1d4e89">应用（自带连接池）</text>
+    <text x="182" y="94" font-size="11" fill="#5a6478">只连 Service，不直连 Pod</text>
+    <path d="M240,102 L240,118 L175,118 L175,140" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+    <path d="M360,102 L360,118 L415,118 L415,140" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+
+    <!-- Service 读写分离 -->
+    <rect x="80" y="140" width="190" height="46" rx="8" fill="#fdf3ec" stroke="#e8815a" stroke-width="1.6"/>
+    <text x="92" y="160" font-size="12.5" font-weight="bold" fill="#b3541e">Service · pg-rw（写）</text>
+    <text x="92" y="177" font-size="11" fill="#5a6478">只指向主库</text>
+    <rect x="320" y="140" width="190" height="46" rx="8" fill="#fdf3ec" stroke="#e8815a" stroke-width="1.6"/>
+    <text x="332" y="160" font-size="12.5" font-weight="bold" fill="#b3541e">Service · pg-ro（读）</text>
+    <text x="332" y="177" font-size="11" fill="#5a6478">指向从库</text>
+    <path d="M175,186 L175,216 L167,216 L167,230" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+    <path d="M415,186 L415,216 L432,216 L432,230" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+
+    <!-- WAL 流复制弧线 -->
+    <path d="M285,246 C300,220 300,220 315,246" fill="none" stroke="#ff7a45" stroke-width="2" marker-end="url(#ahO)"/>
+    <text x="300" y="216" text-anchor="middle" font-size="10.5" fill="#b3541e">WAL 流复制（异步）</text>
+
+    <!-- 主库 Pod -->
+    <rect x="50" y="230" width="235" height="78" rx="8" fill="#eef8ee" stroke="#4a8a5c" stroke-width="2.2"/>
+    <text x="62" y="252" font-size="13" font-weight="bold" fill="#1a6b33">Pod：pg-master（主库）</text>
+    <text x="62" y="270" font-size="11.5" fill="#33502c">生成 WAL · 接受写入</text>
+    <rect x="62" y="280" width="86" height="20" rx="10" fill="#ffffff" stroke="#9dbfa6"/>
+    <text x="105" y="294" text-anchor="middle" font-size="10.5" fill="#33502c">StatefulSet</text>
+
+    <!-- 从库 Pod -->
+    <rect x="315" y="230" width="235" height="78" rx="8" fill="#f2f5fa" stroke="#4a6fa5" stroke-width="1.8"/>
+    <text x="327" y="252" font-size="13" font-weight="bold" fill="#1d4e89">Pod：pg-replica（从库）</text>
+    <text x="327" y="270" font-size="11.5" fill="#5a6478">重放 WAL · 只读查询</text>
+    <rect x="327" y="280" width="86" height="20" rx="10" fill="#ffffff" stroke="#b6c3d8"/>
+    <text x="370" y="294" text-anchor="middle" font-size="10.5" fill="#5a6478">StatefulSet</text>
+
+    <!-- PVC -->
+    <path d="M167,308 L167,348" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+    <path d="M432,308 L432,348" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+    <rect x="50" y="348" width="235" height="40" rx="6" fill="#fbfcfe" stroke="#4a6fa5" stroke-width="1.4"/>
+    <text x="62" y="372" font-size="12" fill="#1d4e89">PVC：data-master（独立卷）</text>
+    <rect x="315" y="348" width="235" height="40" rx="6" fill="#fbfcfe" stroke="#4a6fa5" stroke-width="1.4"/>
+    <text x="327" y="372" font-size="12" fill="#1d4e89">PVC：data-replica（独立卷）</text>
+
+    <!-- 存储 -->
+    <path d="M167,388 L167,428" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+    <path d="M432,388 L432,428" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+    <rect x="50" y="428" width="500" height="48" rx="8" fill="#f7f9fc" stroke="#4a6fa5" stroke-width="1.6"/>
+    <text x="64" y="448" font-size="12.5" font-weight="bold" fill="#1d4e89">块存储：云盘 / Ceph RBD（fsync 语义必须可靠）</text>
+    <text x="64" y="466" font-size="11.5" fill="#5a6478">IOPS 随容量给配额——卷配小了，CPU 很闲写入也慢</text>
+
+    <!-- 右侧：为什么是 StatefulSet -->
+    <rect x="575" y="56" width="195" height="196" rx="8" fill="#f7f9fc" stroke="#d8dee8"/>
+    <text x="587" y="80" font-size="12.5" font-weight="bold" fill="#1d4e89">为什么必须是 StatefulSet</text>
+    <text x="587" y="104" font-size="11" fill="#333">Pod 需要稳定身份：</text>
+    <text x="587" y="121" font-size="11" fill="#333">固定名字与 DNS，重建不换人</text>
+    <text x="587" y="143" font-size="11" fill="#333">PVC 原样挂回：重启不丢卷</text>
+    <text x="587" y="165" font-size="11" fill="#333">升级人工控制节奏：</text>
+    <text x="587" y="182" font-size="11" fill="#333">禁止自动滚动重启数据库</text>
+
+    <!-- 右侧：部署顺序 -->
+    <rect x="575" y="270" width="195" height="210" rx="8" fill="#f7f9fc" stroke="#d8dee8"/>
+    <text x="587" y="294" font-size="12.5" font-weight="bold" fill="#1d4e89">部署顺序（依赖决定）</text>
+    <text x="587" y="316" font-size="11" fill="#333">1 凭证 Secret（建复制账号用）</text>
+    <text x="587" y="335" font-size="11" fill="#333">2 参数/初始化脚本 ConfigMap</text>
+    <text x="587" y="354" font-size="11" fill="#333">3 Service（先立门牌）</text>
+    <text x="587" y="373" font-size="11" fill="#333">4 主库（数据源头）</text>
+    <text x="587" y="392" font-size="11" fill="#333">5 从库（全量拉取＋追增量）</text>
+    <text x="587" y="411" font-size="11" fill="#333">6 验证复制与端到端查询</text>
+
+    <!-- 底部：注入与生产路线 -->
+    <rect x="30" y="500" width="740" height="92" rx="8" fill="#f7f9fc" stroke="#d8dee8"/>
+    <text x="44" y="522" font-size="12.5" font-weight="bold" fill="#1d4e89">配置注入与生产路线</text>
+    <text x="44" y="542" font-size="11.5" fill="#333">Secret（密码，不进镜像与仓库）与 ConfigMap（参数）以卷挂载进 Pod——挂目录而非单文件；多数参数热载即可，内存类参数改完必须重启</text>
+    <text x="44" y="566" font-size="11.5" fill="#333">生产高可用直接用 Operator（CNPG / Zalando）：failover 裁决、备份、切换声明式托管——手搓的价值是看懂它在替你做什么</text>
+  </g>
+</svg>

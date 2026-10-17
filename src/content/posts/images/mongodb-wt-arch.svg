@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 680" width="800" height="680" role="img" aria-label="mongod 进程全景：Server 层解析优化执行，WiredTiger 引擎用 cache 缓页并写时复制做 MVCC，磁盘上每个集合和索引各一个 wt 文件、journal 记写前日志，checkpoint 定期把脏页整理成一致快照落盘">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#98a2b3"/></marker>
+    <marker id="ahO" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ff7a45"/></marker>
+  </defs>
+  <rect width="800" height="680" fill="#ffffff"/>
+  <g font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <text x="400" y="32" text-anchor="middle" font-size="16.5" font-weight="bold" fill="#222">mongod 进程全景：Server 层之下是 WiredTiger，cache＋journal＋checkpoint 缝合内存与磁盘</text>
+
+    <!-- 客户端 -->
+    <rect x="40" y="90" width="170" height="52" rx="8" fill="#fbfcfe" stroke="#4a6fa5" stroke-width="1.6"/>
+    <text x="54" y="112" font-size="12.5" font-weight="bold" fill="#1d4e89">客户端（驱动）</text>
+    <text x="54" y="130" font-size="11" fill="#5a6478">直连 mongod 或经 mongos</text>
+    <path d="M210,116 L254,116" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+
+    <!-- mongod 大框 -->
+    <rect x="258" y="56" width="490" height="396" rx="10" fill="#fbfcfe" stroke="#4a6fa5" stroke-width="2.2"/>
+    <text x="274" y="82" font-size="13" font-weight="bold" fill="#1d4e89">mongod 进程</text>
+
+    <!-- Server 层 -->
+    <rect x="280" y="96" width="450" height="74" rx="8" fill="#eef8ee" stroke="#4a8a5c" stroke-width="1.8"/>
+    <text x="294" y="120" font-size="12.5" font-weight="bold" fill="#1a6b33">Server 层：解析、优化、执行</text>
+    <text x="294" y="140" font-size="11" fill="#33502c">与 MySQL 的分层同构——引擎可插拔</text>
+    <text x="294" y="156" font-size="11" fill="#7fa184">（WiredTiger 之前是 MMAPv1，已移除）</text>
+    <path d="M505,170 L505,196" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+
+    <!-- WT 层 -->
+    <rect x="280" y="200" width="450" height="236" rx="8" fill="#f7f9fc" stroke="#4a6fa5" stroke-width="1.6"/>
+    <text x="294" y="224" font-size="12.5" font-weight="bold" fill="#1d4e89">WiredTiger 引擎</text>
+
+    <!-- cache -->
+    <rect x="296" y="238" width="418" height="92" rx="6" fill="#ffffff" stroke="#b6c3d8"/>
+    <text x="310" y="260" font-size="12" font-weight="bold" fill="#1d4e89">cache：页缓存（默认约物理内存一半减 1GB）</text>
+    <text x="310" y="280" font-size="11.5" fill="#333">读页进 cache；写改 cache 里的副本——不原地改页</text>
+    <text x="310" y="298" font-size="11.5" fill="#333">LRU 变体淘汰：优先赶干净页</text>
+    <text x="310" y="316" font-size="11" fill="#b3541e">脏页水位过高时应用线程被拖去协助驱逐——写入毛刺的来源</text>
+
+    <!-- MVCC -->
+    <rect x="296" y="342" width="418" height="82" rx="6" fill="#ffffff" stroke="#b6c3d8"/>
+    <text x="310" y="364" font-size="12" font-weight="bold" fill="#1d4e89">并发控制：写时复制 MVCC</text>
+    <text x="310" y="384" font-size="11.5" fill="#333">更新 = 新版本追加到该文档的 update chain，版本带全局时间戳</text>
+    <text x="310" y="402" font-size="11.5" fill="#333">读拿快照沿链找可见版本——读不阻塞写</text>
+    <text x="310" y="418" font-size="11" fill="#7fa184">旧版本由驱逐与 checkpoint 顺手回收，无独立 vacuum 进程</text>
+
+    <!-- 磁盘 -->
+    <path d="M505,452 L505,478" fill="none" stroke="#98a2b3" stroke-width="1.6" marker-end="url(#ah)"/>
+    <text x="520" y="470" font-size="10.5" fill="#b3541e">checkpoint 定期把脏页整理成一致快照写回 .wt 文件</text>
+    <rect x="258" y="482" width="490" height="104" rx="8" fill="#f7f9fc" stroke="#4a6fa5" stroke-width="1.6"/>
+    <rect x="274" y="500" width="146" height="72" rx="6" fill="#ffffff" stroke="#b6c3d8"/>
+    <text x="286" y="522" font-size="11.5" font-weight="bold" fill="#1d4e89">collection-xxx.wt</text>
+    <text x="286" y="540" font-size="10.5" fill="#333">数据：按 _id 聚簇的</text>
+    <text x="286" y="556" font-size="10.5" fill="#333">BTree，页大小自适应</text>
+    <rect x="430" y="500" width="146" height="72" rx="6" fill="#ffffff" stroke="#b6c3d8"/>
+    <text x="442" y="522" font-size="11.5" font-weight="bold" fill="#1d4e89">index-xxx.wt</text>
+    <text x="442" y="540" font-size="10.5" fill="#333">二级索引：叶子存 _id，</text>
+    <text x="442" y="556" font-size="10.5" fill="#333">命中后回主树（回表）</text>
+    <rect x="586" y="500" width="146" height="72" rx="6" fill="#fdf3ec" stroke="#e8815a"/>
+    <text x="598" y="522" font-size="11.5" font-weight="bold" fill="#b3541e">journal/</text>
+    <text x="598" y="540" font-size="10.5" fill="#333">写前日志：变更先记</text>
+    <text x="598" y="556" font-size="10.5" fill="#333">journal，攒批 fsync 落盘</text>
+
+    <!-- 底部面板 -->
+    <rect x="30" y="606" width="740" height="58" rx="8" fill="#f7f9fc" stroke="#d8dee8"/>
+    <text x="44" y="626" font-size="12" font-weight="bold" fill="#1d4e89">崩溃恢复 = 加载最近 checkpoint ＋ 重放其后的 journal——与 MySQL 的 redo 重放同构</text>
+    <text x="44" y="648" font-size="11.5" fill="#333">压缩开箱即用（Snappy 默认，索引走前缀压缩）——省的是磁盘与 IO，花的是 CPU</text>
+  </g>
+</svg>
