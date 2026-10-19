@@ -150,4 +150,3 @@ kubectl auth can-i delete pods -n test --as alice  # no
 ```bash
 kubectl create clusterrolebinding ops-admin --clusterrole=admin --group=ops-team
 ```
-
