@@ -12,29 +12,35 @@ lang: '中文'
 
 ## 定义
 k8s是一个开源的容器编排平台，利用它可以非常方便，高效地管理多个容器。对比一下不用k8s的情况。
-| 痛点 | k8s 的解法 |
-| --- | --- |
-| 容器挂了没人管 | **自愈**：自动重启失败的容器，替换不健康的节点 |
-| 流量大了扛不住 | **自动伸缩**：根据 CPU/内存或自定义指标水平扩展 Pod 数量（HPA） |
-| 部署新版本要停机 | **滚动更新**：逐个替换旧版本，随时可以回滚 |
-| 服务之间怎么找到彼此 | **服务发现 + 负载均衡**：通过 Service/DNS 自动路由流量 |
-| 配置和密钥散落各处 | **ConfigMap / Secret** 统一管理，随应用挂载 |
-| 服务器资源浪费 | **调度器**把 Pod 合理分配到各节点，最大化资源利用率 |
-| 多环境（测试/生产）不一致 | **声明式配置**（YAML 描述期望状态），集群自动收敛到该状态 |
+| 痛点                      | k8s 的解法                                                      |
+| ------------------------- | --------------------------------------------------------------- |
+| 容器挂了没人管            | **自愈**：自动重启失败的容器，替换不健康的节点                  |
+| 流量大了扛不住            | **自动伸缩**：根据 CPU/内存或自定义指标水平扩展 Pod 数量（HPA） |
+| 部署新版本要停机          | **滚动更新**：逐个替换旧版本，随时可以回滚                      |
+| 服务之间怎么找到彼此      | **服务发现 + 负载均衡**：通过 Service/DNS 自动路由流量          |
+| 配置和密钥散落各处        | **ConfigMap / Secret** 统一管理，随应用挂载                     |
+| 服务器资源浪费            | **调度器**把 Pod 合理分配到各节点，最大化资源利用率             |
+| 多环境（测试/生产）不一致 | **声明式配置**（YAML 描述期望状态），集群自动收敛到该状态       |
 
 ## 结构
-k8s属于主从模型（Master-Slave架构），构成k8s集群的物理主机分成两类角色，一类是master、另一类是Slave
-### Master节点/主节点
-master节点负责集群的调度、管理和运维，是k8s集群的总控中心，高可用集群建议部署至少3台
-Master，master节点通过与Slave节点不间断通信来维持整个集群的健康状态，集群中各个资源的
-状态信息存放于etcd中。若master节点不可用，则我们便无法管理k8s集群中的各种资源
-Master上部署的组件有apiserver、scheduler、controller-manager等管理组件，此外通常还需要
-部署etcd
-### Slave节点/从节点/工作节点/worker节点：
-Slave节点是集群中的运算工作负载节点，通常也被称为Worker Node节点，简称Node节点，
-node节点上的kubelet组会持续将本机的状态汇报给master节点的apiserver然后存储在etcd中，
-当某个Node宕机时，其上的工作负载会被Master控制自动转移到其他Node节点上去
-Slave节点上部署有kubelet、kube-proxy、容器引擎等工作组件。
+k8s 属于主从模型，构成集群的机器分成两类角色：控制平面 Control Plane和工作节点 Worker Node。对照架构图：最外层的大框是一个 CLUSTER 集群，左侧是控制平面，右侧是 Node 1、Node 2 两台工作节点，右上角云朵代表云厂商 API。
+![k8s架构](./images/kubernetes-cluster-architecture.svg)
+### 控制平面 Control Plane
+控制平面是集群的"大脑"，负责整个集群的调度、管理与运维。高可用集群建议至少部署 3 台（etcd 依赖奇数节点做多数派选举，后文详述）。图中控制平面里画了 5 个组件：
+- **kube-apiserver**：集群唯一入口。注意图中的连线走向——scheduler、controller manager、kubelet、kube-proxy 全都连向它，组件之间互不直接通信，所有交互都要经过 apiserver 中转
+- **etcd**：分布式 KV 存储，集群所有状态记录在这里；它只被 apiserver 读写（图中 etcd 与 apiserver 的连线），其他组件要存取数据都必须通过 apiserver
+- **kube-scheduler**：调度器，从 apiserver 监听新创建、还没分配节点的 Pod，为它选出最合适的一个节点
+- **kube-controller-manager**：所有内置控制器的集合，持续对比"期望状态"与"实际状态"，驱动集群向期望状态收敛
+- **cloud-controller-manager**：对接云厂商的控制器（图右上角的 CLOUD PROVIDER API 云朵），负责负载均衡、云盘挂载、节点生命周期这类云资源相关的事；自建集群没有云厂商，通常不部署它
+若控制平面不可用，集群进入"管理停摆"：无法增删改资源、无法调度新 Pod，但已经运行在节点上的存量 Pod 不受影响，会继续提供服务——这就是控制平面必须做高可用的原因。
+### 工作节点 Worker Node（旧称 Slave）
+工作节点承载真正的业务负载，业务以 Pod 为单位运行（图中 Node 1、Node 2 内部的 pod 方块）。每个节点上运行三类组件：
+- **kubelet**：节点上的"管家"，与 apiserver 保持不间断通信：一边接收 apiserver 的指令、维护本节点 Pod 达到预期状态，一边持续把本节点和 Pod 的状态汇报上去、存入 etcd。真正创建容器时，通过 CRI 接口调用容器引擎完成（图中的 CRI 标注）
+- **kube-proxy**：在节点上维护 Service 的流量转发规则（它从 apiserver watch service 和 endpoint 的变化），让访问服务的流量在多个 Pod 副本之间负载均衡
+- **容器引擎**：真正拉起容器的运行时，支持 Docker、containerd、CRI-O 等一切实现 CRI 接口的软件
+当某个 Node 宕机，kubelet 的心跳上报中断，控制平面将该节点标记为不可用，其上的工作负载被自动转移到其他节点——故障转移的决策在控制平面（controller-manager + scheduler），实际重建则由目标节点上的 kubelet 动手执行。
+各组件的详细工作原理见后文"核心组件简介"。
+
 
 ## 核心概念
 ### 名称空间
@@ -257,15 +263,15 @@ controller-manager负责监视着每一个控制器（控制器通过API Sever�
 使得集群处于预期的工作状态，由于Master有多个，所以controller-manager具有冗余性。  
 ##### 常见控制器（了解）
 k8s中有几十种Controller，这里简单罗列一些Controller
-| 控制器 | 作用 |
-|--------|------|
-| **Node Controller**（节点控制器） | 负责在节点出现故障时进行通知和响应 |
-| **Replication Controller**（副本控制器） | 负责为系统中的每个副本控制器对象维护正确数量的 Pod |
-| **Endpoints Controller**（端点控制器） | 一个 Pod 的 IP+Port 对应一个 Endpoint 资源。K8s 将多个副本的 Endpoint 加入 Service 管理，这与配置 Nginx 是同样的道理；不同的是，Pod 的下线、重启等引起的 IP 地址变化（即 Endpoint 变化），都会被 K8s 监听到，然后动态更新到 Service 中，负责控制这件事的就是 Endpoint 控制器 |
-| **Service Account & Token Controllers**（服务账户和令牌控制器） | 为新的命名空间创建默认账户和 API 访问令牌 |
-| **ResourceQuota Controller**（资源配额控制器） | 确保指定的资源对象在任何时候都不会超量占用系统物理资源 |
-| **Namespace Controller**（命名空间控制器） | 管理 Namespace 的生命周期 |
-| **Service Controller**（服务控制器） | 属于 K8s 集群与外部的云平台之间的一个接口控制器 |
+| 控制器                                                          | 作用                                                                                                                                                                                                                                                                         |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Node Controller**（节点控制器）                               | 负责在节点出现故障时进行通知和响应                                                                                                                                                                                                                                           |
+| **Replication Controller**（副本控制器）                        | 负责为系统中的每个副本控制器对象维护正确数量的 Pod                                                                                                                                                                                                                           |
+| **Endpoints Controller**（端点控制器）                          | 一个 Pod 的 IP+Port 对应一个 Endpoint 资源。K8s 将多个副本的 Endpoint 加入 Service 管理，这与配置 Nginx 是同样的道理；不同的是，Pod 的下线、重启等引起的 IP 地址变化（即 Endpoint 变化），都会被 K8s 监听到，然后动态更新到 Service 中，负责控制这件事的就是 Endpoint 控制器 |
+| **Service Account & Token Controllers**（服务账户和令牌控制器） | 为新的命名空间创建默认账户和 API 访问令牌                                                                                                                                                                                                                                    |
+| **ResourceQuota Controller**（资源配额控制器）                  | 确保指定的资源对象在任何时候都不会超量占用系统物理资源                                                                                                                                                                                                                       |
+| **Namespace Controller**（命名空间控制器）                      | 管理 Namespace 的生命周期                                                                                                                                                                                                                                                    |
+| **Service Controller**（服务控制器）                            | 属于 K8s 集群与外部的云平台之间的一个接口控制器                                                                                                                                                                                                                              |
 **控制器进程**都只存在于主节点
 #### 客户端工具
 kubctl这个客户端程序的调用操作都是过kube-apiserver提供的HTTP Restful API接口进行。
@@ -411,7 +417,6 @@ kube-controller-manager  → 调谐（Reconcile）：副本够不够、滚动更
 kube-scheduler           → 调度（Schedule）：新 Pod 放哪个节点
 ```
 对应前面的 POD 创建流程：controller-manager 生成"创建 Pod"的事件 → scheduler 选好节点 → 节点上的 kubelet 创建容器。两者分工不同、缺一不可。
-
 
 
 **更深层次剖析请看https://bbs.huaweicloud.com/blogs/334436**

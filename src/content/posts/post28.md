@@ -740,20 +740,7 @@ Jenkins Master 读到 Jenkinsfile 开头的 `podTemplate` 声明，通过 kubern
 
 
 ## 补充
-### RBAC详解
-前文 Jenkins 凭证里那两份 kubeconfig（`kuber-config-test` / `kuber-config-prod`），本质上就是两把「钥匙」——Jenkins 拿着它就能对 K8s 集群执行 `kubectl set image`。这把钥匙为什么有效、能干什么、不能干什么，由 RBAC 决定。
-#### RBAC 是什么
-K8s 的所有请求都经过 API Server，RBAC（基于角色的访问控制）是 API Server 的鉴权机制：**先确认你是谁（认证），再确认你能干什么（授权）**。kubeconfig 中的用户信息完成第一步，第二步就靠 RBAC 规则判断。
-核心由四个对象组成，两两配对：
-| 对象               | 作用范围   | 说明                                                    |
-| ------------------ | ---------- | ------------------------------------------------------- |
-| Role               | 命名空间内 | 定义一组权限，如「能对 default 下的 Deployment 做读写」 |
-| ClusterRole        | 整个集群   | 定义集群级权限，或跨命名空间复用的权限模板              |
-| RoleBinding        | 命名空间内 | 把 Role 授权给某个用户/组/ServiceAccount                |
-| ClusterRoleBinding | 整个集群   | 把 ClusterRole 授权出去，作用域是全集群                 |
-关键点：**Role/RoleBinding 只在所属命名空间生效**。前文 `kubectl set image deployment/test` 能成功，是因为 kubeconfig 对应的身份在目标命名空间里有 Deployment 的写权限。
-
-#### 实战：给 Jenkins 流水线一个最小权限身份
+### 给 Jenkins 流水线一个最小权限身份
 生产实践里不应该把管理员 kubeconfig 塞进 Jenkins，正确做法是创建专用的 ServiceAccount，只授予操作 Deployment 的权限：
 ```yaml
 # 1. 创建专用 ServiceAccount（Jenkins 的身份）
@@ -804,34 +791,6 @@ roleRef:
   只需要 deployments 的 get/patch/update 权限（管发布）
 ```
 为什么要分成两个身份，而不是一个 ServiceAccount 全包？这正是 RBAC 最小权限原则的实际落地：链路一能 `exec` 进任意容器，一旦泄漏等于交出构建环境；链路二只能改目标命名空间的 Deployment，泄漏后攻击面有限。如果混用一个权限大而全的身份，两条链路的安全边界就都失效了——权限按「用途」切分，是共享集群里最基础的隔离手段，多团队共用集群时（各团队绑定各自命名空间的 Role）遵循的也是同一个思路。
-
-### kubeconfig
-kubeconfig 默认只有主节点有，位于 `~/.kube/config`（也可用 `KUBECONFIG` 环境变量或 `--kubeconfig` 参数指定）。kubeadm 初始化时实际生成的是 `/etc/kubernetes/admin.conf`，随后自动复制一份到 `~/.kube/config`——因为 kubectl 默认只读这个路径，两份内容相同
-```yaml
-#admin.conf(主节点的kubeconfig)，运维人员自己电脑上只要有这一份配置就能用kubectl随意操作集群
-apiVersion: v1
-kind: Config
-clusters:                                        # 连谁：API Server 地址 + CA 证书
-- name: kubernetes
-  cluster:
-    server: https://172.16.10.11:6443            # 主节点 IP:6443，拿到别的机器要改成「那边能访问到的」地址
-    certificate-authority-data: LS0tLS1CRUdJTi...  # CA 公钥证书(base64)，用于校验 apiserver 身份
-users:                                           # 我是谁：客户端证书 + 私钥（认证信息在这里）
-- name: kubernetes-admin
-  user:
-    client-certificate-data: LS0tLS1CRUdJTi...   # 用户证书，CN=kubernetes-admin(用户名)、O=system:masters(超级管理员组)
-    client-key-data: LS0tLS1CRUdJTi...           # 私钥，与上面的证书配对，每次请求做 TLS 双向认证
-contexts:                                        # 配对：把「哪个集群」和「哪个用户」组合到一起
-- name: kubernetes-admin@kubernetes
-  context:
-    cluster: kubernetes
-    user: kubernetes-admin
-current-context: kubernetes-admin@kubernetes     # 当前生效的组合
-```
-**在个人电脑上操作集群**只需要两样东西：网络可达的 API Server 地址 + 一份合法的 kubeconfig。把管理员发给你的 kubeconfig 存到 `~/.kube/config`，无论人在哪，`kubectl` 都能直接操作集群。
-
- **集群内**（Pod 容器里）：不需要 kubeconfig。每个 Pod 启动时都会自动挂载 ServiceAccount 的 token（`/var/run/secrets/kubernetes.io/serviceaccount/token`）并注入 `KUBERNETES_SERVICE_HOST` 环境变量指向集群内部 API Server，客户端拿这些现成信息即可完成认证。注意「不需要 kubeconfig」只省掉了认证环节，**能不能创建 Pod 仍由 RBAC 决定**——默认 ServiceAccount 没有任何权限，请求会被 API Server 以 403 拒绝，必须像上文那样给ServiceAccount绑定 Role/ClusterRole 才行。前文 Jenkins Master Pod 能自主创建 slave Pod，靠的正是「自动挂载的 token 认证 + 提前绑定好的 RBAC 授权」这条「集群内」通道。
-
 
 ## ArgoCD
 ### Jenkins的劣势

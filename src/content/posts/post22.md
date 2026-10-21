@@ -853,12 +853,12 @@ CoreDNS 是 Kubernetes 自 1.13 版本起默认的集群 DNS 服务器，以 Dep
 
 **解析规则**：Service 名字有三种写法，按作用域从短到长：
 
-| 写法 | 解析结果 | 适用范围 |
-| --- | --- | --- |
-| `nginx-balance` | ClusterIP | 同 namespace 内，最常用 |
-| `nginx-balance.default` | ClusterIP | 跨 namespace（default 换成对方所在 ns） |
-| `nginx-balance.default.svc.cluster.local` | ClusterIP | 全集群唯一 FQDN |
-| `pod-ip`（headless Service） | 各 Pod IP，不做负载均衡 | StatefulSet 场景 |
+| 写法                                      | 解析结果                | 适用范围                                |
+| ----------------------------------------- | ----------------------- | --------------------------------------- |
+| `nginx-balance`                           | ClusterIP               | 同 namespace 内，最常用                 |
+| `nginx-balance.default`                   | ClusterIP               | 跨 namespace（default 换成对方所在 ns） |
+| `nginx-balance.default.svc.cluster.local` | ClusterIP               | 全集群唯一 FQDN                         |
+| `pod-ip`（headless Service）              | 各 Pod IP，不做负载均衡 | StatefulSet 场景                        |
 
 普通 Service 解析成 ClusterIP；只有 clusterIP 为 None 的 headless Service 才会把名字直接解析成后端 Pod IP 列表，这也是 StatefulSet 能靠稳定域名互相寻址的基础。集群外部域名则不会被拦截，CoreDNS 配置里的 forward 插件会把它转发给宿主机上游 DNS。
 
@@ -915,50 +915,6 @@ nginx 容器
 - 想固定就显式声明 `nodePort: 30080`。
 - 只有 `type: NodePort` 或 `LoadBalancer` 才有 nodePort；`ClusterIP` 类型只有 port/targetPort。
 - `selector` 决定流量转发给哪些 Pod（按标签匹配）。
-
-### web-deploy.yaml 逐字段详解
-```yaml
-# web-deploy.yaml：先部署一组 Pod（3 个副本）
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  labels:
-    app: web
-  name: web01
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: web
-  template:
-    metadata:
-      labels:
-        app: web
-    spec:
-      containers:
-      - image: nginx:1.14
-        name: nginx
-```
-- metadata.labels.name是该deployment资源的名字
-- metadata.labels.app是deployment资源所属组的名字
-- spec.selector.matchLabels.app是认领条件，表示deployment控制器只管理app=web的pod
-- spec.template.metadata.labels.app是每个pod身上的标签。
-#### apiVersion
-- v1代表核心组，包括Pod、Service、ConfigMap、Secret、PV、PVC、Namespace、ServiceAccount等
-- apps/v1代表apps组，包括Deployment、StatefulSet、DaemonSet、ReplicaSet等
-
-### 调谐与调度
-调谐（Reconcile）和调度（Schedule）是两件不同的事：
-- 调谐：由各类控制器（Deployment 控制器、ReplicaSet 控制器等）负责。控制器不断对比"期望状态 spec"和"实际状态 status"，发现不一致就驱动系统向 spec 收敛。比如前面讲的：副本数预期 3 个，某个 Pod 挂了，控制器发现实际比期望少 1 个，就重新创建一个补齐。
-- 调度：由 kube-scheduler 负责，决定"新建的 Pod 放到哪个节点上运行"。Pod 创建后处于 Pending，调度器根据节点资源、节点亲和性、污点容忍等条件挑一个合适的节点。
-一句话区分：**调谐管"数量对不对"，调度管"放哪台机器"。**
-
-### spec与status
-- `spec`（specification）：**期望状态**。就是你在 yaml 里写的"我想要什么"，比如 `replicas: 3`、`image: nginx:1.14`。声明式配置，由用户定义，控制器无权改它。
-- `status`：**实际状态**。由控制器回填的"当前实际情况"，比如当前实际有几个副本、就绪几个、处于什么阶段。用户不用写也不用改，yaml 里的 `status: {}` 只是占位。
-- 调谐循环：控制器读 spec → 对比 status → 执行动作（创建/删除/更新）→ 更新 status → 再来一遍，直到 status 与 spec 一致。
-- 看 `kubectl get deployment` 的 DESIRED / CURRENT / READY 三列：DESIRED 来自 `spec.replicas`，CURRENT 和 READY 来自 `status` 里的 `replicas`、`readyReplicas`。
-- 想看填充后的 status：`kubectl get deployment web -o yaml`，最下面的 `status:` 段就是控制器写好的实际状态。
 
 ### Job与CronJob
 前面讲的 Deployment 管的都是"长驻服务"——Pod 挂了就补，永远保持副本数。但有些任务天生是"跑完就走"的：数据备份、批量计算、发一次通知。这类工作负载就是 **Job**（一次性任务）：
@@ -1082,3 +1038,58 @@ nerdctl -n k8s.io pull nginx:1.25    # 直接拉进 K8s 用的命名空间
 nerdctl -n k8s.io tag nginx:1.25 myrepo/nginx:1.25   # 或跨命名空间打标签迁移
 ```
 一句话记忆：`nerdctl -n` 管镜像和容器存哪，`kubectl -n` 管 K8s 对象放哪，容器里面的隔离是内核的事。
+
+### 调谐与调度
+调谐（Reconcile）和调度（Schedule）是两件不同的事：
+- 调谐：由各类控制器（Deployment 控制器、ReplicaSet 控制器等）负责。控制器不断对比"期望状态 spec"和"实际状态 status"，发现不一致就驱动系统向 spec 收敛。比如前面讲的：副本数预期 3 个，某个 Pod 挂了，控制器发现实际比期望少 1 个，就重新创建一个补齐。
+- 调度：由 kube-scheduler 负责，决定"新建的 Pod 放到哪个节点上运行"。Pod 创建后处于 Pending，调度器根据节点资源、节点亲和性、污点容忍等条件挑一个合适的节点。
+一句话区分：**调谐管"数量对不对"，调度管"放哪台机器"。**
+
+### spec与status
+- `spec`（specification）：**期望状态**。就是你在 yaml 里写的"我想要什么"，比如 `replicas: 3`、`image: nginx:1.14`。声明式配置，由用户定义，控制器无权改它。
+- `status`：**实际状态**。由控制器回填的"当前实际情况"，比如当前实际有几个副本、就绪几个、处于什么阶段。用户不用写也不用改，yaml 里的 `status: {}` 只是占位。
+- 调谐循环：控制器读 spec → 对比 status → 执行动作（创建/删除/更新）→ 更新 status → 再来一遍，直到 status 与 spec 一致。
+- 看 `kubectl get deployment` 的 DESIRED / CURRENT / READY 三列：DESIRED 来自 `spec.replicas`，CURRENT 和 READY 来自 `status` 里的 `replicas`、`readyReplicas`。
+- 想看填充后的 status：`kubectl get deployment web -o yaml`，最下面的 `status:` 段就是控制器写好的实际状态。
+
+### apiversion
+
+apiVersion 表示这个资源对象交给 API Server 的哪个"接口组 + 版本"处理，格式是 `组名/版本`。它决定了 yaml 里剩下的字段长什么样——同一个资源在不同版本下能写的字段可能不一样，apiserver 内部会做版本间转换。
+
+**命名规则：**
+
+- 格式统一为 `GROUP/VERSION`，例如 `apps/v1`、`batch/v1`、`networking.k8s.io/v1`
+- 最基础的一批资源没有组名，直接写 `v1`，叫核心组（core group）——Pod、Service、Namespace、ConfigMap、Secret 都在这组。这正是 RBAC 规则里 apiGroups 写 `""` 空字符串的原因：空串就代表核心组
+- 版本后缀代表成熟度：`v1alpha1` 是实验性（默认关闭、随时废弃）；`v1beta1` 是测试版（可用但字段可能变化）；`v1` 是稳定版（承诺兼容）。生产 yaml 一律用稳定版
+
+**常见 API 组速查：**
+
+| apiVersion                     | 常见资源                                                                  |
+| ------------------------------ | ------------------------------------------------------------------------- |
+| `v1`（核心组）                 | Pod、Service、Namespace、ConfigMap、Secret、Node、PV、PVC、ServiceAccount |
+| `apps/v1`                      | Deployment、StatefulSet、DaemonSet、ReplicaSet                            |
+| `batch/v1`                     | Job、CronJob                                                              |
+| `networking.k8s.io/v1`         | Ingress、NetworkPolicy                                                    |
+| `rbac.authorization.k8s.io/v1` | Role、ClusterRole、RoleBinding、ClusterRoleBinding                        |
+| `autoscaling/v1、v2`           | HPA（HorizontalPodAutoscaler）                                            |
+| `policy/v1`                    | PodDisruptionBudget                                                       |
+| `storage.k8s.io/v1`            | StorageClass                                                              |
+
+组名有规律可记：资源类别和组名基本对应——网络相关的在 networking 组、权限相关的在 rbac 组、批量任务在 batch 组、工作负载在 apps 组。同一个资源可能存在多个版本（如 HPA 同时有 v1/v2），推荐用最新的稳定版本。
+
+**记不住时这样查：**
+
+```bash
+# 列出当前集群支持的所有组/版本
+kubectl api-versions
+
+# 列出所有资源及其所属组和简称（deploy 对应 apps/v1 就是在这里查的）
+kubectl api-resources
+
+# 看某个资源该用哪个 apiVersion（VERSION 行）以及能写哪些字段
+kubectl explain deployment
+```
+
+
+
+
