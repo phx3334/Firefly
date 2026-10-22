@@ -342,9 +342,33 @@ Prometheus 想抓到这些指标，需要：`kubernetes_sd_configs` 服务发现
 | `ServiceMonitor`                                 | 声明要监控的 Service（有 Service 时首选,通过 ServiceMonitor背后所有健康 Pod 的 IP 列表,绕过负载均衡， |
 | 直接对每个 Pod 的 IP:port 分别发 /metrics 请求） |
 | `PodMonitor`                                     | 直接监控 Pod（无 Service 的 Job/DaemonSet 场景）                                                      |
+| `ScrapeConfig`                                   | 抓取 K8s 之外的目标（静态 IP、云厂商托管服务的Exporter等）                                            |
 | `Probe`                                          | 黑盒探测 Ingress 或静态目标                                                                           |
 | `PrometheusRule`                                 | 告警/录制规则                                                                                         |
 | `AlertmanagerConfig`                             | 自定义告警路由                                                                                        |
+
+ServiceMonitor 和 PodMonitor 都只认 K8s 内的资源，目标在集群外面就轮到 **ScrapeConfig** 出场——它是"手写 scrape 配置"和"Operator 自动发现"之间的桥：传统方式要在 Prometheus 配置文件里写 `static_configs`、`kubernetes_sd_configs`，改一次配置就得动 Secret 或重启；ScrapeConfig 把这份能力做成 CRD，声明的目标由 Operator 自动渲染进 Prometheus 配置并热加载。典型场景：部署在虚拟机上的 MySQL/Redis exporter、云厂商托管的负载均衡指标、打在 LB 后面的黑盒探测目标。
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ScrapeConfig
+metadata:
+  name: vm-exporters
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack   # 同样必须匹配 selector
+spec:
+  staticConfigs:                     # 静态目标：集群外虚拟机上的 exporter
+    - targets:
+        - 10.0.1.5:9104              # mysqld-exporter
+        - 10.0.1.6:9121              # redis-exporter
+      labels:
+        env: prod
+  scrapeInterval: 30s
+  metricsPath: /metrics
+```
+
+它还支持 `httpSDConfigs`（基于 HTTP 的服务发现）、`kubernetesSDConfigs`（细粒度定制 K8s 发现规则）等，等于把原生 scrape 配置的全部能力搬进了 K8s 声明式世界。选型逻辑一句话：目标在集群内且有 Service 用 ServiceMonitor，无 Service 用 PodMonitor，目标在集群外用 ScrapeConfig，黑盒探测用 Probe。
 
 ### 安装kube-prometheus-stack
 [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) 是 Prometheus Operator 的开箱即用全家桶：预置了 K8s 常用指标的抓取策略、relabel 规则和告警规则，并附带 kube-state-metrics（导出工作负载指标）、node-exporter（导出节点内核级指标）等组件。  
