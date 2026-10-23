@@ -9,6 +9,8 @@ draft: false
 lang: '中文'
 ---
 
+
+
 ## Operator
 
 ### 为什么需要 Operator
@@ -56,6 +58,10 @@ Reconcile 被触发，拿到最新 CR
    ▼
 结束并返回，等待下一次触发
 ```
+
+这里还藏着 Operator 最有价值的一步：**一个 CR 被翻译成一整套资源**。Reconcile 的代码里没有"创建 StatefulSet"这一条硬编码动作，而是一段翻译逻辑——读取 CR 的 spec（几个分片、什么镜像、多大存储），然后按这段逻辑构造出需要的**所有**原生资源：StatefulSet 管 Pod、Headless Service 给 Pod 稳定域名、Secret 存密码、ConfigMap 存配置、PVC 模板管存储，一个不落全部提交给 API Server。也就是说用户只写了一份额外的 YAML（CR），得到的是一个完整的、带领域规则的软件系统——这比 Helm 这类"模板渲染"强在翻译过程是**代码**：主从怎么配、扩容先动谁、密码忘了就重新生成，这些带分支判断的运维知识都能写进去。本文示例为了聚焦只演示了 StatefulSet 一个资源，真实 Operator 的 Reconcile 里通常是连续十几个 CreateOrUpdate，把整套资源逐个对齐。
+
+由此带来一条使用纪律：**不要直接改 Operator 自动生成的资源，要改就改 CR**。因为这些资源的 owner 是控制器——水平触发意味着每次 Reconcile 都会把现实往 spec 拉回来，你手动给 StatefulSet 改个参数、加个配置，下一次调谐就原样变回去了，改动"看起来生效了"实际只是活到下一次 Reconcile。这不是 bug，恰恰是声明式模型在维护领域规则：凡是需要变更的地方，CR 的 spec 里都留了参数，改 CR 后控制器会自动把整套资源重新翻译对齐。真遇到 Operator 没暴露的定制需求，正确路径是给上游提需求或自己 fork 修改，而不是抢控制器的方向盘。
 
 两个关键设计：
 - **水平触发（level-triggered）**：Reconcile 不是"收到事件执行一次就完"的边缘触发，而是随时可以被再次触发。哪怕 Operator 重启、错过事件，下一次 Reconcile 依然会对比 spec 与现实并补齐差异，所以逻辑必须**幂等**——执行一次和执行十次结果相同
@@ -250,4 +256,3 @@ kubectl get redisclusters
 
 ### 小结
 回到最初的问题：Operator 解决的是"K8s 不懂你的应用"这个矛盾。CRD 把领域知识翻译成 API Server 能存储的声明，控制器把声明翻译成集群能执行的操作。写一个生产级 Operator 的复杂度主要在故障处理和升级逻辑上，但骨架始终是本文这一套：**定义 Spec/Status → 实现 Reconcile → 保持幂等 → 依赖水平触发自动收敛**。
-

@@ -40,6 +40,7 @@ kubectl create namespace loki-stack
 ```yaml
 deploymentMode: SingleBinary
 loki:
+  auth_enabled: true               # 多租户开关，显式写出来与下文多租户章节对应
   querier:
     multi_tenant_queries_enabled: true
   commonConfig:
@@ -53,8 +54,14 @@ loki:
     s3:
       endpoint: cos.ap-hongkong.myqcloud.com
       region: ap-hongkong
-      secretAccessKey: <your-secret-access-key>  
-      accessKeyId: <your-access-key-id>
+      # 密钥不写进 values（避免明文入库），先创建 Secret：
+      # kubectl create secret generic loki-s3-credentials \
+      #   -n loki-stack \
+      #   --from-literal=access_key_id=<your-access-key-id> \
+      #   --from-literal=secret_access_key=<your-secret-access-key>
+      existingSecret:
+        name: loki-s3-credentials
+        type: s3                 # Secret 中需包含 access_key_id / secret_access_key 两个 key
   schemaConfig:
     configs:
       - from: "2026-09-01"   
@@ -93,9 +100,8 @@ helm install loki grafana/loki -n loki-stack -f loki.values.yaml
 | 容器业务日志       | Pod 写到 stdout/stderr，落到节点 `/var/log/pods/` | kubelet 自动轮转（默认单文件 10Mi、每容器保留 5 个），Promtail 只负责采集        |
 | 节点宿主机系统日志 | 内核、SSH 登录、sudo、cron 等                     | rsyslog 负责落盘，logrotate 负责切分压缩，发行版默认已装好并配置，一般无需手动改 |
 | Loki 后端存储      | COS 中的 chunk 和索引对象                         | 上面 values 里的 compactor retention，按保留期定期删除                           |
-云原生时代业务都容器化跑在 K8s 上，前两层开箱即用，**真正需要主动配置的只有第三层**。注意 `index.period: 24h` 只是**切分**索引（每天滚动一张新表、旧表转只读），并不会删除数据；不开启 compactor，COS 桶会只增不减。上面 values 中的字段含义：
+云原生时代业务都容器化跑在 K8s 上，前两层开箱即用，**真正需要主动配置的只有第三层**。注意 `index.period: 24h` 只是**切分**索引（每天滚动一张新表、旧表转只读），并不会删除数据；不开启 compactor，COS 桶会只增不减。values 里最关键的是 `storage` 段，它决定 Loki 数据存哪、怎么存。
 
-### COS对象存储
  `filesystem`字段（本地存储）只适合 Demo：日志写在 Pod 所在节点的磁盘上，Pod 漂移或节点故障就会丢数据，且磁盘容量有限、无法多副本共享。生产环境一般换成 S3 兼容的对象存储(storage下面写对象存储的配置)，此外云平台上的对象存储的容量几乎是无限的
 
 ### 多租户
@@ -131,7 +137,7 @@ Promtail 以 **DaemonSet** 方式部署，保证每个 Node 节点运行一个�
 config:
   clients:
     - url: http://loki-gateway/loki/api/v1/push   # 推送到 Loki 网关
-      tenant_id: 1                                # 租户ID，必须配置，且要与 Grafana 请求头一致
+      tenant_id: 100                              # 租户ID，必须配置，且要与 Grafana 数据源的 X-Scope-OrgID 请求头一致
 ```
 
 安装： 
@@ -178,19 +184,19 @@ LogQL 是 Loki 的查询语言，语法由两部分组成：
 结构化之后才能针对**字段值**做精确筛选和数值运算，原始非结构化文本只能做关键字 grep。
 
 **用解析器提取字段**：
-```sql
+```text
 {app="loki"} |= "metrics.go" | logfmt | duration > 10ms
 {app="loki"} | json | status=200
 ```
 
 **重写日志输出格式**（必须先经过解析器）：
-```sql
+```text
 #重写后，单个日志内容只包括状态码和耗时
 {app="loki"} |= "metrics.go" | logfmt | line_format "{{.status}} {{.duration}}"   
 ```
 
 **从日志直接算指标**：
-```sql
+```text
 quantile_over_time(0.99,
   {app="loki"} |= "metrics.go" | logfmt | unwrap duration(duration) [1m]
 ) by (status)
@@ -204,7 +210,7 @@ quantile_over_time(0.99,
 ### Pod日志存在哪里
 K8s 中所有 Pod 写到 stdout/stderr 的内容，会被容器运行时（Docker/containerd）自动落到宿主机的日志目录`/var/log/pods/*`
 ### Promtail如何采集到这些日志
-Promtail 以 DaemonSet（确保每个节点上都恰好运行一个该 Pod 的副本） 部署后，通过 **hostPath** 将自己的目录文件挂载到宿主机的`/var/log/pods/`,也就是写进宿主机`/var/log/pods/`的日志其实是写到Promtail这个容器的`/var/log/pods`目录下了。
+Promtail 以 DaemonSet（确保每个节点上都恰好运行一个该 Pod 的副本） 部署后，通过 **hostPath** 把宿主机的 `/var/log/pods/` 以只读方式挂载进容器——日志是容器运行时写到宿主机的，Promtail 只是**共享读**这份目录，自己不落盘也不影响日志写入。
 ```yaml
 volumeMounts:
   - name: pods
@@ -215,7 +221,7 @@ volumes:
     hostPath:
       path: /var/log/pods
 ```
-同时还会挂载 `/var/lib/docker/containers` 等目录以获取容器元数据（用于自动打上 app、namespace、node 等标签）。
+同时还会挂载 `/var/log/pods` 下软链指向的容器日志目录（Docker 运行时是 `/var/lib/docker/containers`，containerd 是 `/var/lib/containerd/`）以获取容器元数据（用于自动打上 app、namespace、node 等标签）。`/var/log/pods` 里的日志文件本身就是软链接，顺着链接读正文就得挂载真实目录。
 
 ### 完整数据流
 ```
@@ -287,10 +293,13 @@ flowchart TD
 #### 单片模式
 - 通过-target=all命令以单片模式启动
 - 单个进程内以二进制文件方式运行所有核心组件
-- 每天最多支持20GB左右的日志读写量，适合demo
+- 每天最多支持20GB左右的日志读写量（经验值，视硬件配置而定），适合demo
 #### 简单可扩展模式
 - 写入组件和读取组件可独立部署和扩展，需要部署反向代理(Nginx)分发读写请求
-- 所有组件使用相同镜像，通过启动参数区分功能-target=write: 启动写入组件(有状态)-target=read: 启动读取组件(无状态)-target=backend: 启动后端服务组件(有状态)
+- 所有组件使用相同镜像，通过启动参数区分功能：
+  - `-target=write`：启动写入组件（有状态）
+  - `-target=read`：启动读取组件（无状态）
+  - `-target=backend`：启动后端服务组件（有状态）
 - 适用于每天几TB级别的日志量
 - 默认包含Gateway(Nginx)负责请求分发
 #### 微服务架构
@@ -316,7 +325,7 @@ flowchart TD
 
 这些端点手动就能访问，可以先直观感受一下。启动本地代理后：
 ```bash
-#因为kubectl没有对应获取这些指标的命令，所有只能采取这个方式
+#因为kubectl没有对应获取这些指标的命令，所以只能采取这个方式
 kubectl proxy   # 默认监听 127.0.0.1:8001
 # 1. cAdvisor 指标 —— 容器级别的细节指标
 curl http://127.0.0.1:8001/api/v1/nodes/node1/proxy/metrics/cadvisor
@@ -329,18 +338,14 @@ curl http://127.0.0.1:8001/api/v1/nodes/node1/proxy/metrics/probes
 - `container_cpu_usage_seconds_total`：CPU 使用时间（Counter 类型，通过 rate 算出使用率）
 - `container_memory_working_set_bytes`：内存工作集——**这是 OOM 判断依据**，超过 limit 即被驱逐
 - `container_start_time_seconds` / `container_last_seen`：容器启动时间与最后可见时间
-- `prober_probe_duration_seconds`：按 Liveness/Readiness 分类统计的探针耗时
-
-### 手动配置抓取有多复杂
-Prometheus 想抓到这些指标，需要：`kubernetes_sd_configs` 服务发现、Bearer Token 认证、TLS 配置、relabel 标签重写……从零手写 scrape 配置繁琐且难维护，K8s 上一般不这么干，而是使用 **Prometheus Operator**。
+- `prober_request_duration_seconds`：按 Liveness/Readiness 分类统计的探针耗时
 
 ### Prometheus Operator：用CRD管理监控
 通过 CRD 把 Prometheus 和 Alertmanager 也变成 K8s 资源，并通过标签选择器自动发现监控目标，无需手写服务发现和认证配置。
 | CRD                                              | 作用                                                                                                  |
 | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
 | `Prometheus` / `Alertmanager`                    | 部署类，以 StatefulSet 形式运行                                                                       |
-| `ServiceMonitor`                                 | 声明要监控的 Service（有 Service 时首选,通过 ServiceMonitor背后所有健康 Pod 的 IP 列表,绕过负载均衡， |
-| 直接对每个 Pod 的 IP:port 分别发 /metrics 请求） |
+| `ServiceMonitor`                                 | 声明要监控的 Service（有 Service 时首选）：通过 Service 背后所有健康 Pod 的 IP 列表，绕过负载均衡，直接对每个 Pod 的 IP:port 分别发 /metrics 请求 |
 | `PodMonitor`                                     | 直接监控 Pod（无 Service 的 Job/DaemonSet 场景）                                                      |
 | `ScrapeConfig`                                   | 抓取 K8s 之外的目标（静态 IP、云厂商托管服务的Exporter等）                                            |
 | `Probe`                                          | 黑盒探测 Ingress 或静态目标                                                                           |
@@ -370,30 +375,144 @@ spec:
 
 它还支持 `httpSDConfigs`（基于 HTTP 的服务发现）、`kubernetesSDConfigs`（细粒度定制 K8s 发现规则）等，等于把原生 scrape 配置的全部能力搬进了 K8s 声明式世界。选型逻辑一句话：目标在集群内且有 Service 用 ServiceMonitor，无 Service 用 PodMonitor，目标在集群外用 ScrapeConfig，黑盒探测用 Probe。
 
+### Prometheus 核心资源定义
+
+表格里这些 CRD 各自的 YAML 长什么样？逐个写出最常用的几类。
+
+**Prometheus：声明一个 Prometheus 实例本身**。Operator 会按它创建一个 StatefulSet 跑 Prometheus，字段的写法和原生工作负载很相似：
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: Prometheus
+metadata:
+  name: main
+  namespace: monitoring
+spec:
+  replicas: 2                      # 副本数，两份各自抓全量数据实现 HA
+  retention: 15d                   # 本地数据保留时长
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+  serviceMonitorSelector:          # 关键：抓取哪些 ServiceMonitor
+    matchLabels:
+      release: kube-prometheus-stack
+  ruleSelector:                    # 加载哪些 PrometheusRule 里的告警规则
+    matchLabels:
+      release: kube-prometheus-stack
+  scrapeConfigSelector:            # 认领哪些 ScrapeConfig（集群外目标）
+    matchLabels:
+      release: kube-prometheus-stack
+```
+
+`serviceMonitorSelector` 是 Operator 模式的精髓：**抓取配置从"手写配置文件"变成了"按标签认领"**——任何 namespace 里的 ServiceMonitor，只要标签匹配这个 selector，里面的抓取目标就自动生效，Prometheus 配置由 Operator 重新渲染并热加载，全程不碰配置文件不重启。没被 selector 认领的 CR 写了也不生效，这是新手上手最常见的坑（kube-prometheus-stack 默认认领 `release: kube-prometheus-stack` 标签）。
+
+**ServiceMonitor：声明"要抓哪些 Service"**。它通过标签选中 Service，再由 Service 拿到背后所有健康 Pod 的 Endpoints 列表，对每个 Pod 的 IP:port 分别抓取——绕过负载均衡，拿到的是每个实例各自的真实指标：
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: web-monitor
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack # 必须匹配上面 Prometheus 的 serviceMonitorSelector
+spec:
+  selector:
+    matchLabels:
+      app: web                     # 选中带 app=web 标签的 Service
+  namespaceSelector:
+    matchNames:
+    - prod                         # 只在 prod namespace 里找这些 Service
+  endpoints:
+  - port: metrics                  # 抓 Service 的哪个端口名（Service 里的 ports[].name）
+    interval: 30s                  # 抓取间隔
+    path: /metrics
+```
+
+**PodMonitor：绕过 Service 直接抓 Pod**。Job、DaemonSet 这类没有（或不需要）Service 的工作负载用它：
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: sync-jobs
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: data-sync               # 直接按标签选中 Pod
+  podMetricsEndpoints:
+  - port: metrics
+    interval: 30s
+```
+
+**PrometheusRule：告警与录制规则**。传统方式写在规则文件里，现在是 CR；表达式语法与原生完全一致：
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: web-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack # 必须匹配 Prometheus 的 ruleSelector
+spec:
+  groups:
+  - name: web.rules
+    rules:
+    - record: job:http_error_rate:5m          # 录制规则：把常用表达式存成新指标
+      expr: |
+        sum(rate(http_requests_total{status=~"5.."}[5m])) by (job)
+        /
+        sum(rate(http_requests_total[5m])) by (job)
+    - alert: HighErrorRate                    # 告警规则：持续 10 分钟错误率超 5% 就触发
+      expr: job:http_error_rate:5m > 0.05
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "{{ $labels.job }} 错误率过高"
+        description: "5 分钟错误率 {{ $value | humanizePercentage }}，已持续 10 分钟"
+```
+
+**Alertmanager：接住告警并路由**。`Alertmanager` CR 声明实例本身，路由和接收器默认全在全局 Secret 里配置；想按 namespace/团队拆分路由权限时，再用 `AlertmanagerConfig` CR 声明局部路由——它按告警标签匹配，把特定告警发给特定接收器：
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: AlertmanagerConfig
+metadata:
+  name: team-a-routing
+  namespace: monitoring
+spec:
+  route:
+    matchers:
+    - name: severity
+      value: warning
+    receiver: team-a-webhook
+    groupWait: 30s                  # 同组告警聚合等待
+    repeatInterval: 4h              # 未恢复时重复通知间隔
+  receivers:
+  - name: team-a-webhook
+    webhookConfigs:
+    - url: http://alert-gateway.monitoring/team-a
+```
+
+**ScrapeConfig 与 Probe：目标在集群外时**。这两类 CRD 补齐表格剩下的两个：`ScrapeConfig` 负责 K8s 之外的静态目标（虚拟机上的 MySQL/Redis exporter、云托管服务），上一节已给出完整 YAML；`Probe` 负责黑盒探测（站在用户视角探 URL 活不活），配套的 blackbox-exporter 和 YAML 在后面"黑盒监控"一节展开，这里先记住分工：**ServiceMonitor/PodMonitor 认集群内的 Service/Pod，ScrapeConfig 认集群外的静态目标，Probe 走探测**。
+
+几个资源串起来的完整链路：**ServiceMonitor/PodMonitor/ScrapeConfig/Probe 提供数据源 → Prometheus 按 selector 认领它们并抓取 → PrometheusRule 定义告警表达式 → 触发的告警发给 Alertmanager → AlertmanagerConfig 决定发给谁**。每个环节都是"写 CR + 贴对标签"，这就是 Operator 模式的全部日常。
+
 ### 安装kube-prometheus-stack
 [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) 是 Prometheus Operator 的开箱即用全家桶：预置了 K8s 常用指标的抓取策略、relabel 规则和告警规则，并附带 kube-state-metrics（导出工作负载指标）、node-exporter（导出节点内核级指标）等组件。  
-**注意**：它默认捆绑安装一套 Grafana，而上文已经装过 Grafana 了，直接复用即可，把捆绑的关掉。编写 `prometheus.values.yaml`：
+**注意**：它默认捆绑安装一套 Grafana，而上文已经装过 Grafana 了，直接复用即可，把捆绑的关掉。编写 `prometheus.values.yaml`，将 `grafana.enabled` 设为 `false`：
 ```yaml
 grafana:
-  enabled: false    # 复用上文已装的 Grafana，关闭捆绑的
-
+  enabled: false          # 复用上文已装的 Grafana，不重复部署
 prometheus:
   prometheusSpec:
-    # 默认只认 Helm release 标签匹配的 CRD，跨 release / 手动部署的
-    # ServiceMonitor、Probe 会不生效——这是最常见的坑
-    serviceMonitorSelectorNilUsesHelmValues: false
-    podMonitorSelectorNilUsesHelmValues: false
-    probeSelectorNilUsesHelmValues: false
-    retention: 7d                     # 指标本地只保留7天
-    storageSpec:                      # 持久化，避免重启丢指标
-      volumeClaimTemplate:
-        spec:
-          storageClassName: cbs
-          resources:
-            requests:
-              storage: 10Gi
-    externalLabels:
-      cluster: k3s-demo               # 多集群场景打标，区分指标来源
+    retention: 15d        # 本地数据保留 15 天
 ```
 安装：
 ```bash
@@ -428,7 +547,7 @@ metadata:
     release: kube-prometheus-stack   # 必须与 Prometheus 的 probeSelector 匹配
 spec:
   interval: 10s                      # 探测间隔
-  module: http_200                  # 检测模块：HTTP 返回 200 视为存活
+  module: http_2xx                  # 检测模块：HTTP 返回 2xx 视为存活（blackbox-exporter 默认模块名）
   prober:
     url: blackbox-exporter-prometheus-blackbox-exporter.monitoring:9115  # exporter 地址
   targets:
@@ -474,9 +593,61 @@ spec:
       path: /metrics                 # 指标接口路径
       interval: 15s                  # 抓取间隔
 ```
-匹配链路：ServiceMonitor 通过 label 选中 Service → 经 Service 的 Endpoints 定位后端 Pod → 抓取 `/metrics`。**选型**：有 Service 用 ServiceMonitor（借助负载均衡一次匹配多个 Pod）；无 Service（Job/DaemonSet）直接用 PodMonitor。团队协作上，工程团队只需保证 `/metrics` 接口，基础设施团队负责 CRD 编写，二者解耦。
+匹配链路：ServiceMonitor 通过 label 选中 Service → 经 Service 的 Endpoints 定位后端 Pod → 对每个 Pod 的 IP:port 分别抓取 `/metrics`。**选型**：有 Service 用 ServiceMonitor（自动发现背后全部健康 Pod）；无 Service（Job/DaemonSet）直接用 PodMonitor。团队协作上，工程团队只需保证 `/metrics` 接口，基础设施团队负责 CRD 编写，二者解耦。
 
 抓取生效后，Prometheus 会自动给指标附加 `instance`、`namespace`、`service`、`pod`、`container` 等标签，查询时可按这些维度分组定位，类似日志查询的用法。
+
+### 云原生应用与 Exporter：谁有 /metrics，谁没有
+
+上面所有抓取方式都指向同一个前提：目标必须自己暴露 `/metrics` 接口。这个接口不是 K8s 强制的，而是 Prometheus 社区把"暴露 Prometheus 格式文本"做成了事实标准——**云原生应用天生带这条路**：用 Go/Java/Python 写、引入 Prometheus SDK 的服务，几行代码就能挂上 `/metrics`；K8s 生态的组件（kubelet、node-exporter、etcd、CoreDNS）全部原生支持。应用自己在指标里报数，这是**白盒监控**的直接形态。
+
+但 Redis、MySQL 这些**非云原生应用没有 `/metrics`**——它们是十几年前就定型的二进制程序，只说自己的方言协议（Redis 的 RESP、MySQL 的 MySQL 协议），不会说 HTTP，更不会输出 Prometheus 格式。而它们的运行状态又必须监控，怎么办？
+
+**Exporter 就是翻译官**：一个独立运行的辅助进程，用自己的方言协议连上目标应用，定期查询它的内部状态，再把查询结果翻译成 Prometheus 指标，在自己的 `/metrics` 端点暴露出来：
+
+```text
+mysqld-exporter：
+  用监控账号登录 MySQL → 执行 SHOW GLOBAL STATUS / SHOW SLAVE STATUS
+  → 翻译成 mysql_up、mysql_global_status_threads_connected、mysql_slave_status_seconds_behind_master
+  → 暴露在自己的 :9104/metrics
+
+redis-exporter：
+  向 Redis 发 INFO 命令 → 解析返回的键值
+  → 翻译成 redis_up、redis_connected_clients、redis_memory_used_bytes
+  → 暴露在自己的 :9121/metrics
+```
+
+Prometheus 社区已经为几乎所有主流软件写好了官方 exporter（MySQL、Redis、Kafka、RabbitMQ、Nginx、黑盒探测……），使用时不需要写代码，部署 exporter 并给它目标应用的连接凭证即可。exporter 本身以普通 Deployment 跑在集群里，前面挂一个 Service——这就是下面流程图里的 **Exporter Service** 这一层；集群外的 exporter（比如部署在虚拟机上监控 VM 里的 MySQL）则由 **ScrapeConfig** 声明抓取。
+
+### Prometheus 监控全流程
+
+一张图把两条抓取路径收拢：
+
+![Prometheus 监控流程：云原生应用自带 /metrics 由 ServiceMonitor 直接抓取，Redis/MySQL 等非云原生应用经 Exporter 翻译后由 ScrapeConfig 抓取，两条路径最终汇入 Prometheus 存储](./images/Prometheus-monitor.png)
+
+对照图把完整链路走一遍：
+
+```text
+Prometheus（按 scrape 配置周期性 pull，一切以拉为主）
+        │
+        ├── 路径①（云原生应用）：ServiceMonitor 按 label 选中应用 Service
+        │      → 拿到背后健康 Pod 的 IP 列表，逐个 Pod 直接 GET /metrics
+        │      → 应用自己报数（请求量、延迟、错误率……）
+        │
+        └── 路径②（非云原生应用）：ScrapeConfig 声明 exporter 的地址
+               → GET Exporter Service 的 /metrics
+               → exporter 用方言协议查询目标应用（INFO / SHOW ...）
+               → 把状态翻译成 Prometheus 指标返回
+        │
+        ▼
+所有样本打上 job/instance/namespace 标签，存入 TSDB
+        │
+        ▼
+Grafana 经 PromQL 查询出图；PrometheusRule 定义的表达式
+被持续求值，超过阈值触发告警推给 Alertmanager
+```
+
+两条路径的分界线就一句话：**应用会说 Prometheus 的话就直接对话，不会就派 exporter 当翻译**——但对 Prometheus 而言二者没有区别，它抓到的永远是一个标准的 `/metrics` 端点。这也解释了为什么 node-exporter、blackbox-exporter 都叫"exporter"：节点、DNS、HTTPS 网站同样不会主动报数，同样需要翻译官。
 
 ### Prometheus+Grafana获取指标流程图
 
@@ -512,12 +683,12 @@ probe_http_status_code、probe_duration_seconds、probe_ssl_earliest_cert_expiry
 ### PromQL查询指标
 PromQL 与 LogQL 语法同源，都是"指标选择器 + 标签选择器"定位数据：
 
-```sql
+```text
 # 1. 查特定指标
-http_request_total{app="go-app"}
+http_requests_total{app="go-app"}
 
 # 2. 各接口平均QPS：rate计算1分钟变化速率（适用于Counter），sum by按接口路径分组
-sum by(path) (rate(http_request_total[1m]))
+sum by(path) (rate(http_requests_total[1m]))
 
 # 3. P95延迟：_bucket是直方图分桶数据，le是桶边界
 histogram_quantile(0.95,
@@ -531,8 +702,32 @@ P95 的执行顺序：取原始分桶数据 → 计算各桶变化速率 → 按
 **选型建议**：
 - 需要跨实例聚合、了解分布范围 → **Histogram**
 - 需要精确分位数且不聚合 → **Summary**
-- 生产实践中抓取配置不要用 Pod annotation 方式，**优先 ServiceMonitor/PodMonitor**：配置解耦、支持多端口/认证/标签等高级功能
 
+
+## 部署Tempo
+Loki 管日志、Prometheus 管指标，第三支柱**链路（Traces）需要一个存储后端**。这里选 Grafana 家的 Tempo：专为分布式追踪设计，对象存储做底座（和 Loki 同款思路，成本低），原生接收 OTLP 协议——OTel SDK 的数据可以直接推给它，无需再装 Jaeger。
+
+最小配置安装：
+```bash
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+helm install tempo grafana/tempo -n monitoring
+```
+
+安装后同样在 Grafana 里添加数据源，URL 指向 `http://tempo.monitoring:3100`。**再回到 Prometheus 数据源的设置里开启 Exemplar 关联**：在 `exemplarTraceIdDestinations` 中填入 Tempo 数据源和 `trace_id` 字段名，图表上的绿点才能点击跳转到 Tempo（Grafana UI 里勾选 "Enable Exemplar data" 并选关联的 Trace 数据源即可，等效于下面的 YAML）：
+
+```yaml
+# Grafana Prometheus 数据源 provisioning 配置节选
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    jsonData:
+      exemplarTraceIdDestinations:
+        - name: trace_id        # 指标 exemplar 中存 TraceID 的字段名
+          datasourceUid: tempo  # 跳转目标：Tempo 数据源的 uid
+```
+
+至此三支柱的后端全部就位：Loki（日志）+ Prometheus（指标）+ Tempo（链路）。
 
 ## 集成OTEL SDK
 平台侧（Prometheus/Loki/Grafana）已就绪，现在轮到**应用侧**：接入 OpenTelemetry SDK，把三大支柱从应用里交出来，并用 trace_id 把它们缝在一起。分工原则：**组件监控靠配置（K8s 组件天生暴露 /metrics），业务可观测性必须代码埋点**（链路、业务指标、日志关联，配置变不出来）。
@@ -579,7 +774,7 @@ def setting_otlp(app, app_name, endpoint):
         "service.name": app_name,
         "app": app_name,                  # 自定义标签，Grafana 面板筛选用
     })
-    # TracerProvider + 批量处理器：Span 攒一批经 OTLP (gRPC)v 推给 Tempo
+    # TracerProvider + 批量处理器：Span 攒一批经 OTLP (gRPC) 推给 Tempo
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
     trace.set_tracer_provider(provider)
@@ -596,11 +791,21 @@ OTLP_GRPC_ENDPOINT = os.environ.get("OTLP_GRPC_ENDPOINT", "http://tempo.monitori
 ```
 
 指标侧沿用前文的埋点思路（prometheus-client 定义 Counter/Histogram + 中间件统一打点），但要多做一件事——**记录指标时把当前 Span 的 TraceID 附上去**：
+
 ```python
 span = trace.get_current_span()
 trace_id = trace.format_trace_id(span.get_span_context().trace_id)
-# 随指标样本一并输出 —— 这就是 Exemplar
+# 把 trace_id 与本次请求的指标样本关联起来 —— 这就是 Exemplar
 ```
+
+注意一个现实问题：Python 的 prometheus-client **暂不原生支持 exemplar**，需要让 `/metrics` 端点以 **OpenMetrics 格式**输出，在样本后手拼 `# {trace_id="..."}` 注释行：
+
+```text
+# OpenMetrics 格式：样本值后面跟 # {trace_id="..."} 即为 exemplar
+http_requests_total{path="/chain",status="200"} 42 # {trace_id="e981ea46f9"} 1738000000000
+```
+
+Prometheus 开启 exemplar-storage 后，抓取时就会把这段注释里的 TraceID 与指标样本一起存储。Go 生态更省事，prometheus/client_golang 原生支持 `prometheus.NewExemplar`（通过 `otel` 桥接自动附带），生产中 Go 服务建议直接用。
 
 ### 缝合线②：Exemplar（指标 → 链路）
 Exemplar 是 Prometheus 的机制：**指标样本上附带 TraceID**。Grafana 图表上会显示成小绿点，QPS 尖峰处点一下就直接跳到 Tempo 看那条链路。
