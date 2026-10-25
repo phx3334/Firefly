@@ -51,8 +51,19 @@ lang: '中文'
 证书认证的本质是一套信任链，把三个角色拆开看：   
 - **CA（证书颁发机构）**：本质就是"一对根密钥 + 一张自签名的 CA 证书"——谁持有这对密钥，谁就是 CA，它并不是什么神秘的第三方机构。CA 证书里的公钥只有一个用途：验证"由它签发的证书"是不是真的
 - **签发流程**：用户生成私钥和 CSR（证书签名请求，里面带公钥和身份信息），CA 用根私钥在 CSR 上签名，产出用户证书。CA 全程不需要知道用户密码，它只负责"给身份背书"
-- **验证流程**：apiserver 只配置一个 `--client-ca-file` 指向 CA 证书。收到请求时取出客户端证书，用 CA 公钥验签，通过就信任证书里的身份——所以新增用户不需要在 apiserver 上登记任何东西，签张证书就行
-**k8s集群一般不用证书认证，这个只是作为保底方案，不展开讲**
+- **验证流程**：apiserver收到请求时取出客户端证书，用 CA 公钥验签，通过就信任证书里的身份——所以新增用户不需要在 apiserver 上登记任何东西，签张证书就行
+
+上面这套"CSR → CA 签发 → 验签"的流程，Istio 的 mTLS 把它自动化到了每两个 Pod 之间。以 prod namespace 里的 checkout 服务为例，完整走一遍：
+```
+istio-ca 根证书 = {
+  公钥：   CA 公钥本身          ← 验签用的是它
+  签名：   根私钥的自签名       ← 标记"我是根，我自证"
+  身份：   Issuer = istio-ca
+}
+```
+**第一步：签发（Pod 启动时自动完成，对应"签发流程"）。** Sidecar生成本 Pod 的私钥（只存在自己内存里，永不外发）和 CSR，但 CSR 里不带身份信息——它把 Pod 挂载的 SA token（认证章 ServiceAccount 一节讲过，kubelet 现签、经 projected volume 挂载）一并递给 istiod。istiod 拿 token 调 API Server 的 TokenReview 接口，验证"这个 Pod 确实是 prod namespace 里用 checkout 这个 SA 的"——**身份事实由 K8s 担保**——验证通过才用 istio-ca 根证书签发，产出一张 SAN字段 写着 `spiffe://cluster.local/ns/prod/sa/checkout` 的客户端证书，默认 24 小时有效、到期自动续签。对比手工流程：CSR 生成、递交、签发、部署证书全部自动完成，且"用户身份由谁证明"从人工审核变成了 K8s API 的机器验证。
+
+**第二步：验证（每次服务间调用时进行，对应"验证流程"）。** checkout 调用支付服务时，双方 Sidecar 做 mTLS 握手：checkout 出示自己的客户端证书，支付服务的 Sidecar 用全网格共享的 istio-ca 根证书验签——和 apiserver 验客户端证书一模一样，验签通过后再核对 SAN 里的 SPIFFE 身份，确认对面确实是 prod/sa/checkout。握手完成后流量全密文传输。
 
 ### OIDC（对接企业统一登录）
 

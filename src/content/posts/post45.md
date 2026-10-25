@@ -42,13 +42,22 @@ mTLS（双向 TLS）是普通 TLS 的加强版，区别只在握手阶段：
 
 普通 TLS 是"单向验证"——任何人都可以连上 HTTPS 网站；mTLS 要求**通信双方都出示证书**，互相确认身份后才建立连接。
 
-**Istio 中如何落地**：Citadel（istiod 内的证书模块，见下文）给每个 Pod 签发一张 X.509 证书，证书里绑定的身份是该 Pod 的 serviceaccount（遵循 SPIFFE 标准，形如 `spiffe://cluster/ns/prod/sa/default`）。两个 Pod 通信时，双方 Sidecar 各自出示证书验证对方身份——**身份来自 K8s 的 serviceaccount，而不是 IP**，Pod 漂移换 IP 身份不变，这正是零信任网络的基础。
+**Istio 中如何落地**：Citadel（istiod 内的证书模块，见下文）用根证书的私钥给每个 Pod 签发一张 X.509 证书，证书里绑定的身份是该 Pod 的 serviceaccount。两个 Pod 通信时，双方 Sidecar 各自出示证书验证对方身份——**身份来自 K8s 的 serviceaccount，而不是 IP**，Pod 漂移换 IP 身份不变，这正是零信任网络的基础。
 
 **应用场景**：
 
 1. **服务间加密**：内网明文通信的时代结束了——一台 Pod 被入侵后抓包即可看到所有敏感数据，mTLS 让链路上全是密文。
 2. **服务身份认证**：连接方必须证明"我是支付服务"，无证书的陌生 Pod 根本握不上手，横向渗透被阻断在握手阶段。
-3. **细粒度授权的依据**：身份确认后，`AuthorizationPolicy` 才能写出"只允许 serviceaccount 为 checkout 的服务调用支付接口"这类规则——**先有身份，才谈得上授权**。
+3. **细粒度授权的依据**: 支付服务只想让订单服务调它。开了 mTLS 后写一条 AuthorizationPolicy 限定`sa/order` ；此时黑客拿下了内网另一台 Pod，它没有（也伪造不了）order 的证书。
+```yaml
+rules:
+- from:
+  - source:
+      principals: ["cluster.local/ns/prod/sa/checkout"]   # 只认 sa是checkout的这个pod的这个身份
+  to:
+  - operation:
+      paths: ["/api/pay"]                                  # 只许调支付接口
+```
 
 ### 服务网格可以解决哪些问题
 
@@ -90,7 +99,7 @@ Istio 支持两种数据平面模式：
 
 ### 控制平面istiod内部组成
 
-Istio 1.5 之前，Pilot、Citadel、Galley 是三个独立部署的控制平面组件，后来合并进了一个二进制——**istiod**。所以今天在集群里只有一个 istiod Deployment，但内部仍保留这三个逻辑模块（老架构图仍按它们分开画）：
+之前，Pilot、Citadel、Galley 是三个独立部署的控制平面组件，后来合并进了一个二进制——**istiod**。所以今天在集群里只有一个 istiod Deployment，但内部仍保留这三个逻辑模块（老架构图仍按它们分开画）：
 
 | 模块 | 职责 | 关键词 |
 | ---- | ---- | ---- |
