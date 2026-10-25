@@ -136,6 +136,47 @@ Istio 支持两种数据平面模式：
 关键认知：**不必一刀切**——两种模式可按 namespace 共存于同一网格（mTLS 自动协商互通）。生产常见路径是渐进式迁移：非核心业务先上 Ambient 试点，L7 重度链路（网关、交易核心）留在 Sidecar。
 
 
+## 安装与接入
+
+在写任何流量规则之前，先解决两个前置问题：控制平面怎么装、业务 Pod 怎么接入网格。
+
+**安装**：一条命令装好控制平面和数据面网关：
+
+```bash
+istioctl install --set profile=demo -y   # demo 配置，默认配置不含egressgateway，因为很多集群根本不需要统一出口
+kubectl get pod -n istio-system          # istiod + istio-ingressgateway 就位
+```
+**网关的层级**：
+```text
+istio-system namespace（Istio 自己的组件住这）
+├── Deployment: istiod                    ← 控制平面
+├── Deployment: istio-ingressgateway      ← 普通 Pod，容器里跑 Envoy，无业务容器
+└── Deployment: istio-egressgateway       ← 同上
+
+业务 namespace（bookinfo 等）
+└── 业务 Pod：[业务容器 + istio-proxy 容器]  ← Sidecar 住这里，跟业务 Pod 同生共死
+```
+
+说它们"全局"指的是**作用范围**：全集群的南北向流量都汇聚到这一两个 Pod，业务 Pod 有几千个、网关副本通常只有 1~2 个——是共享的进出口关卡，不是每 Pod 一份的东西。
+
+**接入业务 Pod**：Sidecar 注入靠 namespace 标签触发——istiod 里的 sidecar injector webhook 监听所有 Pod 创建请求，发现 Pod 所在 namespace 带了这个标签，就自动把 istio-init（init 容器：K8s 的特殊容器，在业务容器启动前跑一次 iptables 劫持规则后即退出，让所有进出业务容器的流量先经过 Envoy） + istio-proxy（常驻容器，Envoy 进程住在这里）两个容器塞进 Pod：
+
+```bash
+# Sidecar 模式：namespace 打标签，之后新建的 Pod 自动注入
+kubectl label namespace bookinfo istio-injection=enabled
+
+# Ambient 模式：换一个标签（原理完全不同：Pod 不注入，流量由节点级 ztunnel 接管）
+kubectl label namespace bookinfo istio.io/dataplane-mode=ambient
+```
+
+两个必须知道的细节：
+
+- **标签只对打标签之后新建的 Pod 生效**。已运行的 Pod 要重启才会被注入：`kubectl rollout restart deployment -n bookinfo`；
+- **验证注入成功**：Pod 容器数从 1/1 变成 2/2（业务容器 + istio-proxy）。`kubectl get pod -n bookinfo` 一眼可辨。
+
+一句话总结接入模型：**网关天生有 Envoy（安装即带），业务 Pod 靠标签注入（webhook 自动塞）**——两批 Pod 的 Envoy 到位后，istiod 才有"工人"可下发配置，后面的流量治理资源才有执行者。
+
+
 ## 流量治理资源
 
 Istio 的流量治理全靠几类 CR，按"流量从哪进、到哪去"理解它们的分工：
@@ -187,7 +228,8 @@ spec:
   - match:                             # 规则从上到下依次匹配，命中即停
     - uri: { prefix: /static }
     route:
-    - destination: { host: productpage, port: { number: 9080 } }
+    #productpage是service的名字，全名<service名>.<namespace名>.svc.cluster.local
+    - destination: { host: productpage, port: { number: 9080 } }  
   - route:                             # 没有任何 match 的规则是兜底路由
     - destination: { host: productpage, port: { number: 9080 } }
 ---
@@ -196,7 +238,7 @@ kind: VirtualService
 metadata:
   name: reviews
 spec:
-  hosts: ["reviews"]                   # 内部服务名，处理网格内的调用
+  hosts: ["reviews"]                   # 内部服务名，也是svc名，处理网格内的调用
   http:
   - route:
     - destination: { host: reviews, subset: v1 }
@@ -264,9 +306,9 @@ spec:
         ↓ istiod（Pilot）Watch 并翻译
         ↓ 组装成 Envoy 的原生配置对象
         ↓ 通过 xDS 协议下发
-真实执行者（Envoy 实例）
+真实执行者（Envoy 实例（跑在对应容器里的进程））
     ├─ Sidecar：注入在业务 Pod 里，管东西向流量
-    └─ istio-ingressgateway / egressgateway：独立 Deployment，管南北向流量
+    └─ istio-ingressgateway / egressgateway：流量独立 Deployment，管南北向流量
 ```
 
 三个直观的推论：
@@ -276,8 +318,6 @@ spec:
 - **Sidecar 和 Gateway 是同一个引擎的两种摆位**：Pod 里那个是 Sidecar 摆法，ingressgateway 是独立 Deployment 摆法，跑的都是 Envoy 镜像——**差别只是站的位置**。
 
 ### istio-ingressgateway与istio-egressgateway
-
-Gateway CR 定义了网格的"大门"（见前文），本节看真正执行这扇门的两个常驻 Deployment——它们是网格的**进出口关卡**，各管一个方向：
 
 ```text
 外部用户 ──→ istio-ingressgateway ──→ 网格内服务      （入口：南北向流入）
@@ -290,7 +330,6 @@ Gateway CR 定义了网格的"大门"（见前文），本节看真正执行这�
 
 1. **统一出口 IP**：三方系统（银行、政府接口）通常要白名单对端 IP，几十个业务 Pod 的出口 IP 漂移没法维护；全部走 egressgateway 后给对方一个 IP 就行。
 2. **出口审计与管控**：哪些服务能访问外网、访问哪些域名，在出口集中执行（配合 ServiceEntry + AuthorizationPolicy），而不是相信每个 Sidecar 的配置都配对了。
-3. **安全合规要求**：内网与外部之间必须有可审计的单一通道，egressgateway 就是这个"DMZ"。
 
 一句话对比：**ingressgateway 管"别人怎么进来"，egressgateway 管"自己怎么出去"**——两者都是独立的 Envoy Deployment，默认安装里 egressgateway 可能未启用，`istioctl install --set components.egressGateways[0].enabled=true` 补开。
 
@@ -377,7 +416,6 @@ spec:
     - operation:
         hosts: ["api.thirdparty.com"]
 ```
-
 三步的逻辑：ServiceEntry 让网格"认识"外部域名 → VirtualService 里 `gateways: ["mesh"]` 把所有出向流量第一跳改道到 egressgateway → 第二跳（egressgateway 收到后）按 `gateways: ["egress-api-gateway"]` 匹配，转发给真实目标。验证：`curl http://api.thirdparty.com` 从 productpage 发出后，egressgateway 的访问日志（`kubectl logs`）里应能看到这条请求——出口审计从此有据可查。
 
 
@@ -387,11 +425,10 @@ spec:
 
 ### 与 K8s Gateway API 的关系
 
-K8s 官方的 **Gateway API**（`GatewayClass` / `Gateway` / `HTTPRoute`）与 Istio 自家的 Gateway CRD 是两套并存的入口体系：
+K8s 官方的 **Gateway API**（`GatewayClass` / `Gateway` ）与 Istio 自家的 Gateway CRD 是两套并存的入口体系：
 
 - **`GatewayClass` 是集群级资源，回答"谁来实现 Gateway"**：它的 `spec.controllerName` 指向一个控制器实现，如 Istio 的 `istio.io/gateway-controller`。Gateway API 的设计哲学是"标准 API + 可插拔实现"——用户写标准的 Gateway/HTTPRoute，底层由 Istio、Envoy Gateway 等任意实现方驱动。
 - **血缘关系**：Istio 的 Gateway CRD 比 Gateway API 诞生得早，Gateway API 大量吸收了 Istio 的实践；Istio 现在同时支持两套，且官方新文档更推荐用 Gateway API 作为入口配置。
-- **能力边界**：`HTTPRoute` 能覆盖 VirtualService 的南北向路由（权重/路径/header 匹配），但 VirtualService 还管网格内东西向流量，且与 DestinationRule 的 subset 配套——所以**Gateway API 替代的是 Gateway+部分 VS，不是整个 Istio 流量 CR 体系**。
 
 ### Ingress可以被完全替代
 
@@ -494,3 +531,4 @@ spec:
 **验证闭环**：域名解析到 ingressgateway 的 LB IP 后（本地测试可加 hosts 或 `curl --resolve`），`curl http://bookinfo.example.com/productpage` 应正常返回页面；反复刷新页面（或 `for i in {1..100}; do curl -s http://bookinfo.example.com/productpage | grep -c "star"; done`），能观察到约 5% 的请求展示 v2 的星星评分——权重切流生效。灰度期间盯着 Grafana 里 reviews 的错误率和 P95，异常就把 weight 改回 `100/0`，一条 `kubectl apply` 完成回滚。
 
 这套"**Gateway 定大门 → VirtualService 定路由 → DestinationRule 定目的地**"的三板斧，覆盖了南北向入口、路径路由、金丝雀发布三个最高频的生产需求，也是所有 Istio 流量管理任务的标准起手式。
+
