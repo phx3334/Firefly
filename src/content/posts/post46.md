@@ -54,11 +54,13 @@ StepAction 是 Tekton 中**最小的可执行单元**（较新版本中从 Task 
 apiVersion: tekton.dev/v1
 kind: StepAction
 metadata:
-  name: maven-build
+  name: sonar-scan                        # 下面 Task 示例引用的就是这个 StepAction
 spec:
-  image: maven:3.9-eclipse-temurin-21     # 步骤运行所在的容器镜像
-  command: ["mvn"]
-  args: ["clean", "install", "-DskipTests"]
+  params:
+  - name: app-name                        # StepAction 也可以声明参数接口
+  image: sonarsource/sonar-scanner-cli:11 # 步骤运行所在的容器镜像
+  command: ["sonar-scanner"]
+  args: ["-Dsonar.projectKey=$(params.app-name)"]
 ```
 
 但生产实践中有一句大实话：**StepAction 的复用收益常被高估**。它通常被 Task 调用，可多数团队发现直接在 Task 里写命令更省事——为每个小操作都抽一个 StepAction，会让资源数量膨胀、跳转链路变长，管理复杂度反而上升。建议只对**真正跨项目共享**的操作（如公司统一的代码扫描动作）抽 StepAction，其余直接写在 Task 里。
@@ -82,9 +84,12 @@ spec:
     image: node:22
     workingDir: $(workspaces.source.path)
     script: npm ci && npm run build
-  - name: scan                            # 写法二：引用 StepAction（仅真正共享的动作）
+  - name: scan                            # 写法二：引用上文的 sonar-scan StepAction（仅真正共享的动作）
     ref:
       name: sonar-scan
+    params:                               # 引用 StepAction 时显式传参，和 Pipeline 传参给 Task 同一个套路
+    - name: app-name
+      value: $(params.app-name)
 ```
 
 **实际开发的建议**：通常直接在 Task 里配置具体命令（写法一），避免过度拆分为 StepAction。Task 的划分粒度按"职责"切——构建 Node.js 应用的 Task、代码扫描的独立 Task、镜像构建的专用 Task，各管一摊，Pipeline 层再编排它们。
@@ -92,6 +97,8 @@ spec:
 ### Pipeline：流水线框架
 
 Pipeline 是 CI/CD 的核心模块，**把多个 Task 按依赖关系编排成流程**：支持顺序执行（代码下载 → 构建 → 镜像制作 → 推送 → 部署），也支持并行编排（无依赖关系的 Task 自动同时跑）。
+
+![Tekton Pipeline 工作模式：Pipeline 由多个 Task 编排组成，无依赖的 Task 自动并行执行，通过 runAfter 声明依赖顺序，PipelineRun 注入参数后实例化整条流水线](./images/Tekton-pipeline.jpg)
 
 ```yaml
 apiVersion: tekton.dev/v1
@@ -102,6 +109,7 @@ spec:
   params:
   - name: repo-url                        # 参数接口：Pipeline 只定义"要什么"，不管"是什么"
   - name: image-repo
+  - name: build-command                   # 构建命令也参数化：Go/Java/Node 服务传不同的值
   workspaces:
   - name: shared-workspace
   tasks:
@@ -121,7 +129,7 @@ spec:
     - name: source
       workspace: shared-workspace
   - name: code-scan
-    taskRef: { name: sonar-scan }
+    taskRef: { name: sonarqube-scan }     # 引用已定义的 Task（Task 内部可复用上文的 StepAction）
     runAfter: [fetch-source]
     workspaces:
     - name: source
@@ -132,10 +140,22 @@ spec:
     params:
     - name: image
       value: $(params.image-repo)
+    - name: build-command                 # 框架不管构建命令是什么，透传给 Task 执行
+      value: $(params.build-command)
     workspaces:
     - name: source
       workspace: shared-workspace
 ```
+
+对照上图和上面的示例，Tekton 的编排语义可以浓缩成四条规则：
+
+**① 最小单元原则：一个 Task 只包含一个步骤**。推荐把 Task 保持为最小执行单元，需要多个步骤时应拆分为多个 Task，而不是在一个 Task 里塞一段长脚本（前文 build-node-app 把 install 和 scan 写进一个 Task，只是为了演示两种 Step 写法，按此原则拆开更佳）。收益是实打实的：每个 Task 独立成 Pod，**状态、日志、重试、资源配额都按 Task 粒度可见**——构建挂了能精确定位到是哪个环节，而不是翻一段几百行的混合日志。拆分后的 Task 还天然便于跨流水线复用（build-image 这个 Task 谁都能引用）。
+
+**② 无依赖即并行**。没有声明依赖关系的 Task（如上图的 Task B 和 Task C）**自动并行执行**——示例里 unit-test 和 code-scan 都只依赖 fetch-source，二者同时跑能显著压缩流水线总时长。Tekton 不需要你写任何 parallel 关键字，"默认并行、显式声明串行"是它的编排哲学。
+
+**③ runAfter 显式控制顺序**。需要串行的 Task 用 `runAfter` 字段声明依赖（如示例的 build-image 等待 unit-test、code-scan 完成后才启动）。注意 runAfter 语义是"等它们**成功**"，这就引出第四条隐含规则——
+
+**④ 失败沿依赖图截断**。任一 Task 失败，其下游全部终止：fetch-source 失败则测试/扫描都不会执行；unit-test 或 code-scan 任一失败则 build-image 不执行。这个语义与直觉一致——上游构建都没产出，跑下游测试毫无意义。失败位置之前的并行分支不受牵连，这让排障时一眼就能从 PipelineRun 状态里看出故障边界。
 
 注意 Pipeline 的层级分工：**Task 里写"具体怎么做"，Pipeline 里写"按什么顺序做、参数怎么传"**——命令实现下沉在 Task，Pipeline 保持纯框架。
 
@@ -156,6 +176,8 @@ spec:
     value: https://git.example.com/order-service.git    # 注入运行时参数：这次跑的是谁
   - name: image-repo
     value: registry.example.com/order-service:v1.4.2
+  - name: build-command
+    value: go build ./...                 # 注入构建命令：Go 服务传这个，Java 服务传 mvn clean package
   workspaces:
   - name: shared-workspace
     volumeClaimTemplate:
@@ -169,7 +191,8 @@ spec:
 ```bash
 kubectl get pipelinerun order-service-run-42
 kubectl get taskrun -l tekton.dev/pipeline=build-deploy-pipeline   # 看流水线下每个 Task 的执行状态
-kubectl logs -f order-service-run-42-build-image-pod   # 某个步骤的构建日志
+kubectl get pods | grep order-service-run-42          # 先拿到真实 Pod 名（末尾带随机后缀）
+kubectl logs -f order-service-run-42-build-image-xxxxx   # 某个步骤的构建日志
 ```
 
 ### Triggers：事件驱动的扩展组件
@@ -195,28 +218,13 @@ Git push ──Webhook──→ EventListener（收到事件）
 
 **Tekton Dashboard** 提供图形化界面：可视化查看 Task/Pipeline 配置、实时监控构建状态。对刚接触 Tekton 的团队，Dashboard 能显著降低学习曲线——排障时在页面上点开每个 Task 的状态和日志，比命令行翻 CR 直观得多；但它同样是可选组件，不影响核心链路。
 
-
 ## Tekton工作模式
 
-上一节认清了资源分工，这一节看 Tekton 的设计哲学如何落到实际使用——**为什么它是"模板 + 参数注入"而不是"每个项目一条流水线"**。
-
-![Tekton Pipeline 工作模式：Pipeline 由多个 Task 编排组成，无依赖的 Task 自动并行执行，通过 runAfter 声明依赖顺序，PipelineRun 注入参数后实例化整条流水线](./images/Tekton-pipeline.jpg)
-
-### 流水线编排的三条规则
-
-对照上图，Tekton 的编排语义可以浓缩成三条规则：
-
-**① 最小单元原则：一个 Task 只包含一个步骤**。推荐把 Task 保持为最小执行单元，需要多个步骤时应拆分为多个 Task，而不是在一个 Task 里塞一段长脚本。收益是实打实的：每个 Task 独立成 Pod，**状态、日志、重试、资源配额都按 Task 粒度可见**——构建挂了能精确定位到是哪个环节，而不是翻一段几百行的混合日志。拆分后的 Task 还天然便于跨流水线复用（build-image 这个 Task 谁都能引用）。
-
-**② 无依赖即并行**。没有声明依赖关系的 Task（如上图的 Task B 和 Task C）**自动并行执行**——典型场景是编译与代码扫描互不依赖，同时跑能显著压缩流水线总时长。Tekton 不需要你写任何 parallel 关键字，"默认并行、显式声明串行"是它的编排哲学。
-
-**③ runAfter 显式控制顺序**。需要串行的 Task 用 `runAfter` 字段声明依赖（如 Task D 等待 B、C 完成后才启动）。注意 runAfter 语义是"等它们**成功**"，这就引出第四条隐含规则——
-
-**④ 失败沿依赖图截断**。任一 Task 失败，其下游全部终止：Task A 失败则 B/C 不会执行；B、C 任一失败则 D 不执行。这个语义与直觉一致——上游构建都没产出，跑下游测试毫无意义。失败位置之前的并行分支不受牵连，这让排障时一眼就能从 PipelineRun 状态里看出故障边界。
+资源分工和编排语义都清楚了，这一节看 Tekton 最值得记住的设计哲学——**为什么它是"模板 + 参数注入"而不是"每个项目一条流水线"**。
 
 ### 模板+参数注入：一套流水线服务所有项目
 
-这是 Tekton 最值得记住的设计。**Pipeline 只定义流程框架**（build/test/package 等阶段），不包含任何具体命令实现——构建什么语言、用什么命令，全部通过预留的参数接口（`params`）在执行时注入。
+核心在于：**Pipeline 只定义流程框架**（build/test/package 等阶段），不包含任何具体命令实现——构建什么语言、用什么命令，全部通过预留的参数接口（`params`）在执行时注入。
 
 以一个多语言微服务团队为例：Go、Java、Node.js 三种服务的构建命令天差地别，但**流程完全同构**（拉代码 → 构建 → 制镜像 → 推送 → 部署）。做法是：
 
@@ -244,3 +252,5 @@ Git push ──Webhook──→ EventListener（收到事件）
 ```
 
 设计哲学一句话：**"模板 + 参数注入"实现流程复用**——Pipeline 是稳定的模板，PipelineRun 是一次性的注入。这个模式正是为多语言、多版本的 CI/CD 场景而生：流程收敛为一处维护，差异全部参数化，规模越大复用收益越明显。
+
+
