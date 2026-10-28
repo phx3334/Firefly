@@ -79,8 +79,18 @@ THP是透明大页，平时还是普通 4KB 小页,内核后台线程扫着扫�
 - **半连接队列**：被 SYN flood 塞满 → 后续 SYN 全丢；内核靠 `tcp_syncookies=1` 应对：不进队列、用带cookie的 SYN-ACK 直接应答。
 - **排查**：`ss -lnt` 看 Recv-Q（当前全连接队列堆积数）/Send-Q（队列上限），Recv-Q 持续 >0 就是 accept 跟不上，调大 somaxconn/应用 backlog 治标，优化应用 accept 治本。
 ### conntrack
-- **是什么**：内核 netfilter 的**连接追踪表**，每条经过本机的连接（TCP/UDP/ICMP 都算）记一条表项，NAT、iptables、K8s Service 转发全依赖它。
-- **坑**：表容量 `nf_conntrack_max` 有限，表满后**新连接直接丢**（dmesg 报 `table full, dropping packet`）→ 新建连接失败/偶发超时。SNAT 网关、K8s 节点最易翻车。排查：`conntrack -C` 对比 count 和 max；解法：调大 `nf_conntrack_max`、调低 established 超时（默认竟长达 5 天）
+- **是什么**：内核 netfilter 的**连接追踪表**——每条经过本机的连接（TCP/UDP/ICMP 都算）记一条表项，记录"这条连接的两个方向各自长什么样"。**它本身不做任何转发，只是登记处**；NAT、iptables 有状态匹配（`-m conntrack --ctstate ESTABLISHED`）、K8s Service 转发全依赖它。
+- **表项记什么**：每条 = 一个"连接五元组 + 状态 + NAT 映射"。例：
+  ```text
+  tcp 6 431999 ESTABLISHED src=10.244.1.2 dst=10.96.0.10 sport=51000 dport=80
+      src=172.17.0.3 dst=10.244.1.2 sport=8080 dport=51000
+  # 第一行：请求方向（谁访问谁）；第二行：回程期望的方向；431999 是该条目的剩余存活秒数
+  ```
+- **它解决的三个问题**：
+  1. **NAT 记账**：DNAT/SNAT 改了地址，内核得记住"改前什么样"，回程包才能改回去（K8s 里 Pod 回包能把源 IP 从 Pod IP 还原成 ClusterIP，全靠这条映射）
+  2. **有状态匹配**：`iptables -A INPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT` 一条规则放行所有已有连接的回包——不用为回程写第二份规则，防火墙规则量减半
+  3. **给 TCP 状态机兜底**：不依赖应用层，内核自己判定连接处于 NEW/ESTABLISHED/TIME_WAIT 等，UDP/ICMP 这种"无连接"协议也能被追踪（表现为伪状态）
+- **坑**：表容量 `nf_conntrack_max` 有限（默认按内存估算，如 262144），**每条连接占一条、超时才释放**——established 超时默认竟长达 5 天，高并发短连接场景下表会被撑满；表满后**新连接直接丢**（dmesg 报 `table full, dropping packet`）→ 新建连接失败/偶发超时。SNAT 网关、K8s 节点（Service 转发每条连接都进表）最易翻车。排查：`conntrack -C` 对比 count 和 max；解法：调大 `nf_conntrack_max`、调低 established 超时
 **排障场景**
 - 偶发超时 → 看重传、看 backlog 溢出。  
 - 大量 TIME_WAIT → 短连接风暴，调 tcp_tw_reuse/长连接/端口范围。  

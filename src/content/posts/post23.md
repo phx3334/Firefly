@@ -507,24 +507,48 @@ Pod B(10.244.2.3) 容器内 eth0 收到
 
 ### ipvs和iptables
 
-**背景**：前面讲的都是 Pod IP 之间的通信，但实际业务访问的是 Service 的 ClusterIP（如 `10.96.10.10`）——这是一个**不存在于任何网卡上的"假 IP"**，谁把它变成真实 Pod IP？就是每台节点上的 kube-proxy。它有两种数据面实现：**iptables 模式**（老默认）和 **ipvs 模式**（大规模集群标配）。
-
 #### iptables 模式怎么工作
 
-iptables 是 netfilter 的规则配置工具，kube-proxy watch Service/Endpoints 变化后，把"ClusterIP → 后端 Pod"的转换规则全写成 iptables NAT 规则：
+iptables 是 netfilter 的规则配置工具。kube-proxy watch Service/Endpoints 变化后，把"ClusterIP → 后端 Pod"的转换写成一条条 NAT 规则。
+
+一个包的完整路径（注意看它要把前面几千条"无关规则"都匹配不中，才走到自己那几条）：
+
+```text
+Pod 发包 dst=10.96.10.10:80
+  → 进宿主机 PREROUTING 钩子（NAT 表，DNAT 在路由判定之前）
+  → 进入 KUBE-SERVICES 链，从第 1 条规则开始逐条比对：
+      -d 10.96.0.1/32 ?  不匹配 → 下一条
+      -d 10.96.0.2/32 ?  不匹配 → 下一条
+      -d 10.96.0.3/32 ?  不匹配 → 下一条
+      ...                （前面所有 Service 的规则都要白白比对一遍）
+      -d 10.96.10.10/32 ? 匹配！→ jump KUBE-SVC-XXXXX
+  → 进入该 Service 的链，按随机概率 jump 到某个后端链
+  → DNAT 改写 dst 为 10.244.3.5:80，conntrack 记录映射
+  → DNAT 完才做路由判定：10.244.3.5 是远端 Pod → FORWARD → 发出去
+```
+
+这个包只访问一个 Service，却在到达自己的规则前**逐条读过了其他所有 Service 的规则**——这就是 O(n)：Service 是 1000 个，每个新连接的第一个包就要先做近千次"不匹配"的无效比对。
 
 关键特征：
-- **每个包都要线性遍历规则链**：从 `KUBE-SERVICES` 一路跳到具体 `KUBE-SEP`，复杂度 O(n)
+- **每个包都要线性遍历规则链**：从 `KUBE-SERVICES` 一路跳到具体某个后端服务ip:port，复杂度 O(n)
 - **负载均衡靠随机概率**：`--probability` 把流量按比例切分，仅此一种算法
-- **Service 一多规则爆炸**：1000 个 Service × 10 个后端 ≈ 上万条规则，每条都要逐包匹配
+- **Service 一多规则爆炸**：1000 个 Service × 10 个后端 ≈ 上万条规则，每个新连接的第一个包都要走一遍
 
 #### ipvs 模式怎么工作（重点）
 
-IPVS（IP Virtual Server）是内核自带的 **L4 负载均衡器**（LVS 项目的内核部分），它不写一堆 NAT 规则，而是在 netfilter 的 LOCAL_IN 钩子上注册一张**哈希表**：
+IPVS（IP Virtual Server）是内核自带的 **L4 负载均衡器**（LVS 项目的内核部分），它不写一堆 NAT 规则，而是在 INPUT 路径的 LOCAL_IN 钩子上挂一张**哈希表**：
 
-- 每个 Service = 表里的一个**虚拟服务条目**（VIP:Port + 调度算法）
+- 每个 Service = 表里的一个**虚拟服务条目**（ClusterIP:Port + 调度算法）
 - 每个后端 Pod = 该条目下的一个 **real server**
-- 查找复杂度 O(1)——按 `VIP:Port` 哈希直接命中，不用遍历
+- 查找复杂度 O(1)——按 `ClusterIP:Port` 哈希直接命中，不用遍历
+
+```text
+Pod 发包 dst=10.96.10.10:80
+  → 路由判定：ClusterIP 挂在 kube-ipvs0 上、属本机 → 走 INPUT 路径
+  → IPVS 在 LOCAL_IN 钩子拦截：哈希命中虚拟服务条目 → 按 rr 选中后端
+  → DNAT 改写 dst 为 10.244.3.5:80，conntrack 记录
+  → 改写后重新走一遍路由判定：远端 Pod → FORWARD → 发出去
+```
 
 调度算法是内核实现的，不止随机一种：`rr`（轮询）、`lc`（最少连接）、`sh`（源地址哈希，会话保持）等 10+ 种。
 ```bash
@@ -549,7 +573,7 @@ Pod A(10.244.1.2) 容器内 eth0
   │ 目的 10.96.10.10 不在本网段，默认路由交给网关 169.254.1.1（calico veth 直连模式）
   ▼
 calixxx（Pod A 的 veth 对端）→ 宿主机 netns
-  │ PREROUTING：calico 的策略链检查放行（NetworkPolicy，靠 iptables 实现，与 kube-proxy 模式无关）
+  │ PREROUTING：calico 策略链放行（NetworkPolicy，靠 iptables 实现）；做哈希查询(不遍历)这个ip是不是clusterip，是的话走ipvs转发，不是就走calico路由
   ▼
 IPVS hook（LOCAL_IN 上的虚拟服务表）
   │ 10.96.10.10:80 哈希命中虚拟服务条目 → 按 rr 算法选中 10.244.3.5:80

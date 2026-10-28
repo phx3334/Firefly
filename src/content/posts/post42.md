@@ -210,7 +210,7 @@ roleRef:                              # 绑定哪个角色，只能填一个
 | edit          | namespace 内读写，不能查看/修改角色                             |
 | view          | namespace 内只读（不含 Secret）                                 |
 
-注意 view/edit 都刻意排除了 Secret 的读权限——防止"能看 Pod 的人顺手把数据库密码捞走"。
+注意只有 view 排除了 Secret 的读权限——防止"能看 Pod 的人顺手把数据库密码捞走"；edit 和 admin 是包含 Secret 读写的（否则没法创建引用 Secret 的 Pod）。这也印证了前面说的"RBAC 是纯加法"：**edit 能建 Pod，Pod 可以引用 namespace 里任意 Secret，所以"给 edit 但不许看 Secret"在原生 RBAC 下做不到**——多租户场景里 Secret 的隔离必须靠 namespace 本身来保证。
 
 **system: 内置身份：集群自己的人和组。** 还有一批以 system: 为前缀的用户名/组，是集群组件和机制在用的保留身份
 
