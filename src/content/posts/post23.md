@@ -103,8 +103,6 @@ k8s 的网络规划完全建立在 CIDR 上，典型的三层嵌套：
 
 小结：**CIDR 用"任意长度前缀"取代有类地址的三档划分——向内变长子网划分解决 IP 浪费，向外路由聚合解决路由表爆炸；k8s 的 Pod CIDR / 节点子网 / 单个 Pod IP 正是 CIDR 三层嵌套的实际应用**。
 
-
-
 ## k8s 创建 Pod 时,网络的初始化（简化版）
 
 先明确分工，网络初始化涉及三方：
@@ -506,3 +504,85 @@ Pod B(10.244.2.3) 容器内 eth0 收到
 不是内核原生（控制面，跑在用户态）：  
 - BGP 协议本身：内核不认识 BGP。是用户态进程（calico 用 BIRD、或 gobgp）算好路由，再写进内核路由表。内核只管"按表转发"，不管"怎么学到这张表"。
 - CNI 插件（flanneld / calico / cilium）：是用户态二进制，被 kubelet 调用。它们负责"建 flannel.1/tunl0 设备、配 FDB/ARP、下发路由、维护邻居"——也就是操作内核，但自己不是内核。
+
+### ipvs和iptables
+
+**背景**：前面讲的都是 Pod IP 之间的通信，但实际业务访问的是 Service 的 ClusterIP（如 `10.96.10.10`）——这是一个**不存在于任何网卡上的"假 IP"**，谁把它变成真实 Pod IP？就是每台节点上的 kube-proxy。它有两种数据面实现：**iptables 模式**（老默认）和 **ipvs 模式**（大规模集群标配）。
+
+#### iptables 模式怎么工作
+
+iptables 是 netfilter 的规则配置工具，kube-proxy watch Service/Endpoints 变化后，把"ClusterIP → 后端 Pod"的转换规则全写成 iptables NAT 规则：
+
+关键特征：
+- **每个包都要线性遍历规则链**：从 `KUBE-SERVICES` 一路跳到具体 `KUBE-SEP`，复杂度 O(n)
+- **负载均衡靠随机概率**：`--probability` 把流量按比例切分，仅此一种算法
+- **Service 一多规则爆炸**：1000 个 Service × 10 个后端 ≈ 上万条规则，每条都要逐包匹配
+
+#### ipvs 模式怎么工作（重点）
+
+IPVS（IP Virtual Server）是内核自带的 **L4 负载均衡器**（LVS 项目的内核部分），它不写一堆 NAT 规则，而是在 netfilter 的 LOCAL_IN 钩子上注册一张**哈希表**：
+
+- 每个 Service = 表里的一个**虚拟服务条目**（VIP:Port + 调度算法）
+- 每个后端 Pod = 该条目下的一个 **real server**
+- 查找复杂度 O(1)——按 `VIP:Port` 哈希直接命中，不用遍历
+
+调度算法是内核实现的，不止随机一种：`rr`（轮询）、`lc`（最少连接）、`sh`（源地址哈希，会话保持）等 10+ 种。
+```bash
+# node1 上查看 IPVS 虚拟服务表（ipvsadm 是用户态配置工具，对应内核 ip_vs 模块）
+ipvsadm -Ln
+# Prot LocalAddress:Port Scheduler Flags
+#   -> RemoteAddress:Port      Forward Weight ActiveConn InActConn
+# TCP  10.96.10.10:80 rr
+#   -> 10.244.1.5:80           Masq    1      3          0
+#   -> 10.244.3.5:80           Masq    1      2          0
+```
+
+> 呼应上一节"内核原生 vs 用户态"的分类：**IPVS 和 iptables 都是内核原生的**（`ip_vs`、`nf_conntrack` 等内核模块，真正干 DNAT/调度/匹配的活）；kube-proxy、ipvsadm 只是用户态工具，负责把 Service/Endpoints 变化翻译成内核表项。依赖的内核模块：`ip_vs`、`ip_vs_rr`、`ip_vs_wrr`、`ip_vs_sh`、`nf_conntrack`。
+
+#### 全流程例子：calico BGP + kube-proxy ipvs
+
+设定：Pod A `10.244.1.2`（node1，IP `10.1.1.101`）访问 Service `10.96.10.10:80`，后端 Pod B `10.244.3.5` 在 node3（IP `10.1.1.103`）。**注意两个系统的分工：kube-proxy/ipvs 负责"ClusterIP 变真实 Pod IP"（DNAT），calico 负责"真实 Pod IP 怎么路由过去"（BGP 学来的路由）**：
+
+```text
+【node1 出站】
+Pod A(10.244.1.2) 容器内 eth0
+  │ 目的 10.96.10.10 不在本网段，默认路由交给网关 169.254.1.1（calico veth 直连模式）
+  ▼
+calixxx（Pod A 的 veth 对端）→ 宿主机 netns
+  │ PREROUTING：calico 的策略链检查放行（NetworkPolicy，靠 iptables 实现，与 kube-proxy 模式无关）
+  ▼
+IPVS hook（LOCAL_IN 上的虚拟服务表）
+  │ 10.96.10.10:80 哈希命中虚拟服务条目 → 按 rr 算法选中 10.244.3.5:80
+  │ → DNAT：目的改写为 10.244.3.5:80，conntrack 记录这条映射
+  ▼
+宿主机路由表
+  │ 10.244.3.5 via 10.1.1.103 dev eth0   ← calico BGP 学来的路由，纯三层转发、零封装
+  ▼
+eth0（node1 物理网卡）发出
+
+【node3 入站】
+eth0 → 内核查路由 10.244.3.5 dev caliyyy（/32 直连）
+  ▼
+Pod B(10.244.3.5) 收到：源 10.244.1.2、目的 10.244.3.5（它根本不知道 ClusterIP 的存在）
+
+【回包】
+Pod B 回复 10.244.1.2 → 按 BGP 路由直接回到 node1
+  ▼
+node1 的 conntrack 命中记录 → 源 IP 从 10.244.3.5 改回 10.96.10.10
+  ▼
+Pod A 收到"来自 10.96.10.10 的回复"——全程只跟 ClusterIP 说话
+```
+
+关键点：
+- **DNAT 只发生在第一个包**：conntrack 记录映射后，同一条连接的后续包直接按表转换，IPVS/iptables 不再重新决策
+- **回包不走 Service IP**：Pod B 的回包目的就是 Pod A 的真实 IP，靠 conntrack 在 node1 上把源 IP"改回去"，Pod A 才以为是 ClusterIP 回的
+- **kube-proxy 和 CNI 是两个独立层次**：把 calico 换成 flannel VXLAN，ipvs 的 DNAT 逻辑一字不变，只是"DNAT 之后包怎么送到 node3"变成走隧道
+
+#### 哪些场景 iptables 依然必不可少
+
+1. **ipvs 模式自身就离不开 iptables**：IPVS 只做"DNAT + 选后端"这一件事，剩下全是 iptables 的活——MASQUERADE（SNAT，如外部流量访问 NodePort、hairpin 场景 Pod 访问自己的 ClusterIP）、filter 表的放行/丢弃规则、配合 ipset 的跳转规则。没有 iptables，ipvs 模式跑不完整
+2. **NetworkPolicy 完全依赖 iptables**：calico 的 Felix 实现网络策略靠的就是 iptables 规则链 + ipset（存策略涉及的目的地址集合）。你选 ipvs 还是 iptables 模式，策略这层照旧
+3. **内核模块缺失的环境**：ipvs 需要加载 `ip_vs`、`ip_vs_rr` 等模块，最小化镜像、老内核、部分嵌入式/边缘节点没有——iptables 是保底方案，且任何内核都支持
+4. **小规模集群没必要换**：几十个 Service 时 iptables 模式的 O(n) 毫无感知，规则简单、排障直接（`iptables-save` 一把梭），ipvs 的哈希表优势体现不出来，反而多一套 `ipvsadm` 的心智负担
+
+小结：**iptables 模式把"VIP→Pod"翻译成逐包线性匹配的 NAT 规则，规模大了必炸；ipvs 用内核哈希表做 L4 负载均衡，O(1) 查找 + 丰富调度算法，是大集群标配——但它只管 DNAT 这一步，SNAT、NetworkPolicy、兜底规则仍靠 iptables，两者是配合而非替代关系。**

@@ -1,9 +1,9 @@
 ---
 title: k8s企业级架构设计
-published: 2026-10-30T20:11:23+08:00
-description: 学习k8s高可用的企业级架构的关键点以及一些实践过程的注意事项
+published: 2026-10-28T20:11:23+08:00
+description: 学习k8s高可用的企业级架构的关键点以及一些实践过程的注意事项，还有keepalived机制的学习与应用
 image: './images/a48.avif'
-tags: [k8s]
+tags: [k8s,keepalived]
 category: '计算机技术'
 draft: false
 lang: '中文'
@@ -39,7 +39,37 @@ lang: '中文'
 
 ### 重点：keepalived 的原理（VRRP）
 
-这是很多人装完就跑、但从没搞懂的部分。keepalived 本质是 **VRRP 协议（Virtual Router Redundancy Protocol，RFC 2338）的用户态实现**，加上一套自己的健康检查框架。
+keepalived 本质是 **VRRP 协议（Virtual Router Redundancy Protocol，RFC 2338）的用户态实现**，加上一套自己的健康检查框架。
+
+#### 组播
+VRRP 通告的默认投递方式是组播，讲 keepalived 之前先把组播本身说清。网络通信按「一个发送方对应几个接收方」分三类：
+
+| 方式 | 地址形态 | 一份数据的投递 | 典型例子 |
+| ---- | ---- | ---- | ---- |
+| 单播 Unicast | 普通单播 IP/MAC | 有几个接收方就复制几份，逐个发送 | 访问网站、SSH |
+| 广播 Broadcast | MAC `FF:FF:FF:FF:FF:FF` | 一定范围内所有人都收 | ARP 请求、DHCP 发现 |
+| 组播 Multicast | IP `224.0.0.0~239.255.255.255`（D 类）/ MAC `01:00:5E` 开头 | **只发一份**，仅「订阅过」的主机收 | VRRP 通告、OSPF、IPTV |
+
+组播的定位夹在两者中间：**单播**给 100 台机器发同一份数据要发 100 份，带宽和发送方 CPU 都浪费；**广播**虽然只发一份，但同广播域里不关心的主机也被迫收下并打断 CPU 处理，且路由器不转发、范围只能限一个网段。**组播两者兼顾**——发送方只发一份，交换机/路由器顺着「订阅关系」把数据送到且只送到订阅者的端口，没订阅的主机网卡在硬件层就丢帧，几乎零打扰。
+
+**工作原理**是一条「订阅-分发」链路：
+
+`1`**接收方入组**：应用向内核声明加入某个组播组（如 keepalived 加入 224.0.0.18），内核把对应组播 MAC 写进网卡过滤表，同时（对非 224.0.0.x 的普通组播）发 IGMP report 告知交换机「我这个端口要收这个组」。
+
+`2`**交换机维护订阅表**：开着 IGMP snooping 的交换机监听这些 report，在 MAC 地址表之外维护一张「组播组 → 成员端口」的表，转发时只往成员端口发。
+
+`3`**发送方只发一份**：源把数据发往组播地址，网络里每条链路最多出现一次这份数据，由组播路由协议（PIM 等）在跨网段时复制分发。
+
+IPv4 组播地址段有明确的用途划分，VRRP 用到的 `224.0.0.x` 是其中的特殊块：
+
+| 地址段 | 用途 | 是否跨网段 |
+| ---- | ---- | ---- |
+| `224.0.0.0/24` | 本地网络控制块：OSPF 224.0.0.5、VRRP 224.0.0.18 等 | 否，TTL=1，不入组播路由 |
+| `224.0.1.0/24` | 网间控制块（如 NTP 224.0.1.1） | 可跨网段 |
+| `232.0.0.0/8` | SSM 指定源组播 | 可跨网段 |
+| `239.0.0.0/8` | 私有组播段（相当于组播界的 RFC 1918） | 企业内部自用 |
+
+对 keepalived 而言，组播的价值一句话概括：**Master 只发一份通告，所有 Backup 自动收到，新增 Backup 零配置入组**——这就是后文「组播成组靠同听一个频道」的根基。代价是依赖二层环境支持组播泛洪/IGMP，一旦交换机策略禁了它，就要退到单播模式（见后文生产选型）。
 
 #### VRRP 要解决的问题
 
@@ -55,17 +85,70 @@ VRRP 解决的是比 k8s 更古老的问题：**默认网关是单点**。内网
 
 多台物理设备组成一个**虚拟路由器**（用 VRID 标识），对外暴露一个 **VIP（虚拟 IP）+ 虚拟 MAC 地址（00:00:5E:00:01:VRID）**。同一时刻只有一台设备实际持有 VIP 并转发流量，它叫 **Master**，其余是 **Backup**。
 
+**优先级**：取值 1~255，决定两个事——谁平时当 Master、Master 挂了谁先接管。数值越大越优先（配置里的 `priority 100/90/80` 就是三台机器的座次）。两个特殊值：**0** 不是最低而是信号——Master 主动放弃时发优先级 0 的通告，Backup 秒级接管；**255** 是最高，若某台机器的接口 IP 恰好就是 VIP（IP Owner），自动持有 255，恒为 Master。生产中不用 255，就是为了让 VIP 的归属由配置控制（优先级 + 健康检查权重），而不是被拓扑绑死。
+
 #### 选举机制：靠组播通告"我还活着"
 
 VRRP 的运行机制简单到可以用三句话说清：
 
 1. **Master 周期性向组播地址 `224.0.0.18` 发 VRRP 通告**（Advertisement），报文里带着自己的优先级，默认每 1 秒一次；
-2. **Backup 一直在监听通告**，只要通告还在来，就知道 Master 活着，自己继续待命；
-3. **通告停了**（超过 `Master_Down_Interval`，默认约 3.6 秒 = 3 × 通告间隔 + 偏移量），Backup 们认为 Master 挂了，**优先级最高者**接管 VIP，通过 ARP 广播宣告"VIP 在我这"，开始接流量。
+2. **Backup 一直在监听224.0.0.18**，只要通告还在来，就知道 Master 活着，自己继续待命；
+3. **通告停了**（超过 `Master_Down_Interval`），Backup 们认为 Master 挂了，**优先级最高者**接管 VIP，通过 ARP 广播宣告"VIP 在我这"，开始接流量。
 
-一个关键细节：**Master_Down_Interval 里有一个 Skew_Time（优先级越高，等待时间越短）**，这保证了"优先级最高的 Backup 最先超时、最先抢占"，避免多台 Backup 同时宣告自己造成混乱。
+#### 二层网络通信流程
 
-优先级 0 有特殊含义：**Master 主动放弃时（比如优雅关闭 keepalived）会立刻发一个优先级 0 的通告**，Backup 收到后无需等超时，立即接管——这就是为什么主动漂移是秒级、被动漂移是 3 秒多的原因。
+VRRP 通告从 Master 的 keepalived 进程发出，到 Backup 的 keepalived 进程收到，中间经过网卡、交换机、内核协议栈三层。先讲默认的**组播模式**，完整链路如下：
+
+```text
+【第 0 步：启动时登记——为什么后面能命中】
+keepalived 启动，setsockopt(IP_ADD_MEMBERSHIP) 加入组播组 224.0.0.18
+  ↓ 内核在该接口登记组成员，并按映射规则生成链路层地址 01:00:5e:00:00:12
+  ↓ 内核调驱动的 set_rx_mode，把这个组播 MAC 写进网卡硬件的组播过滤表
+
+Master (192.168.0.11)                              Backup (192.168.0.12/13)
+keepalived 构造 VRRP 报文（IP 协议号 112，不是 TCP/UDP）
+  ↓ 网络层：IP 目的地址 = 224.0.0.18
+  ↓ 由组播 IP 推导出目标 MAC = 01:00:5e:00:00:12（映射规则：01:00:5e + IP 低 23 位）
+  ↓ 数据链路层封装以太网帧，从网卡发出
+交换机（VLAN 内泛洪——注意 224.0.0.x 不走 IGMP snooping，见细节 2）
+  ↓
+Backup 网卡收帧：目标 MAC 01:00:5e:00:00:12 命中第 0 步写入的组播过滤表 → 放行到内核
+  （网卡只做哈希粗筛，一个 MAC 对应 32 个组播 IP；内核收到后还会按已加入的组播组精筛一次）
+  ↓ 内核：驱动收到 → 网络层解析 IP 头 → Protocol = 112（VRRP）
+  ↓ 内核把报文投递给注册了「监听协议号 112」的 raw socket
+  ↓
+keepalived 用户态进程收到通告，更新 VRRP 状态机
+```
+
+验证登记是否成功：`ip maddr show dev ens192` 应看到 `224.0.0.18`；`tcpdump -i ens192 vrrp` 能抓到通告，就是网卡放行生效的实证。
+
+三个关键细节：
+
+`1`**组播 MAC 的推导规则**：IPv4 组播地址映射到 MAC `01:00:5E` 开头的地址段，取组播 IP 的低 23 位填入。`224.0.0.18` → `01:00:5e:00:00:12`。注意别和前文虚拟路由器的 MAC（`00:00:5E:00:01:VRID`）搞混——**`01:00:5e:00:00:12` 只承载 VRRP 通告**，而客户端访问 VIP 的业务流量走的是虚拟 MAC。
+
+`2`**网卡为什么收组播帧 / 交换机为什么不用配**：以太网网卡默认只收「目标 MAC 是自己」的单播帧和广播帧。keepalived 启动时内核把 `01:00:5e:00:00:12` 写进**网卡的组播过滤列表**（`ip maddr show dev ens192` 可查看），列表里没有这个 MAC 的网卡会在硬件层直接丢帧。交换机侧则是另一回事：`224.0.0.0/24` 属于**本地网络控制块**（OSPF 的 224.0.0.5、VRRP 的 224.0.0.18 都在此列），协议规定主机加入这个范围的组**不发 IGMP report**，所以交换机的 IGMP snooping 对它学不到端口——按 RFC 4541，开着 snooping 也在 VLAN 内泛洪。这就是 VRRP 在默认配置的交换机上开箱即用的原因；同理，这也解释了「交换机禁组播/IGMP 会脑裂」的真正机制：多数情况下不是通告被 snooping 拦掉，而是 ACL/策略直接丢弃了组播报文或限制了泛洪范围。
+
+`3`**内核怎么知道交给 keepalived**：VRRP 没有端口号的概念，keepalived 启动时打开一个 `IPPROTO_VRRP(112)` 的 raw socket，内核收到 Protocol=112 的 IP 报文就投递给这个 socket。所以抓包时看到的通告是「IP 直载」，不涉及任何端口。
+
+**单播模式**的链路只在第一环节不同。配置 `unicast_src_ip` + `unicast_peer` 后：
+
+```text
+通告的 IP 目的地址 = 对端真实 IP（如 192.168.0.12）
+目标 MAC = 对端真实 MAC（走普通 ARP 解析，和任意两台机器通信一样）
+```
+
+对端网卡按普通单播帧接收（MAC 匹配本机即可，不需要组播过滤列表），之后的内核路径与组播完全一致：协议号 112 → raw socket → keepalived。交换机全程只做普通二层转发，对组播/IGMP 零感知。
+
+**生产选型**：
+
+| 维度 | 组播 | 单播 |
+| ---- | ---- | ---- |
+| 配置成本 | 零配置，装完即用 | 每个节点都要维护完整 peer 列表，加/删节点需改全部配置 |
+| 交换机要求 | 需放行组播和 IGMP | 无任何特殊要求 |
+| 故障模式 | 交换机禁组播 → 互相收不到通告 → 双 VIP 脑裂（坑二） | peer 配漏/写错 → 单节点误判 Master 挂了 |
+| 云环境 | 公有云 VPC 基本都禁组播和 gratuitous ARP | 可用（部分云连 VRRP 都不支持，只能用云 LB） |
+
+选型结论：**自有机房、交换机自己管 → 组播**（零配置，天然支持任意数量 Backup）；**交换机策略禁组播、或公有云环境 → 单播**。无论哪种，上线前必须实抓一遍：`tcpdump -i ens192 vrrp -nn`——组播模式应看到目的 `224.0.0.18`、单播模式应看到对端真实 IP；**抓不到对端通告的集群，运行起来就是定时脑裂**。排查双 VIP 问题时，这一条抓包命令也是第一现场证据。
 
 #### keepalived 在 VRRP 之上补的两块拼图
 
@@ -110,9 +193,7 @@ vrrp_instance VI_1 {
 
 **2. 故障切换时的 ARP 处理**。接管方主动发 gratuitous ARP 刷新交换机的 MAC 表，让 VIP → MAC 的映射立即指向新 Master，避免流量继续走旧路径。
 
-#### 生产上踩过的三个坑
-
-这里全是实战经验，坑比原理更值钱：
+#### 生产上的三个坑
 
 **坑一：VIP 不漂移，流量黑洞**。某次 master01 的 nginx 进程异常退出，但机器本身好好的——VRRP 通告照常发送，keepalived 认为 Master 活着，VIP 不切换。三台 master 里正好 Master01 持有 VIP，结果 nginx 挂了等于整个集群入口挂了，kubectl 全部卡死。**根因就是没配 track script，VRRP 只看机器不看进程**。教训：keepalived 必须检查它"承载的服务"，而不是只检查自己。
 
@@ -423,18 +504,6 @@ ipvsadm -Ln
 kubectl get cm kube-proxy -n kube-system -o yaml | grep mode
 # 期望输出：mode: "ipvs"
 ```
-
-为什么企业集群坚持 IPVS 而不用默认的 iptables？一张表说清：
-
-| 维度 | iptables 模式 | IPVS 模式 |
-| ---- | ---- | ---- |
-| 规则查找 | 线性遍历规则链，O(n) | 哈希表查找，O(1) |
-| 规模表现 | 几千条 Service 后 CPU 明显上升，Service 变更全量刷新规则 | 万级 Service 依然稳定，增量更新 |
-| 负载均衡算法 | 纯随机 | rr/wrr/lc/sh 等 8 种 |
-| 依赖 | 无 | 需要内核模块 + ipvsadm |
-
-生产实例：某集群 3000+ Service 用 iptables 模式，每次 Service 变更 kube-proxy 全量重写规则，单节点刷新耗时 20+ 秒，期间新 Pod 起来 Service 后端列表是旧的，出现间歇性 502。切 IPVS 后规则变更为增量更新，问题消失。**Service 规模过千，iptables 模式就是定时炸弹**。
-
 #### 重要排查命令
 
 日常排查 Service 转发问题，IPVS 侧就三板斧：
@@ -489,8 +558,6 @@ lsmod | grep ip_vs    # 空 = 模块没加载，按上面的 modprobe 补
 ```
 
 ### k8s集群扩容，添加新节点到集群
-
-扩容的前提：**新节点必须与集群版本匹配、基础环境（containerd/IPVS/内核参数）就绪**，然后一个 join 命令接入。整个过程七步，前四步都在新节点上做，后三步回到控制面。
 
 #### 1）安装 Containerd
 
@@ -594,33 +661,6 @@ kubeadm join 192.168.0.100:6443 --token abcdef.0123456789abcdef \
 
 - **主机名解析警告**：`couldn't validate the identity of the API server` 或 hosts 相关提示，把三个 master 和自己的 IP-主机名映射写进 `/etc/hosts` 即可消除；
 - 正常流程会依次跑 **pre-flight 检查 → 下载镜像/证书 → 写 kubelet 配置 → 启动 kubelet**；
-- **成功的标志**是最后两行：
-
-```text
-This node has joined the cluster:
-* Certificate signing request was sent to apiserver and a response was received.
-* The Kubelet was informed of the new secure connection details.
-```
-
-#### 7）验证节点状态
-
-回到控制面：
-
-```bash
-# 节点应显示 Ready（需要等半分钟让 CNI 分配 Pod CIDR）
-kubectl get nodes -o wide
-
-# 新节点上的 kube-proxy / calico-node 等 DS Pod 应自动拉起并 Running
-kubectl get pods -n kube-system -o wide | grep node04
-
-# 网络连通性验证：在新节点上起个 Pod 试试跨节点通信
-kubectl run net-test --image=busybox:1.36 --restart=Never -- sleep 3600
-kubectl exec net-test -- ping -c 3 10.96.0.10   # ping CoreDNS 的 ClusterIP
-```
-
-一个容易疑惑的现象：`kubectl get nodes` 里新节点显示的版本可能比集群其他节点**高一个小版本号**（如集群 1.33.2、新节点 1.33.5）——这是同版本系列的补丁号差异，能正常加入。但生产规范还是**保持全集群补丁版本一致**，为后续滚动升级省掉不必要的变量。
-
-最后跑一遍前文的 IPVS 检查确认转发模式正常（`ipvsadm -Ln` 有规则、`lsmod | grep ip_vs` 有模块），新节点即可交付使用。
 
 ### 集群版本升级
 
@@ -715,5 +755,3 @@ kubectl exec post-upgrade-check -- nslookup kubernetes.default
 | **kubelet 起不来** | cgroup driver mismatch 等 | 核对 containerd 的 `SystemdCgroup` 配置未变，`systemctl daemon-reload` 后重启 |
 
 回退优先级：**能用 etcd 快照恢复就用快照**（数据层面回到升级前一致状态）；`kubeadm upgrade rollback` 并不是所有版本都有、也不是万能的——它主要处理 manifest 回写，**真正的回退兜底永远是升级前的快照 + 集群备份**。这也是为什么备份是第一条准备工作。
-
-生产实例：某团队升级 1.33 → 1.34，跳过了"预拉取镜像"这步，worker 节点 drain 后开始拉镜像，恰好赶上公司镜像代理限速，单节点卡了 20 分钟——维护窗口被迫延长，业务容量吃紧一整个变更窗口。**升级的风险控制本质是控制维护窗口时长**：镜像提前拉、命令提前演练（先在测试集群完整走一遍）、每台节点的操作脚本化。
