@@ -83,26 +83,6 @@ lang: '中文'
 
 **定义**：专为 K8s 设计的容灾工具，核心功能是备份/恢复/迁移集群资源。CS 架构——客户端 `velero` 是命令行工具，服务端跑在集群内（Deployment + DaemonSet），真正执行备份恢复的是服务端。
 
-### 应用场景
-
-**1）迁移 K8s 数据**
-- **跨命名空间迁移**：把一个 ns 的所有资源迁到另一个 ns（恢复时改 ns 映射）
-- **跨集群迁移**：资源从一个集群迁到完全不同的集群——这是和 etcd 备份的本质区别：**不需要保持相同 IP/主机名等网络配置**，恢复时资源经 API Server 重新创建，网络由新集群自己分配
-- 典型：测试集群验证完的业务搬进生产、旧集群业务搬新集群
-
-**2）手动/周期性备份**
-- 手动单次：`velero backup create xxx --include-namespaces prod`
-- 定时调度：`velero schedule create daily --schedule="0 1 * * *" --include-namespaces prod`（cron 语法，每日/每小时随意）
-- 备份数据统一存 S3 兼容的对象存储（MinIO/OSS/S3）
-
-**3）最小范围恢复**
-- 只恢复特定 ns 里的特定资源类型：`velero restore create --from-backup xxx --include-resources deployments,services --include-namespaces prod`
-- 不用整包还原，按需挑选——"误删了一个 Deployment 只捞它"就靠这个能力
-
-**4）集群灾难恢复**
-- 原集群完全报废时，新集群装好 Velero、连上同一个对象存储，把备份全部/分批恢复
-- 恢复以 Deployment/Service 等核心资源为主，**不保证恢复出和原集群逐位一致的状态**（如运行中的 Pod 实时数据），恢复完由控制器重新拉起工作负载
-
 ### 核心组件
 
 **1）服务端（跑在集群内，真正干活的）**
@@ -188,9 +168,8 @@ RestoreController 解析 Restore 声明：还原范围是什么、数据源是�
 
 **几个实操要点**：
 - 备份产物 = **JSON 资源文件 + 压缩包**，元数据含备份时间、资源类型、校验信息——把备份包下载解压，甚至能手动 `kubectl create` 逐个还原（极端情况下的最后手段）
-- 有状态应用备份前需要**钩子**：`--pre-hook` / `--post-hook` 在打快照前后执行命令（典型：数据库先 `fsfreeze` 或刷盘，保证卷快照一致性）
+- 有状态应用备份前需要**钩子**：`--pre-hook` / `--post-hook` 在打快照前后执行命令（典型：数据库先讲内存数据刷盘，保证卷快照一致性）
 - 备份文件在对象存储里按 Backup 名字分目录，天然形成多版本历史
-- 实际运维不用死记资源字段——`velero --help` 都能查到，关注点在**备份策略设计和恢复演练**，过程交给声明式资源
 
 ### 实践
 #### 部署 Velero
@@ -353,4 +332,4 @@ clusterB（灾备）──velero服务端──┘
 4. **镜像可达**：目标集群的节点要能拉到业务镜像（私有仓库要配 secret）
 5. 执行恢复后逐项验证：`kubectl get all -n <ns>` + Pod 状态 + Service 连通性
 
-> 迁移恢复后 **NodePort 默认会变**（除非 `--preserve-nodeports`），镜像/存储类/CRD 这三类缺失是最常见的恢复失败原因——迁移前对一遍清单，比恢复完再补省事得多。
+> 迁移恢复后 **NodePort 默认会变**（除非 `--preserve-nodeports`），镜像/存储类/CRD 这三类缺失是最常见的恢复失败原因——迁移前对一遍清单，比恢复完再补省事得多。 

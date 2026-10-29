@@ -10,6 +10,7 @@ lang: '中文'
 ---
 
 
+
 ## 定义
 k8s是一个开源的容器编排平台，利用它可以非常方便，高效地管理多个容器。对比一下不用k8s的情况。
 | 痛点                      | k8s 的解法                                                      |
@@ -418,5 +419,44 @@ kube-scheduler           → 调度（Schedule）：新 Pod 放哪个节点
 ```
 对应前面的 POD 创建流程：controller-manager 生成"创建 Pod"的事件 → scheduler 选好节点 → 节点上的 kubelet 创建容器。两者分工不同、缺一不可。
 
+
+## csi,cni,cri
+
+k8s 自己不干"搬砖"的活——它把容器怎么跑、网络怎么通、存储怎么挂这三件事**接口化**，交给真正的实现方。三个接口名字都是"Container + 领域 + Interface"：
+
+| 接口 | 全称 | 管什么 | 常见实现 |
+|---|---|---|---|
+| **CRI** | Container Runtime Interface | 容器怎么创建/启动/停止 | containerd、CRI-O |
+| **CNI** | Container Network Interface | Pod 网络怎么通 | flannel、calico、cilium |
+| **CSI** | Container Storage Interface | 卷怎么挂/卸载 | ceph-csi、云厂商 EBS/CBS 驱动 |
+
+**为什么要搞这三套接口**：k8s 是通用编排平台，不可能自己内置所有运行时、所有网络方案、所有存储驱动。接口化的好处和"USB 标准化"一样——**kubelet 只管调接口，换实现不用改 k8s 一个字**：containerd 换 CRI-O、flannel 换 calico、自建存储换云盘，都是装插件的事。
+
+**调用关系**（对应前面 Pod 创建流程）：
+
+```text
+kubelet（每节点代理，唯一的"总调用方"）
+  ├── CRI → 调容器运行时：创建 Pause 沙箱、起业务容器
+  ├── CNI → 调网络插件二进制：给 Pause 的 netns 配网（veth、IP、路由）
+  └── CSI → 卷挂载时调存储驱动：attach 盘 → 格式化/挂载到 Pod 目录
+```
+
+三者分工用一个"给 Pod 挂云盘 + 起容器 + 通网络"的完整例子串起来：
+
+```text
+1. kubelet 调 CRI（containerd）：创建 Pause 容器 → 拿到 netns
+2. kubelet 调 CNI（calico 二进制）：把 netns 交给它 → 配好 veth + Pod IP
+3. Pod 里有 PVC？kubelet 调 CSI（ceph-csi）：向存储集群申请卷 → 挂到节点 → 绑进容器目录
+4. 最后 CRI 再起业务容器（加入 Pause 的 netns），挂上第 3 步的目录
+```
+
+几个容易混淆的点：
+
+- **三个接口的调用方都是 kubelet**（网络和存储的"实际动作"也可能经插件的 DaemonSet 补充，如 calico 的 Felix、ceph-csi 的 sidecar），但"决策方"在控制平面——调度结果写进 Node 对象，kubelet 照单执行
+- **CNI 插件是一堆二进制 + 配置文件**，kubelet 读 `/etc/cni/net.d/` 决定调哪个（post23 详写过流程）；CSI 驱动则是以一组 Deployment/StatefulSet + DaemonSet 形式部署的 Pod，通过 gRPC 长连接服务 kubelet——形态不同，接口本质相同
+- **CRI 之前是 docker 的天下**，k8s 早期直接内嵌 docker（DockerShim）；后来 docker 出于商业利益不肯实现 CRI 标准，k8s 1.24 移除 DockerShim 转向 containerd——containerd 本就是 docker 内部拆出来的容器运行时，比 docker 更轻（砍掉了 build/CLI 这些编排不需要的东西），**这就是"k8s 弃用 docker"事件的全部含义：不是不能跑 docker 镜像，而是不再经由 docker 这个运行时**
+- **CSI 是三个里最年轻的**之前驱动代码编译在 k8s 二进制里，加一种存储要改 k8s 源码重发版；CSI 把存储实现也拉出成独立插件，从此存储厂商只维护自己的驱动
+
+一句话总结：**CRI 管容器生命周期、CNI 管 Pod 网络、CSI 管存储卷——三套 gRPC/二进制接口 + kubelet 这一个总调用方，把"编排逻辑"和"具体实现"解耦，k8s 的整个生态插件体系就建立在它们之上**。
 
 **更深层次剖析请看https://bbs.huaweicloud.com/blogs/334436**
