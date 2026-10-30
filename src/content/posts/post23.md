@@ -463,7 +463,80 @@ Pod B(10.244.2.3) 容器内 eth0 收到
 
 ## cilium
 
+前面 flannel/calico 的套路你已经熟了：**控制面是用户态进程（flanneld/BIRD），数据面是内核原生模块（vxlan/路由表/iptables）**。cilium 换了一个玩法：**数据面不再用内核现成的 iptables/路由这些"通用设施"，而是现场生成 eBPF 程序塞进内核**——控制面把你的需求编译成专属的字节码，让内核"现学现卖"。
 
+### eBPF 是什么
+
+eBPF（extended Berkeley Packet Filter）是内核里的一台**字节码虚拟机**：把验证过的程序加载进内核，挂到网络栈的固定钩子（收包、发包、socket 层）上执行，可以在内核态直接完成**过滤、转发、改写、监控**——不用改内核源码、不用写内核模块。可以理解为"给内核做 Jit 编程"：
+
+- 传统 CNI：需求固定 → 用内核已有的 iptables/路由/隧道模块**拼装**转发逻辑
+- cilium：需求任意 → Agent 把需求**编译成 eBPF 程序**，注入到内核网络栈的关键路径上，数据包在内核态一路被"程序化"处理
+
+这个差异带来几个质变：eBPF 程序运行在内核态，没有 iptables 那种逐规则遍历；绕过了 netfilter 整个框架（很多路径直接 short-circuit，socket 层就能转发出去）；还能看到 L7（HTTP 路径、gRPC 方法）——这是 iptables 永远做不到的。
+
+### 架构与组件
+
+![cilium架构：Node 内 Agent 守护进程经 BPF Tools 管理 Maps 和 BPF 程序，Watchers watch apiserver；Cilium Operator 集群级组件](./images/cilium-overview.png)
+
+| 组件 | 位置 | 职责 |
+|---|---|---|
+| cilium-agent | 每节点一个（DaemonSet） | 核心大脑：watch apiserver 拿 Pod/Service/NetworkPolicy，把策略**编译成 BPF 程序**写入内核，管理 BPF Map |
+| Cilium Operator | 集群级（Deployment） | 干"每集群一次"的活：给节点分配 PodCIDR（写进 CiliumNode CRD）、处理节点事件。**不参与任何转发**，短暂挂掉集群照常跑 |
+| CNI 插件二进制 | 每节点 /opt/cni/bin | kubelet 调它给 Pod 配网，它通过 REST API 找本节点 Agent 要 IP、注册 Endpoint |
+| Hubble | 附加组件 | 可观测层：实时看服务间流量、策略命中的 drop，相当于给 eBPF 装了个"行车记录仪" |
+
+Agent 的核心数据结构是两张东西：**BPF Map**（内核哈希表，存 endpoint、service、策略规则，查找 O(1)）和 **BPF 程序**（挂在网卡的 tc 层/容器 veth 上，每包执行）。
+
+### Endpoint 与 Identity：cilium 怎么"认"一个 Pod
+
+cilium 不按 IP 管理对象，而是两个抽象：
+
+- **Endpoint**：一组共享网络身份的容器（≈ 一个 Pod 的 netns），每个 Endpoint 有自增 ID。Agent 给每个 Endpoint 在 veth 两端都挂 BPF 程序——**进 Pod 和出 Pod 的流量，第一站就是 cilium 的程序**
+- **Identity（身份）**：把 Endpoint 的**标签**（k8s:io.kubernetes.pod.namespace=default、k8s:app=web...）哈希成一个 16 位身份 ID。策略不写"允许 10.244.1.5"，写"允许身份为 prod-frontend 的"——**IP 漂了无所谓，身份跟着标签走**
+
+这就是 cilium 策略的最大卖点：以身份为中心而不是以 IP 为中心。Pod 重建 IP 变了，标签没变，策略自动跟上。
+
+### 数据面：BPF 程序挂在哪、数据怎么走
+
+![cilium数据面：Daemon 生成 BPF 程序，字节码注入到 eth0 和各容器 veth 上](./images/cilium.png)
+
+```text
+Pod A(10.0.0.11, node1) → Pod B(10.0.1.22, node2) 的路径：
+
+Pod A eth0
+  ▼ veth 出端：lxc-xxx 的 BPF 程序（egress）
+  │   查 endpoint map：目的 IP → Pod B 的 identity
+  │   查 policy map：源 identity → 目的 identity 是否放行（L3/L4 决策，内核态完成）
+  ▼ node1 路由：10.0.1.0/24 下一跳 node2（类似 calico BGP 模式，或 VXLAN 封装，可选）
+  ▼
+node2 入站：lxc-yyy 的 BPF 程序（ingress）再做一次策略检查 → 直送 Pod B 的 veth
+```
+
+关键差异对照前面学过的三兄弟：
+
+| | flannel | calico | cilium |
+|---|---|---|---|
+| 数据面 | 内核 vxlan 模块 | 内核路由表 | **eBPF 程序 + BPF Map** |
+| Service 转发 | kube-proxy iptables | kube-proxy iptables/ipvs | **自己用 eBPF 做 DNAT，替代 kube-proxy** |
+| 策略执行 | 无 | iptables 规则链（O(n) 链式匹配） | **BPF Map 哈希查找（O(1)）** |
+| L7 能力 | 无 | 无 | 有（socket 层 hook，可看 HTTP 语义） |
+
+特别是 Service：cilium 完全绕开 kube-proxy——kube-proxy iptables 模式那条"逐包线性匹配 KUBE-SERVICES 链"的路径，被 cilium 换成 socket 层的 eBPF 程序直接完成 DNAT（connect 时就改写目的地址），Service 规模再大也只是 map 里多一条哈希项。
+
+### 优缺点
+
+**优点**：
+- 性能最好的一档：数据面全在内核态编程，无逐规则遍历、无用户态切换；大规模 Service/策略下延迟几乎不涨
+- 以身份为中心的策略 + **L7 支持**：能按 HTTP 路径、gRPC 方法做访问控制，microservice 语义的流量治理
+- 可观测性极强：Hubble 能看到每条流量的 policy verdict（放行/丢弃原因），排障从"猜 iptables 链"变成"看结构化事件"
+- 替代 kube-proxy、原生支持带宽管理/加密等，组件越并越少
+
+**缺点**：
+- **内核版本门槛**：要求 4.19+，高级特性（快速路径、socket-level LB）要 5.x——老内核环境直接劝退
+- 学习曲线陡峭：eBPF、BPF Map、identity 体系一套新心智模型；排障要用 bpftool/cilium-cli/Hubble，传统 tcpdump 只能看到表层数据
+- 资源消耗：每节点 Agent 常驻 + 编译 BPF 程序的 CPU 开销，小集群上这些"高级能力"收益体现不出来
+
+**怎么选**：普通业务、追求稳 → calico（成熟、策略够用）；云原生深度玩家、微服务安全治理、大规模高性能诉求 → cilium。趋势上 cilium 是明确的下一代方向（eBPF 数据面也在被各家吸收），但落地前先确认内核版本和团队学习成本。
 
 
 ## FAQ
