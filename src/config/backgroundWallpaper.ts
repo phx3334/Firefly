@@ -62,7 +62,7 @@ export const backgroundWallpaper: BackgroundWallpaperConfig = {
 		// playerUrl: "/assets/videos/firefly.mp4",
 		playerUrl: [
 			//"https://www.image2url.com/r2/default/videos/1781765166391-f2ba6648-1597-40e0-9f0a-6768ae39e574.mp4",
-			"/assets/video/firefly.mp4",
+			"https://www.image2url.com/r2/default/videos/1793441516119-637dfde9-cbb8-4bc8-8b96-c9502134da2e.mp4",
 		],
 	},
 	// 横幅壁纸和全屏壁纸共享配置
