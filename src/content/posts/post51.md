@@ -11,10 +11,8 @@ lang: '中文'
 
 
 
-
-背景介绍请见[issue](https://github.com/Tencent/VulnGym/issues/6)   [PR](https://github.com/Tencent/VulnGym/pull/54)
-
 ## 前置知识
+**背景介绍请见**[issue](https://github.com/Tencent/VulnGym/issues/6)和[PR](https://github.com/Tencent/VulnGym/pull/54)
 ### VulnGym是什么
 
 [VulnGym](https://github.com/Tencent/VulnGym) 是腾讯悟空安全团队开源的一个**评测基准(Benchmark)**,用途很单纯:考 AI。
