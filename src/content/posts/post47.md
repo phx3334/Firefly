@@ -147,7 +147,7 @@ metadata:
   name: order-service
   namespace: argocd
   finalizers:
-  - resources-finalizer.argocd.argoproj.io   # 删除 Application 时级联删除集群资源（默认不删）
+  - resources-finalizer.argocd.argoproj.io   # 删除 Application 时级联删除它所集群资源，例如deployment,service等，当需要直接下线这个业务的时候选择级联（默认不删）
 spec:
   project: default                            # 所属 AppProject，生产环境必须按团队划分
 
@@ -362,7 +362,7 @@ metadata:
   name: db-migration
   annotations:
     argocd.argoproj.io/hook: PreSync              # 同步前执行，失败则整个同步中止
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation   #下次 Hook 要跑之前删旧的
 spec:
   template:
     spec:
