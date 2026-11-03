@@ -193,6 +193,114 @@ postgresql-ha:
 - `--set key=value`：直接在命令行传入键值对，如`--set vote.tag=v2`，同样只覆盖指定的 key。适合临时改动、CICD 中注入镜像 tag 等少量参数。
 - 优先级：`--set` > 后面的 `-f` > 前面的 `-f` > chart 默认 values.yaml。即命令行 set 的值永远最优先，多个 `-f` 按出现顺序后者覆盖前者。  
 - 缺点：`--set` 的值不会保存在任何文件中，因此生产环境更推荐用 `-f` + 独立的 values 文件（可纳入 Git 管理）。  
+### 模板内置变量
+渲染模板时 helm 会注入一组内置变量，最常用的是 `.Release` 和 `.Chart`：
+- `.Release.Name`：release 名称，即执行 `helm install/upgrade` 命令时指定的名字（如 `vote`），在模板中通过 `.Release.Name` 获取，资源命名、标签里经常引用它。
+- `.Release.IsInstall` / `.Release.IsUpgrade`：布尔值，区分当前操作是安装还是升级/回滚。执行 `helm install` 时 IsInstall 为 true；执行 `helm upgrade` 或 `helm rollback` 时 IsUpgrade 为 true。典型应用：安装时初始化数据库，升级时跳过初始化（库已存在）。
+- `.Release.Revision`：修订版本号，从 1 开始计数，每次升级或回滚都加 1。了解即可，实际使用场景较少。
+- `.Chart`：访问 `Chart.yaml` 文件的内容，如 `.Chart.AppVersion`（应用版本）、`.Chart.Version`（chart 版本）、`.Chart.Description`（描述）。
+
+生产小例子：CI 发布时把 `{{ .Release.Name }}-{{ .Chart.AppVersion }}` 写进镜像 tag 或 Pod 注解，配合 `helm history vote` 就能追溯每个 revision 对应的版本；回滚时 revision 照样递增，不会和历史版本混淆。
+### range 循环
+遍历 values 里的列表或字典用 `range`（对应 Go 的 for），有两种形态。
+
+**遍历列表**——单变量模式，`.` 指向当前迭代元素：
+``` yaml
+# values.yaml
+flavors:
+  - cheese
+  - peppers
+  - onions
+```
+``` yaml
+# 模板
+{{- range .Values.flavors }}
+{{ . | title | quote }}
+{{- end }}
+```
+处理过程：第一次迭代 `.` 为 `cheese`，经 `title` 首字母大写、`quote` 加引号后输出 `"Cheese"`；第二次输出 `"Peppers"`，第三次输出 `"Onions"`。
+
+**遍历字典（map）**——必须显式声明 key、value 两个变量，变量名可任意指定（如 `$k/$v`），但需保持语义清晰：
+``` yaml
+# values.yaml
+favorite:
+  drink: coffee
+  food: pizza
+```
+``` yaml
+{{- range $key, $val := .Values.favorite }}
+{{ $key }}: {{ $val | quote }}
+{{- end }}
+```
+处理过程：第一次迭代 `$key="drink"`、`$val="coffee"`，输出 `drink: "coffee"`；第二次输出 `food: "pizza"`。
+
+要点：
+- 核心区别：列表循环是单变量模式，通过 `.` 获取元素；字典循环需显式声明 key 和 value 两个变量。
+- 所有循环都通过 `range` 启动，且循环体内定义的变量作用域仅在循环体内有效。
+- 管道操作符 `|` 可链式调用多个函数，常用函数：`title`（首字母大写）、`quote`（添加双引号）、`default`（兜底值）。
+### with 作用域控制
+`.` 默认指向根作用域，访问深层嵌套的 values 时路径一长就很冗长：
+``` yaml
+{{ .Values.favorite.drink | default "tea" | quote }}
+{{ .Values.favorite.food | default "pizza" | quote }}
+```
+用 `with` 把取值作用域切换到指定路径，之后直接用子属性名访问：
+``` yaml
+{{- with .Values.favorite }}
+{{ .drink | default "tea" | quote }}
+{{ .food | default "pizza" | quote }}
+{{- end }}
+```
+作用域转换原理：默认作用域在根（`.`），通过 `with .Values.favorite` 把作用域切换到该节点，切换后 `.drink` 就等价于原来的 `.Values.favorite.drink`。
+
+**坑点**：`with` 块内访问其他作用域的变量必须加 `$` 前缀——`$` 表示从根作用域开始解析：
+``` yaml
+{{- with .Values.favorite }}
+release: {{ $.Release.Name }}   # 正确：$ 从根作用域解析
+{{ .Release.Name }}             # 错误：在 .Values.favorite 下找 Release，找不到
+{{- end }}
+```
+忘加 `$` 导致变量找不到是最常见的报错，嵌套 `with` 时作用域混淆尤其要注意。
+### _helpers.tpl
+`/templates` 下以 `_` 开头的文件（如 `_helpers.tpl`）**不会被渲染成独立的 K8s 资源**，而是存放可复用的模板片段，供其他模板通过 `include` 调用。典型内容：
+``` yaml
+{{- define "vote.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name (include "vote.name" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{- define "vote.labels" -}}
+helm.sh/chart: {{ include "vote.chart" . }}
+app.kubernetes.io/name: {{ include "vote.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{- define "vote.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "vote.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+```
+在 Deployment/Service 模板里这样引用：
+``` yaml
+metadata:
+  name: {{ include "vote.fullname" . }}
+  labels:
+    {{- include "vote.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "vote.selectorLabels" . | nindent 4 }}
+```
+要点：
+- `define` 定义片段、`include` 调用片段。`include` 返回字符串，可以接管道过滤器（如 `| trunc 63（截断字符串，取前63个） | trimSuffix "-"（丢弃字符串末尾的 "-"）| nindent 4`（缩进4空格））；`include "vote.fullname" .` 末尾的 `.` 是把当前作用域的上下文（.Values、.Release 等）传进去，漏传会导致模板内取不到变量。
+- 命名必须加 chart 名前缀（如 `vote.`），否则会和子 chart 的同名 define 冲突。
+- fullname 的拼接细节对应 K8s 命名规范：`printf "%s-%s"` 用 `Release.Name + Chart.Name` 拼接，同一 chart 装多个 release 时资源名天然不冲突（这也是 release 机制支持多实例的底层约定）；`trunc 63` 因为 K8s 资源名（DNS label）最长 63 字符；`trimSuffix "-"` 因为名字不能以连字符结尾——三步合起来自动生成合法且不冲突的资源名。
+- 核心价值是**一致性**：`selectorLabels` 同时被 Service 的 `selector` 和 Pod 的 `template.labels` 引用，保证两者永远匹配（Service 选不中 Pod 的经典故障就是这两处手写改岔了）；`labels` 统一输出 `app.kubernetes.io/*` 标准标签，改一处全生效。
+- 维护优势：命名、标签逻辑集中在 `_helpers.tpl` 一处，改一个文件，deployment/service/ingress 全部生效，不用挨个配置文件改——典型场景是统一管理微服务各组件的名称格式。
 ### Hooks
 Hooks（钩子）是 helm 提供的一种机制，可以让某些资源不随 release 的常规生命周期安装/卸载，而是在特定时间点执行，例如数据库迁移、数据初始化、发送通知等。通过给资源添加 annotation 声明：  
 ``` yaml
