@@ -83,3 +83,27 @@ func newEngine(cfg *config.Config, logger *zap.Logger, db *gorm.DB, redisConn *r
 }
 ```
 
+### 业务细节
+grpc采取懒连接，懒连接把"进程启动"与"依赖可用"解耦——这正是 K8s 环境的标准姿势，因为 启动顺序本来就不可控 （调度器、就绪探针、滚动更新都可能让任意服务先后就绪）。
+```go
+// VideoGRPCClient 调用 video-svc 的 gRPC 客户端。
+//
+// 使用 grpc.NewClient 懒连接：构造时不做网络操作，
+// 启动顺序不依赖 video-svc 已就绪；真正调用时才建立连接。
+type VideoGRPCClient struct {
+	client pb.VideoServiceClient
+}
+
+func NewVideoGRPCClient(addr string) (*VideoGRPCClient, error) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+	if err != nil {
+		return nil, err
+	}
+	return &VideoGRPCClient{client: pb.NewVideoServiceClient(conn)}, nil
+}
+```
+
+
+
+
