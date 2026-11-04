@@ -17,107 +17,134 @@ lang: '中文'
 - 寄存器从栈中取数据，交给cpu执行  
 - 函数执行完：返回值放进 RAX 寄存器，然后还原 rsp、弹出 rbp 恢复调用者的栈帧，ret 弹出返回地址跳回调用者继续执行  
 **补充** ：rbp（栈基址，是一个基准地址，这个基准地址通过偏移确定数据的位置）,rsp（栈顶指针）,rip（指令指针）等都是不同分工的寄存器  
-### IDL(接口定义语言)
-远程调用双方可能是不同语言（Java 服务调 Go 服务），没法直接传"对方语言的对象"。IDL 用一套与语言无关的语法，把函数名、参数、返回值描述清楚，双方各自生成自己的代码。
-**流程**：
-```text
-用 IDL 写接口定义
-   ↓ 各自生成代码
-Java 端生成 Java 的客户端/服务端代码
-Go 端生成 Go 的客户端/服务端代码
-```
-**具体例子**：以"Java 服务调用远程 Go 服务上的获取用户信息函数"为例——Java 端是**客户端（调用方）**，跑在服务器 A；Go 端是**服务端（被调方）**，跑在服务器 B。先写一份契约（`.proto` 文件）：
-```protobuf
-syntax = "proto3";       // 使用proto3语法，gRPC主流版本
-package user;            // 包名，生成代码会以此做命名空间
 
-// 定义gRPC服务，里面声明RPC函数
-service UserService {
-  // RPC方法：调用方传 GetUserReq，服务端返回 GetUserResp
-  rpc GetUserById (GetUserReq) returns (GetUserResp);
-}
-
-// 请求消息：调用时传给服务端的数据结构
-message GetUserReq {
-  int64 user_id = 1;     // 1是字段编号，protobuf序列化用，不是变量顺序
-}
-
-// 响应消息：服务端返回给客户端的数据
-message GetUserResp {
-  int64  user_id   = 1;
-  string user_name = 2;
-  string email     = 3;
-}
-```
-注意：这里只有"接口长什么样"，没有任何 Java/Go 的东西。然后双方各自用编译工具（`protoc`）生成代码：
-```text
-        ┌──────────────────────────────────────┐
-        │        user.proto（唯一契约）          │
-        └──────────────────┬───────────────────┘
-                 protoc 编译
-        ┌──────────────────┴───────────────────┐
-        ▼                                      ▼
-  Java 端（客户端/调用方）                  Go 端（服务端/被调方）
-  生成：                                  生成：
-  • UserServiceGrpc.java（客户端桩）        • user.pb.go（消息 struct）
-  • GetUserReq.java / GetUserResp.java    • user_grpc.pb.go（服务接口，待实现）
-```
-生成的代码不是"翻译"，而是**对着契约各自实现一遍**：Java 端拿到的是 `GetUserReq` 这个类，Go 端拿到的是 `GetUserReq` 这个 struct，它们只是"长得像"，各自语言内部的东西互不感知。
-之后双方各自对着自己的代码编程——Java 客户端调用（只认识 Java 的类）：
-```java
-// ManagedChannel：gRPC连接通道，代表到远端B机器的连接
-ManagedChannel channel = ManagedChannelBuilder
-    .forAddress("10.0.0.2", 8080)   // 指定Go服务端的IP和端口
-    .usePlaintext()                 // 不开启TLS加密，生产环境不要用！仅测试
-    .build();
-
-// 阻塞Stub：同步调用桩，protoc根据proto自动生成
-UserServiceGrpc.UserServiceBlockingStub stub =
-    UserServiceGrpc.newBlockingStub(channel);
-
-// 像本地方法一样调用，底层是网络RPC
-GetUserResp resp = stub.getUserById(
-    GetUserReq.newBuilder().setUserId(123L).build());
-```
-Go 服务端实现（只认识 Go 的 struct）：
+## 微服务
 ```go
-// Go 服务端（被调方），跑在服务器 B，监听 8080
-t// 实现proto生成出来的服务接口
-type userServer struct {
-    userpb.UnimplementedUserServiceServer // gRPC要求嵌入，兼容接口升级
+// video.proto
+yntax = "proto3";
+
+// 视频服务契约：拆服务后由 video-svc 提供，供 user/interaction 服务读取视频信息与统计。
+package video;
+
+//后续video_grpc.pb.go和video.pb.go文件会根据video.proto生成的路径
+//video.pb.go只负责 `message`：结构体、编码解码、marshal/unmarshal。和 gRPC 无关，单纯 protobuf 序列化代码。
+//video_grpc.pb.go:- `VideoServiceServer` 接口（你在 video-svc 里要实现这个接口）`VideoServiceClient`（user /interaction 服务拿来调用的客户端）每个 `rpc` 方法的包装
+option go_package = "fake_tiktok/api/pb";
+
+service VideoService {
+  rpc GetVideo(GetVideoReq) returns (VideoBrief);
+  rpc GetVideos(GetVideosReq) returns (GetVideosResp);
+  rpc ListUserVideos(ListUserVideosReq) returns (VideoListResp);
+  rpc GetUserStats(GetUserStatsReq) returns (UserStats);
+  rpc IsVideoOwner(IsVideoOwnerReq) returns (BoolResp);
 }
 
-// 实现RPC方法 GetUserById，这是真正业务逻辑
-func (s *userServer) GetUserById(
-    ctx context.Context,          // gRPC上下文：携带超时、metadata、trace信息
-    req *userpb.GetUserReq,       // 自动生成的请求结构体，来自proto
-) (*userpb.GetUserResp, error) {
-    // 业务逻辑：组装返回响应
-    return &userpb.GetUserResp{
-        UserId:   req.UserId,
-        UserName: "张三",
-        Email:    "zhangsan@example.com",
-    }, nil
+message GetVideoReq {
+  uint64 video_id = 1;
+}
+
+message GetVideosReq {
+  repeated uint64 video_ids = 1;
+}
+
+message VideoBrief {
+  uint64 id = 1;
+  string author_id = 2;
+  string title = 3;
+  string status = 4;
+  string cover_url = 5;
+  string play_url = 6;
+  double duration = 7;
+  int64 play_count = 8;
+  int64 like_count = 9;
+  int64 comment_count = 10;
+  int64 created_at_unix = 11;
+  string description = 13;
+}
+
+message GetVideosResp {
+  repeated VideoBrief videos = 1;
+}
+
+message ListUserVideosReq {
+  string user_id = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+}
+
+message VideoListResp {
+  repeated VideoBrief videos = 1;
+  int64 total = 2;
+}
+
+message GetUserStatsReq {
+  string user_id = 1;
+}
+
+message UserStats {
+  int64 video_count = 1;
+  int64 total_play_count = 2;
+  int64 total_like_count = 3;
+}
+
+message IsVideoOwnerReq {
+  uint64 video_id = 1;
+  string user_id = 2;
+}
+
+message BoolResp {
+  bool ok = 1;
 }
 ```
-整个调用链条长这样：
+
+### Java 客户端调用 video 服务的例子
+上面的 proto 由 Go 实现为 video-svc，现在看 Java 侧（比如 user-svc）怎么调它。关键前提：**Java 的代码也由同一个 video.proto 生成**（protoc 加 Java 插件），方法签名天然一致：
+``` java
+// ① 建立连接：基于 HTTP/2 的长连接 channel，地址来自注册中心
+ManagedChannel channel = ManagedChannelBuilder
+        .forAddress("10.0.0.2", 9002)
+        .usePlaintext()                // 生产环境换 TLS
+        .build();
+
+// ② 拿到 proto 生成的客户端 stub：方法名、参数、返回值和 proto 里定义的一一对应
+VideoServiceGrpc.VideoServiceBlockingStub stub = VideoServiceGrpc.newBlockingStub(channel);
+
+// ③ 构造请求消息（builder 是 protobuf 生成类的标准写法）
+GetVideoReq req = GetVideoReq.newBuilder()
+        .setVideoId(12345L)
+        .build();
+
+// ④ 发起远程调用——写法和调本地方法没区别，序列化、网络传输、反序列化全被 stub 屏蔽
+VideoBrief video = stub.getVideo(req);
+System.out.println(video.getTitle());
+```
+Go 侧同样零对接成本：它实现的就是 `video_grpc.pb.go` 生成的 `VideoServiceServer` 接口，收到请求后执行自己写的 `GetVideo` 本地函数。
+### 为什么不同语言写的微服务也能通信
+因为双方在三个层面约定了**与语言无关的标准**——语言只影响"生成什么代码"，不影响"线上跑什么字节"：
+- **接口契约（proto IDL）**：同一个 .proto 文件，Java 侧 protoc 生成 stub，Go 侧生成 Server 接口。相当于同一份合同的两种语言译本，方法名、字段、含义完全对齐。
+- **序列化格式（Protobuf wire format）**：字节流怎么编码由 proto 规定（字段编号 + wire type + 值），和语言无关。Java 编码出的 `video_id = 1` 是"字段编号1 + varint值"，Go 按编号1就能解出同一个值——**网络上传输的是字节，不是任何语言的对象**。
+- **传输协议（HTTP/2）**：所有主流语言都有标准实现，帧格式一致，保证字节从一端完整到达另一端。
+
+类比：两国通信不靠"说同一种语言"，靠"约定同一套密码本（Protobuf）+ 同一套信封格式（HTTP/2）+ 同一份业务合同（proto）"。字节流本身没有语言属性——这就是 Java user-svc 能直接调 Go video-svc 的根本原因，也是微服务允许各团队自由选语言栈的前提。
+### 一次完整调用的流程（含序列化/反序列化）
 ```text
-Java 客户端（服务器 A）                        Go 服务端（服务器 B）
-┌────────────────────────┐       网络       ┌────────────────────────┐
-│ stub.getUserById(123)  │                 │ func GetUserById()     │
-│ ① 序列化成字节流        │ ────请求───────▶ │ ② 反序列化还原参数      │
-│ ③ 等响应（客户端计时）   │ ◀───响应──────── │ ③ 执行函数返回结果      │
-│ ④ 反序列化还原对象      │                 │ ④ 序列化成字节流发回     │
-└────────────────────────┘                 └────────────────────────┘
+Java user-svc                                      Go video-svc（gRPC server 监听 :9002）
+─────────────                                      ─────────────────────────────────────
+① 建立连接
+   ── TCP 握手 + HTTP/2 握手（gRPC channel 长连接）──────────────────────────────▶
+
+② 业务代码 stub.getVideo(req)
+③ 序列化：Java GetVideoReq 对象 ──Protobuf编码──▶ 二进制字节流
+   ── HTTP/2 DATA 帧发送 ─────────────────────────────────────────────────────▶
+                                                       ④ 反序列化：字节流 ──Protobuf解码──▶ Go 结构体 GetVideoReq
+                                                       ⑤ 调用本地函数 VideoService.GetVideo()
+                                                          （查 DB，组装 VideoBrief）
+                                                       ⑥ 序列化：Go VideoBrief 结构体 ──Protobuf编码──▶ 字节流
+   ◀────────────────────────── HTTP/2 DATA 帧（响应）───────────────────────────
+⑦ 反序列化：字节流 ──Protobuf解码──▶ Java VideoBrief 对象
+⑧ stub.getVideo() 返回，业务代码拿到结果
 ```
-注意两端执行的是**各自的代码**：Java 端执行的是 Java 生成的客户端桩，Go 端执行的是 Go 实现的函数体——"调用函数"这件事发生在服务器 B 上。
-
-**关键点**：
-- 双方都不知道对方语言：Java 端不知道"对方是 Go"，Go 端也不知道"来的是 Java"，各自只对着自己生成的代码编程
-- 中间传输的是**统一的二进制**（Protobuf 序列化），不是任何一方的对象——这就是语言无关的根基，也呼应前面说的"字段编号是线上身份"
-- `.proto` 文件是唯一契约，改契约要重新生成代码、重新发布，这也是后面"兼容性"话题的伏笔
-
-
+序列化/反序列化是**成对镜像**的：发送端 ③ 编码出的格式，接收端 ④ 按同一格式解码；⑥ ⑦ 同理。③ 到 ⑥ 之间（跨网络那段）流动的永远是语言无关的二进制字节流。
 ## 为什么要有rpc
 在微服务架构中，我们经常需要跨服务器调用函数，这个过程就引入了几个需要解决的问题（后续解决方案并不会给出所有，因为我认为有些没必要在这里写出来）
 - **网络传输**：定协议，格式

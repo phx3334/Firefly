@@ -19,6 +19,31 @@ helm是k8s的包管理工具，可以将k8s应用打包成类似于windows/mac�
 ### release
 - 定义: Chart安装后的运行实例
 - 特点: 同一Chart可在不同命名空间多次安装，形成多个Release
+### 典型目录结构
+一个 chart 就是一个普通目录，`helm upgrade --install vote .` 里的 `.` 指向的就是它的根目录：
+``` 
+vote/                        # chart 根目录（也是 helm 命令执行的路径）
+├── Chart.yaml               # chart 元数据：名称、版本、dependencies 依赖声明
+├── values.yaml              # 默认配置值，模板里通过 .Values.xxx 读取
+├── values-prod.yaml         # 可选：环境覆盖值，安装时用 -f 引入
+├── charts/                  # helm dependency update 下载的子 chart 压缩包
+│   ├── redis-17.16.0.tgz
+│   └── postgresql-ha-11.9.0.tgz
+├── templates/               # K8s 资源模板，渲染后才是最终要提交的 manifest
+│   ├── _helpers.tpl         # 可复用模板片段（下划线开头，不渲染为资源）
+│   ├── vote-deployment.yaml
+│   ├── vote-service.yaml
+│   ├── result-deployment.yaml
+│   ├── result-service.yaml
+│   ├── worker-deployment.yaml
+│   └── NOTES.txt            # helm install 成功后在终端打印的使用提示
+└── .helmignore              # 打包时排除的文件，写法同 .gitignore
+```
+要点：
+- `Chart.yaml` 管"我是谁、依赖谁"，`values.yaml` 管"参数默认值"，`templates/` 管"长什么样"——三者职责分离。
+- `charts/` 里是 `helm dependency update` 拉下来的 `.tgz`，安装时自动解压渲染，所以 `templates/` 里看不到中间件的资源。
+- `NOTES.txt` 不是 K8s 资源，只在命令行输出，常用来打印访问地址、查看日志的提示命令。
+- `helm lint vote`（静态检查）和 `helm template vote .`（只渲染不提交，本地预览最终 yaml）是改动模板后的两个常用验证命令。
 ### 示例投票应用举例
 `/templates`文件夹下面都是各种资源的模板文件，有：  
 ``` yaml
@@ -128,6 +153,7 @@ spec:
 ```
 下面是`Chart.yaml`文件,与`/templates`处于同一级
 ``` yaml
+#注意这个apiversion仅是针对helm版本，与k8s的那个没有任何关系
 apiVersion: v2
 name: vote
 description: Kubernetes vote application
