@@ -732,9 +732,10 @@ datasources:
 ## 集成OTEL SDK
 平台侧（Prometheus/Loki/Grafana）已就绪，现在轮到**应用侧**：接入 OpenTelemetry SDK，把三大支柱从应用里交出来，并用 trace_id 把它们缝在一起。分工原则：**组件监控靠配置（K8s 组件天生暴露 /metrics），业务可观测性必须代码埋点**（链路、业务指标、日志关联，配置变不出来）。
 
-### 基础概念：Trace 与 Span
+### 基础概念
+#### Trace 与 Span
 - **Trace**：一次请求的完整调用链，用全局唯一的 **trace_id** 标识
-- **Span**：链路中的一"跳"（一次 HTTP 调用、一次 DB 查询），有自己的 **span_id**、耗时和状态
+- **Span**：链里**一段操作**，比如：HTTP 入站、查 SQL、调用另一个微服务，有开始时间、结束时间、属性、状态
 
 **Trace 是树，Span 是树上的节点，trace_id 是这棵树的根标签。** 以请求穿过三个服务为例：
 
@@ -756,4 +757,238 @@ datasources:
 - **跨服务传播靠 HTTP Header 自动完成**：app-a 调 app-b 时，SDK 自动把 trace_id 塞进请求头，无需手写
 
 一句话：**trace_id 回答"是哪次请求"，span_id 回答"是这次请求里的哪一步"**——后文的一切关联都建立在这两个 ID 随请求流动、被各处记录之上。
+#### 其它
+**Tracer 创建 Span → Attribute 填细节 → Sampler 决定留不留 → Propagator（W3C TraceContext / traceparent）带它跨服务 → Baggage 顺带传业务元数据 → 数据用 OTLP 导出**。
 
+- **Tracer（追踪器）**：OTel SDK 里负责**创建 Span** 的对象，来自全局单例 TracerProvider。代码里每次埋点——`tracer.startSpan("SELECT users")`——都是在开一个新 Span。一个进程可以有多个 Tracer（按组件命名，如 `httpx`），但它们产出的 Span 都汇入同一条 Trace。
+```go
+// 1. 全局唯一的 TracerProvider（整个程序一个）
+tp := trace.NewTracerProvider(...)
+
+// 2. 从 Provider 创建不同名字的 Tracer（按模块区分）
+httpTracer := tp.Tracer("video-svc.http")
+dbTracer := tp.Tracer("video-svc.db")
+
+// 3. httpTracer 创建第一个 Span（http入口）,换不同 Tracer，只要传同一个 ctx，新 Span 就会挂载到这条 Trace 下
+ctx, span := httpTracer.Start(ctx, "GET /video/{id}")
+// 闭合这段追踪，导出span
+defer span.End()
+
+// 4. 往下走，用 dbTracer 新建 Span，**复用 ctx，trace_id 继承下来**
+ctx2, dbSpan := dbTracer.Start(ctx, "SELECT video ...")
+defer dbSpan.End()
+```
+
+- **Attribute（属性）**：挂在 Span（也可挂 Metric/Log）上的**键值对**，记录查询细节，如 `http.method=GET`、`http.status_code=200`、`db.statement="SELECT ..."`。作用等价于 Prometheus 的 label——后端按它做多维过滤聚合（"找出所有 5xx 的 Span"就是查 Attribute）。**生产提醒**：Attribute 会进存储，高基数字段（即每条请求的字段的值几乎都不一样）别当 key 滥用，否则查不动也存爆。
+
+- **Sampler（采样器）**：决定**哪些请求真正被记录**的策略。全采（AlwaysOn）数据全但开销大；按比例采（TraceIdRatioBased，如 0.1）省量但会丢偶发慢请求。生产标配 **ParentBased**：跟着根 Span 的采样决定走，**保证一条链路所有服务要么全采、要么全不采**——否则 app-a 采了、app-b 没采，Trace 在 Tempo 里就是断的。
+```go
+package main
+
+import (
+	"go.opentelemetry.io/otel/sdk/trace"
+)
+
+func main() {
+	// 1. 一直全采：测试环境用，流量大绝对不能上生产
+	// sampler := trace.AlwaysOnSampler{}
+
+	// 2. 单纯比例采样：10%随机采样，危险！微服务链路容易断
+	// sampler := trace.TraceIdRatioBased(0.1)
+
+	// 3. 生产推荐 ParentBased：根请求 10%概率采样；一旦根被采，整条链路全部跟着采
+	sampler := trace.ParentBased(trace.TraceIdRatioBased(0.1))
+
+	tp := trace.NewTracerProvider(
+		trace.WithSampler(sampler),
+		// ... exporter 配置
+	)
+}
+```
+
+- **Propagator（传播器）**："跨服务传播靠 HTTP Header 自动完成"背后的机制——负责注入、提取追踪上下文。app-a 调用 app-b 前，Propagator 将 trace_id 和自身当前 span 的 span_id 放进 HTTP 请求头；app-b 提取到该信息后，把收到的 span_id 作为新建 span 的 parent_span_id，形成父子关系，整条 Trace 树继续延伸。
+```go
+// propagator：默认使用 W3C tracecontext 规范实现
+var propagator = otel.GetTextMapPropagator()
+
+// 【上游服务：调用下游，Inject 注入上下文】
+func callUserSvc(ctx context.Context) error {
+	req, _ := http.NewRequest("GET", "http://user-svc/user/123", nil)
+
+	// 把当前 ctx 里的 trace_id、当前 span_id 注入到请求 Header
+	propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
+
+	_, err := http.DefaultClient.Do(req)
+	return err
+}
+
+// 【下游服务：接收请求，Extract 提取上下文】
+func userSvcHandler(w http.ResponseWriter, r *http.Request) {
+	// 从 http.Header 提取追踪上下文，拿到上游的 trace_id、上游 span_id
+	ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+
+	tracer := otel.Tracer("user-svc.http")
+	ctx, span := tracer.Start(ctx, "GET /user/{id}") // 继承，上游span_id作为自己的parent_span_id
+	defer span.End()
+	// ...业务逻辑
+}
+```
+
+- **W3C TraceContext**：Propagator 的**标准化格式**（W3C 规范），取代早期 Jaeger/B3 等各家私有 header。不同厂商的 SDK 都认它，混用（Java 服务调 Go 服务）链路也能接上，是当前默认选择。
+
+- **traceparent**：W3C TraceContext 定义的核心请求头，他是http请求头中的一个字段，形如：
+  ```
+  traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+  #             版本  trace_id（16字节）        span_id（8字节）   采样标志
+  ```
+
+- **Baggage**：随请求传播的**业务键值对**（如 `user_type=vip`），同样是HTTP Header中的一个字段，但**不参与追踪逻辑**——trace 信息是给"记录调用链"用的，Baggage 是给"带过路参数"用的（各服务按用户打指标/日志、采样器按用户区分比例）。注意它是**明文随头走的，别放 token、手机号等敏感信息**。
+```go
+// 上游：往上下文添加 baggage
+m1, _ := baggage.NewMember("user_type", "vip")
+b, _ := baggage.New(m1)
+//把这个 baggage 对象存入 context 上下文。现在这个 ctx 里面，除了 trace 的信息，还带上了 `user_type=vip`。
+ctx = baggage.ContextWithBaggage(ctx, b)
+// 下游用 baggage.FromContext(ctx) 读取
+```
+
+- **tracestate**：也属于tracecontext,是一个http header中的一个字段，用来给追踪组件、服务网格携带私有扩展信息，跟随 traceparent 跨服务流转；属于基础设施层面的扩展，业务一般不使用，丢失不影响链路主干。
+
+- **OTLP**：OpenTelemetry 自定义的**数据导出协议**（基于 protobuf，走 gRPC 4317 或 HTTP 4318），把 SDK 产出的 traces/metrics/logs 统一推给后端——前文 Tempo"原生接收 OTLP"即指它。数据流向：**SDK → OTLP → Collector（可选，做缓冲/改写/分发）→ Tempo 等后端**；换后端只改导出地址，代码零改动。
+
+- **Collector（收集器）**：OTel 官方的**数据中转站**，一个独立部署的 Go 进程，夹在 SDK 和后端之间。配置按 **receivers → processors → exporters** 三段式管道处理数据：收（OTLP receiver）、加工（`batch` 攒批压缩、`memory_limiter` 内存限流、`attributes` 补字段/脱敏、`tail_sampling` 采样）、发（otlp exporter 推 Tempo/Loki）。
+```text
+tracer.Start() → 生成span → 设置attribute → span.End() → 交给Batcher打包 → Exporter → OTel Collector → Tempo存储
+```
+### Metrics、Logs、Trace的差异
+大致上报路径差不多，但是还有下面一些差异：  
+#### 上报路径差异
+- **Trace（链路）：事件驱动**  
+一次请求 `span.End()` 才产出一条 span；请求结束才上报；
+SDK 侧是异步 Batcher 攒 span。
+- **Metrics（指标）：时间周期驱动**  
+业务 `Counter.Add` / `Histogram.Record` 只是更新内存里的数值；
+靠 `PeriodicReader` 定时（比如 10s）一次性读取当前聚合值打包上报。
+不是每一次调用就发包，指标是**聚合统计值**。
+- **Logs（日志）：事件驱动**   
+生产主流方案甚至不走 OTel Log SDK：业务打印到 stdout，由 Promtail 采集，不走业务代码上报这条路线。
+#### 采样机制不一样
+- Trace：有头部采样（SDK ParentBased）、尾部采样（Collector tail_sampling processor），可以丢弃整条链路；
+- Metrics：**一般不用这种按 trace 的采样**；指标很少做采样，大多是全部上报；如果要降量，是做聚合降精度；
+- Logs：日志采样是独立的过滤策略，**tail_sampling 处理器只对 trace pipeline 生效，metrics、logs 管道不能用它**。
+#### 数据结构、标签约束不一样
+- Trace：span 自带 `trace_id、span_id`；标签尽量低基数；
+- Metrics：标签严格低基数，绝对不能放 trace_id，否则 series 爆炸；
+- Logs：推荐正文带上 trace_id；大流量场景 trace_id 不能作为 Loki label，避免 stream 爆炸。
+#### 用途不同
+- Trace：还原单次请求完整调用路径，定位慢调用、报错链路；
+- Metrics：宏观聚合统计，看 QPS、错误率、延迟分位，做告警；
+- Logs：单行上下文文本，看详细报错内容。
+
+## 采集策略
+### 上报链路：直推 vs 文件中转
+业界就两种基本架构：
+
+**① 应用直推**：业务服务直接把数据推给可观测平台（SDK → OTLP → Collector/后端）。
+- 实时性最好、架构最简单，不需要额外组件。
+- 缺点：**采集开销跑在业务容器里**——流量洪峰时和业务抢 CPU/内存，业务异常时上报跟着异常，最需要数据的时刻恰恰最容易丢数据。
+
+**② 文件中转**：数据先落本地文件，独立的采集 Agent 读文件再上报。
+- **完整性最好**：写进文件就等于保住了，业务崩溃也不影响后续上报；采集资源与业务彻底隔离。
+- 缺点：多一个组件，系统复杂度和维护成本上升，且引入落盘延迟。
+
+K8s 上的实际分工（一个服务一个容器，采集必须从业务里拆出去）：
+- **日志走②**：本文 Loki 方案即此——Pod 只写 stdout，kubelet 落盘到节点 `/var/log/pods/`，Promtail 独立 DaemonSet 按 At-Least-Once 语义搬文件，业务容器完全无感。
+- **链路/指标走①，但中间垫一层 Collector**：SDK 只往本地端口批量推送，缓冲、重试、改写、分发全在独立部署的 Collector 里做——后端故障时 Collector 缓冲顶住，拿到②"不丢"的好处，又不占用业务 Pod 资源。
+
+**实战例子**：大促洪峰时如果应用直接 HTTP 上报，CPU 打满的第一个牺牲品就是上报线程——恰好丢掉最需要复盘的数据。采集拆到 DaemonSet / Collector 后，业务再忙，采集组件也照常匀速搬数据。
+
+### 该不该采样：先算三笔账
+压测实证：采样率 1.0 全采时服务 QPS 损耗约 **16%**，采样率 0.1 时几乎无影响——流量再翻几倍，这 16% 就是压垮骆驼的最后一根稻草。经验阈值：**每秒几百条 trace 以上才需要考虑采样**，低于这个量级直接全采，把精力花在给 trace 补有用的 Attribute 上。
+
+采样要付出三笔成本，多数团队只算了第一笔：
+
+| 成本 | 含义 |
+|---|---|
+| 计算成本 | Collector 缓冲 span、评估策略消耗 CPU/内存 |
+| 维护成本 | 策略会随真实流量漂移，没人管就形同虚设 |
+| 漏采成本 | 出事时唯一有用的那条 trace 被概率规则丢掉——最贵的一笔 |
+
+三种**不该采样**的场景：量太小、合规要求全量留存（审计/医疗）、**LLM/Agent 调用**——同样的 prompt 不保证同样的输出，丢掉的推理链无法复现。
+
+### 头采、尾采、单元采样
+按"什么时候做决定"分三类：
+
+| 类型 | 决策时机 | 优点 | 代价 |
+|---|---|---|---|
+| 头采 Head-based | 请求入口处，源头决定 | 无状态、极便宜，SDK 侧决定连网络传输都省了 | 看不到结局，可能把错误/慢请求整条丢掉 |
+| 尾采 Tail-based | trace 跑完后由 Collector 决定 | 按错误/延迟/稀有度筛选，留下的都是高价值数据 | 要缓存全量 span，有状态、吃内存，源头开销一点省不掉 |
+| 单元采样 | 每个服务各管各的 | 灵活 | **链路不完整**，只留下残缺的几个 Span，生产基本不用 |
+
+**头采**三要点（前文 Sampler 条目的展开）：
+- `TraceIdRatioBased` 对 trace_id 做确定性哈希——同一个 trace 在任何实例上算出的结论都一致；配合 **ParentBased**（决定通过 traceparent 的采样标志位传播）保证整条链同采同不采。
+- **按服务定比例，忌全局一刀切**：结算接口 50 QPS 全采 100%，搜索接口 2 万 QPS 采 1%——统一设 10% 会把结算的关键链路采丢、把搜索的量灌爆。
+- **SDK 侧采样**省网络但改比例要发版；**Collector 侧采样**改配置即生效。生产常见组合：**SDK 全开（AlwaysOn）+ Collector 集中降量**，平台团队调策略零发版。
+
+**尾采**的三个旋钮：
+
+| 参数 | 控制什么 | 调错的后果 |
+|---|---|---|
+| `decision_wait` | 等多久收齐再决策 | 太短：异步/慢请求的迟到 Span 错过窗口，链路被拦腰截断；太长：内存占用升高 |
+| `num_traces` | 缓冲区最多同时存多少条 trace | 太小：缓冲满后直接丢新 trace，或退化成粗暴的概率采样 |
+| `expected_new_traces_per_sec` | 预估入流量（用于预分配） | 设小了：高峰期反复重新分配内存 |
+
+内存估算一条公式：`num_traces × 平均 trace 大小 ≈ 内存下限`——5 万条 × 20KB ≈ **1GB**，还没算处理开销。
+
+另一个硬约束：**同一条 trace 的所有 Span 必须落到同一个 Collector 实例**，否则谁也凑不齐完整链路做决策——多副本 Collector 前要加 `loadbalancingexporter` 按 trace_id 一致性路由。
+
+### 生产标配：头尾混合
+两段式：**头采在源头把量压进预算，尾采在 Collector 把关键链路捞回来**。策略自上而下匹配、命中即定，所以**具体规则在前、概率兜底在后**：
+
+```yaml
+# otel-collector-config.yaml（节选）：tail_sampling 处理器
+processors:
+  tail_sampling:
+    decision_wait: 10s             # 同步请求 10~30s 足够；异步长任务调大
+    num_traces: 50000              # 缓冲上限，直接决定内存占用
+    expected_new_traces_per_sec: 200
+    policies:                      # 顺序敏感：命中即定
+      - name: keep-errors          # 1. 错误链路全留
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: keep-slow            # 2. 超 SLA 的慢请求全留
+        type: latency
+        latency:
+          threshold_ms: 1000
+      - name: keep-rare            # 3. 稀有操作全留（低频结算接口）
+        type: string_attribute
+        string_attribute:
+          key: http.route
+          values: ["/settle"]
+      - name: sample-rest          # 4. 其余按 1% 概率兜底
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 1
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [tail_sampling]
+      exporters: [otlp/tempo]
+```
+
+**顺序就是语义**：概率规则若放最前面，本该被"错误全留"接住的 trace 会被它静默吞掉。
+
+配套三条提醒：
+- **头采基线别定太低**：源头丢掉的 trace 根本到不了尾采缓冲区，尾采再聪明也无米下锅；基线还要高到自身能大致反映整体延迟分布，尾采失灵时才兜得住底。
+- **监控采样器自己**：`traces_in_buffer`（缓慢上涨 = 缓冲泄漏前兆）、`dropped_traces`（缓冲撑爆的金丝雀）、决策吞吐。采样器哑火的典型症状是"看板一片正常，排障却没数据"。
+- 其它策略类型按需叠加：`rate_limiting`（限每秒条数，防一个吵闹接口吃光预算）、`adaptive`（事故期自动拉高、平稳期回落）。
+
+最后一句：**采样是成本问题，不是技术审美问题**。先量清楚自己真实的 trace 速率和存储账单，再定策略。
+
+参考：[Sampling Strategies for Distributed Systems Observability](https://mlflow.org/articles/observability-sampling-strategies/)、[可观测系统实践：基于海量数据的采集优化方案](https://cloud.tencent.com/developer/article/2325402)

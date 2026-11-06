@@ -1,7 +1,7 @@
 ---
 title: http协议的发展（从http1.1开始介绍）
 published: 2026-07-28T11:21:21+08:00
-description: '了解http协议的发展以及他们各自解决的痛点'
+description: '了解http协议的发展以及他们各自解决的痛点，还有了解跨域问题'
 image: './images/a7.avif'
 tags: [计算机网络,http]
 category: '计算机技术'
@@ -42,6 +42,40 @@ HTTP 是应用层、请求-响应式的资源传输协议，定位为"定义 Web
 | `Content-Encoding` | 响应体压缩格式（`gzip`/`br`） |
 
 `HTTP/2 差异`字段语义不变，但编码方式变了：请求行/响应行变成**伪头**（`:method`、`:path`、`:authority`、`:scheme`），且 `Connection`、`Keep-Alive` 等连接级头**禁止出现**（连接由帧管理），`Host` 的职责由 `:authority` 承接——这正是下文 HPACK 压缩的对象。  
+
+### CORS 跨域（结合 Ingress/K8s）
+`本质`跨域是**浏览器同源策略的限制，不是服务器"连不上"**：同源 = 协议 + 域名 + 端口三者全同，任一不同即跨域。curl/后端服务之间调用根本没有这个限制——所以"跨域报错"只出现在浏览器场景。服务端通过返回 `Access-Control-Allow-*` 系列响应头"声明放行"，浏览器核对通过才把响应交给前端 JS。
+
+`两种请求`
+`1`**简单请求**（直接发）：GET/HEAD/POST，且头部限于 `Accept`、`Content-Type: application/x-www-form-urlencoded|multipart/form-data|text/plain` 等安全集合，无自定义头。
+`2`**预检请求**（先发 OPTIONS）：一旦带 `Authorization`、自定义 Header、`PUT/DELETE` 等非简单方法——浏览器**先发 `OPTIONS` 探路**（呼应上表 OPTIONS 方法），拿到服务端许可再发真请求。响应关键头：
+```
+Access-Control-Allow-Origin: https://www.mysite.com   # 放行来源（配 * 时不能带 credentials）
+Access-Control-Allow-Methods: GET, POST, PUT, DELETE   # 放行方法
+Access-Control-Allow-Headers: Authorization, X-Token   # 放行自定义头（常漏配！）
+Access-Control-Allow-Credentials: true                 # 允许携带 Cookie
+Access-Control-Max-Age: 600                            # 预检结果缓存 10 分钟
+```
+
+`K8s 链路中在哪配`浏览器 → **Ingress** → Service → Pod，跨域头在**哪一层配都行，但别两层都配**：
+```
+# ingress-nginx 用注解统一收口（推荐，应用无感）
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://www.mysite.com"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Authorization, X-Token"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-max-age: "600"
+```
+
+`生产常见坑`
+`1`**重复头**：Ingress 已回 `Access-Control-Allow-Origin`，应用代码（Spring/Gin 中间件）又回一遍 → 浏览器见到**两个同名头直接拒绝**——排查 CORS 问题先 `curl -i` 看头是不是出现两次。
+`2`**预检失败发不出 Authorization**：带 token 的请求必走预检，`cors-allow-headers` 漏配 `Authorization`，真请求永远到不了服务端，表现为"接口 401 都没收到就报 CORS 错"。
+`3`**`*` 与 credentials 互斥**：前端要带 Cookie 时，`Allow-Origin` 必须**显式回显来源**，不能配 `*`，否则浏览器拒收。
+`4`**预检不带凭证**：OPTIONS 预检**不携带 Cookie/Authorization**——所以 Ingress 上的鉴权规则别对 OPTIONS 生效，否则预检 403（常见于全局 `auth-url` 注解拦截所有路径的场景）。
+
+`与 Host 的关系`Ingress 的七层路由本质就是靠 **Host（HTTP/2 为 `:authority`）** 匹配转发规则把流量导向不同 Service——前端跨域配置的域名、Ingress 里写的 host、DNS 解析的域名，三者必须对得上，缺一环就是 404 或 CORS 双重失败。
 
 ## http1.1
 ### 简单描述
