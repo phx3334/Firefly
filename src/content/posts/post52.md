@@ -104,6 +104,9 @@ func NewVideoGRPCClient(addr string) (*VideoGRPCClient, error) {
 }
 ```
 
+app.kubernetes.io 前缀的字段是标准字段，社区统一约定，全世界通用。像自己写的自定义那种字段，适合自己内部使用。
+
+### 采集细节
 
 
 

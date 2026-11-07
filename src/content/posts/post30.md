@@ -871,7 +871,7 @@ SDK 侧是异步 Batcher 攒 span。
 靠 `PeriodicReader` 定时（比如 10s）一次性读取当前聚合值打包上报。
 不是每一次调用就发包，指标是**聚合统计值**。
 - **Logs（日志）：事件驱动**   
-生产主流方案甚至不走 OTel Log SDK：业务打印到 stdout，由 Promtail 采集，不走业务代码上报这条路线。
+生产主流方案不走 OTel Log SDK：而是业务打印到 stdout，由 Promtail 采集，不走业务代码上报这条路线。
 #### 采样机制不一样
 - Trace：有头部采样（SDK ParentBased）、尾部采样（Collector tail_sampling processor），可以丢弃整条链路；
 - Metrics：**一般不用这种按 trace 的采样**；指标很少做采样，大多是全部上报；如果要降量，是做聚合降精度；
