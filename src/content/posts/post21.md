@@ -406,7 +406,33 @@ securityContext:
 
 爆炸半径收敛到「能读日志 + 能发网络」。想再收一层就用 NetworkPolicy 把出站限制到 `loki:3100`。
 
-**一个边界情况值得说明**：理论上 `uid≠0 + gid=0` 能靠 group 位读到日志，但采集器的位点目录是 hostPath，**不受 `fsGroup` 管理**，非 root 写不进去，等于拿位点持久化换非 root，不划算，所以没这么干。
+#### fsGroup 是什么
+
+`fsGroup` 是 Pod 级 `securityContext` 里的一个字段，本质是**给容器指定一个"补充组"（GID），同时让 kubelet 在挂载卷时用它去调整卷的归属**：
+
+```yaml
+securityContext:
+  runAsGroup: 1000   # 进程的主组
+  fsGroup: 0         # 补充组，同时用于调整卷内文件的属组
+```
+
+kubelet 会替你做两件事：
+
+1. 把卷内文件的**属组**改成 `fsGroup`，权限位补上 `rw-rw----`，并给卷目录设 setgid（此后新建的文件自动继承这个组）；
+2. 把这个 GID 加进容器进程的**补充组**，进程于是能靠 group 位读写这些文件。
+
+它和 `runAsGroup` 的区别是：`runAsGroup` 只决定"进程主组是谁"，`fsGroup` 负责"卷里文件属于哪个组 + 进程额外加入哪个组"。
+
+关键是**它只对"支持归属管理"的卷生效**：
+
+| 卷类型 | fsGroup 是否生效 |
+| --- | --- |
+| `emptyDir` | 生效 |
+| `configMap` / `secret` | 生效 |
+| `PVC`（多数 CSI 驱动） | 生效（取决于驱动） |
+| `hostPath` | **不生效** |
+
+因为 hostPath 挂的是宿主机目录，kubelet 不会去改宿主机上文件的属组——上面采集器要读的 `/var/log/pods` 正是 hostPath，所以 fsGroup 在这里帮不上忙，只能手动 `chgrp`（或走判定链里的 uid=0 方案）。
 
 ### 非 root 会影响使用吗
 

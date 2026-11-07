@@ -349,6 +349,36 @@ PVC其实在Pod和PV之前又增加了一层抽象，这样做的目的在于将
 
 
 ### 存储方式
+#### 临时存储emptyDir
+`emptyDir` 是**跟随 Pod 生命周期的临时目录**：Pod 被调度到节点时，kubelet 在节点本地建一个空目录挂进容器，Pod 一删就随之销毁。
+
+几个要点：
+
+- **生命周期**：Pod 删除即清理；但**同一个 Pod 内容器重启时数据还在**（它跟着 Pod 走，不跟容器走）
+- **落盘位置**：默认放在节点磁盘（`/var/lib/kubelet/pods/<pod-uid>/volumes/`）
+- **可以放内存**：`medium: Memory` + `sizeLimit`，变成 tmpfs，读写快但占内存
+- **不需要声明容量**（除非用 `sizeLimit`），用完节点的临时空间，适合小体量数据
+
+和另外两种常见卷的区别：
+
+| 卷 | 数据活多久 | 典型用途 |
+| --- | --- | --- |
+| `emptyDir` | Pod 删就没 | 临时缓存、`/tmp`、可写工作目录 |
+| `hostPath` | 永久（在宿主机上） | 节点级采集器的日志目录、位点目录 |
+| `PVC` | 跨 Pod 重建保留 | 业务数据、数据库 |
+
+典型搭配：容器根文件系统只读（`readOnlyRootFilesystem: true`）时，用 `emptyDir` 给 `/tmp` 一个可写点，放运行时临时文件；而需要跨 Pod 重建保留的数据（如采集位点）用 `hostPath`——下一节就是它：
+
+```yaml
+volumes:
+  - name: tmp            # 临时，Pod 删即清
+    emptyDir: {}
+  - name: state          # 持久，跨 Pod 重建保留（宿主机目录）
+    hostPath:
+      path: /data/app
+      type: DirectoryOrCreate
+```
+
 #### 本地存储hostPath
 **创建PV：首先声明一个PV.yaml，内容如下，声明的本地存储路径为/data/hostpath**  
 ```yaml
