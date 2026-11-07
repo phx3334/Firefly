@@ -269,48 +269,149 @@ cat /proc/19838/stat
 | < | 高优先级（nice < 0） |
 | N | 低优先级（nice > 0） |
 所以 `Ss` = S（睡眠）+ s（会话首领）。**容器里的 PID 1 进程在宿主机 `ps` 里通常就是 `Ss`**——runc/shim 用类似 `setsid` 的机制让容器 init 成为会话首领，正好呼应前面 OCI 部分"会话由首领经 setsid 创建"的内容。
-#### 平均负载和cpu占有率相关问题
+#### 平均负载和 CPU 利用率相关问题
+
 **平均负载（load average）**：1/5/15 分钟"活跃任务数"的平均（R + D），Linux 特地把不可中断状态也算进去（为了暴露 IO 阻塞）。
-**cpu 利用率**：CPU 在统计周期内真正干活的时间占比（us+sy 等），0~100%（N 核上限 100%×N）。
+**CPU 利用率**：CPU 在统计周期内真正干活的时间占比（us+sy 等），0~100%（N 核上限 100%×N）。
 两者不是一回事，最直观的区别：
-| | 平均负载 | cpu 利用率 |
+
+| 对比维度 | 平均负载 | CPU 利用率 |
 | --- | --- | --- |
 | 统计对象 | 任务数（排队的有几个） | CPU 忙不忙（时间占比） |
 | 单位 | 个数（可以是小数/几十） | 百分比 |
 | 数据源 | 运行队列长度 + D 状态数 | /proc/stat 的累计时间差值 |
 | 类比 | 餐厅排队人数 | 厨房开火率 |
+
 **经典判断组合**：
+
 | 现象 | 结论 |
 | --- | --- |
 | load 高 + CPU 忙（us/sy 高） | CPU 瓶颈，扩容/优化 |
-| load 高 + CPU 闲（id 高） | IO 瓶颈 或 D 状态堆积（NFS 失联、磁盘卡） |
+| load 高 + CPU 闲（id 高）+ wa 高 | 磁盘 IO 瓶颈（D 状态在等真实 IO，iowait 能看到） |
+| load 高 + CPU 闲（id 高）+ wa 低 | 卡在不可中断状态（NFS 失联/内核锁），最麻烦 |
 | load 低 + CPU 高 | 任务少但都在跑，正常 |
-| load 高 + CPU 闲 + wa 低 | 卡在不可中断 IO（NFS），最麻烦 |
+
 **load 和核数的关系**：
+
 - 经验上：load ≈ 核数 表示"刚好用满"（8 核 load 8），大于核数说明有排队
 - 但要小心：D 状态进程会让 load 虚高——8 核机器 load 20 但 CPU 全闲，很可能是 IO 卡死而不是真忙
 - 判断负载健康要用 `top`/`uptime` 结合 CPU%、D 进程数一起看，单看 load 会误判
 
 
 ## 容器安全
-在宿主机上，root用户拥有所有capability(特权)，而在容器里面root用户只具备默认的capability.   
-如果容器没有一些特权，我们不应该直接指定--privileged参数来启动容器，因为那样会让容器root具有所有特权。而是应该指定一些必要的capability.
-我们可以起一个临时容器，进容器里面看看其所具备的特权
+
+### 能力模型：容器里的 root 不是宿主机的 root
+
+宿主机 root 拥有全部 capability；容器里的 root 只有运行时给的**默认集合**（Docker / containerd 默认 14 个：CHOWN、DAC_OVERRIDE、FOWNER、FSETID、KILL、SETGID、SETUID、SETPCAP、NET_BIND_SERVICE、NET_RAW、SYS_CHROOT、MKNOD、AUDIT_WRITE、SETFCAP）。
+
+`--privileged` 会把全部 capability、全部设备、并关掉 seccomp/AppArmor 一次性还回去，等于把容器 root 变成宿主机 root。不要用它偷懒，按需 `--cap-add` 只加必要的那几个：
+
 ```bash
-docker container run -it --run --name test test_cap:v1.0 sh
-cat /proc/1/stat | grep -i cap
-#该命令可以在启动容器时添加cap_net_admin特权
+docker container run -it --rm --name test test_cap:v1.0 sh
+# 看 CapEff：当前生效的 capability 位图
+cat /proc/1/status | grep -i cap
+
+# 按需添加：只给 NET_ADMIN
 docker container run -it --rm --cap-add NET_ADMIN --name test test_cap:v1.0 sh
 ```
-**重要**： 我们应该以非root用户启动容器，因为容器内root用户依然有部分特权且容器和宿主机是共享内核的，所以即便一些关键数据没用挂载给容器，在容器内依旧可以影响到宿主机的一些重要文件。一旦容器内的应用有安全漏洞，攻击者就会顺着该漏洞逃逸出容器对宿主机造成伤害。  
-**综上，常见解决方案** ：  
-- 如果需要用root用户运行，请最小化 capability，先`--cap-drop ALL`，在按需添加
-- 非root用户运行容器`docker run --user appuser test_cap:v1.0 sh`，也可以在dockerfile和docker-compose中指定
-- 不共享宿主命名空间
-- 禁止危险挂载，如/proc,/var/run/docker.sock（Docker 守护进程（dockerd（以root用户运行）对外暴露的通信接口，如果挂载给容器，容器内就可以使用docker命令任意创建容器）
-- 精简镜像、内核及时打补丁
-**非root用户运行容器不会影响容器的使用吗？**：
-几乎不会。  
-- Web 服务、数据库、消息队列等 90% 的应用只是"读写自己的数据、监听端口、对外提供服务，只需要普通用户
-- Dockerfile 的经典模式是构建时 root、运行时非 root
-- 绑定 80/443 端口可用，可以通过端口映射，比如8080:80
+
+### 核心原则：身份（uid）和权力（capability）分开
+
+为什么业务容器要非 root：容器与宿主机共享内核，容器 root 的默认 cap 里就有 `DAC_OVERRIDE`，而 `/proc/sys` 里有一部分内核参数是**全局的**、不属于任何 namespace——最典型的是 `/proc/sys/kernel/core_pattern`，容器 root 能把它改成"内核崩溃时执行任意程序"，这是经典的容器逃逸手法。**即便没有把宿主机目录挂进容器，容器 root 依然能影响宿主机。**
+
+所以两件事要分开衡量：
+
+- **uid 决定「以谁的名义」**：影响文件权限表里 owner / group / other 哪一列命中
+- **capability 决定「能做什么」**：影响能否绕过权限表、能否 mount、能否改内核参数
+
+非 root 砍掉的是身份；`drop: ["ALL"]` 砍掉的是权力。业务容器两者都砍；特殊情况只保留身份。
+
+### 怎么选：哪些用非 root，哪些用 root
+
+判断口诀：**先问「这个进程要操作谁的文件」**。只碰自己的 → 非 root；必须碰节点上别人的 → 才考虑 root。
+
+| 场景 | 用谁 | 依据 |
+| --- | --- | --- |
+| 业务容器（HTTP/gRPC 服务、静态资源、数据库、消息队列） | **非 root** | 只读写自己的数据、监听自己的端口 |
+| 镜像构建阶段（Dockerfile 前半段） | root | 装包、改文件属主；末尾用 `USER` 切回非 root |
+| 需要绑 80/443 等低端口 | **非 root** + 端口映射或 sysctl | 低端口限制针对 uid，绕过办法很多，没必要给 uid=0 |
+| 节点级采集器（日志 / 指标 agent：otel-collector、Fluent Bit、Filebeat） | **最小特权 root** | 必须读节点上 root 属主、`0640` 权限的日志文件 |
+| 需要操作内核参数、设备、挂载宿主机目录 | 基本是设计问题 | 确需时只加那一个 capability，绝不 `--privileged` |
+
+一句话概括：**90% 的业务容器一律非 root；只有「读别人文件」的节点级 agent 才需要 root，而且要最小特权。**
+
+### 非 root 的标准做法
+
+Docker 经典模式：构建时 root、运行时非 root。
+
+```dockerfile
+COPY --chown=app:app ./app /app
+USER app
+```
+
+K8s 声明式：
+
+```yaml
+securityContext:
+  runAsNonRoot: true      # uid=0 直接启动失败：这是断言，不是赋值
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+```
+
+`runAsNonRoot: true` 比单写 `runAsUser: 1000` 更值得加——它是**断言**：镜像里如果写了 `USER root`，Pod 会直接起不来，逼你在构建期就改掉。
+
+更稳的做法是程序监听 8080，由 Service / Ingress 暴露 80，连这个 sysctl 都不用碰。
+
+### 必须用 root 时：最小特权 root
+
+以本项目的日志采集器为例（otel-collector agent，tail 节点上的容器 stdout）。
+
+**判定链**：
+
+1. 非 root 能读吗？`/var/log/pods` 下是 `0640 root:root`，uid≠0 时三个权限位全空 → 不能
+2. 放宽宿主机权限？会影响节点上**所有 Pod** 的日志隔离 → 代价更高
+3. 换采集方式（走 apiserver 读日志）？多一层 RBAC 和 apiserver 压力，还丢文件路径元数据 → 不选
+
+三步都堵死，只能 uid=0。但身份给出去之后，立刻把权力收干净：
+
+```yaml
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+```
+
+**为什么 `drop: ALL` 之后还能读日志**：uid=0 读属主为 root 的文件走 **owner 位匹配**（owner 列有 r），根本不需要 `DAC_OVERRIDE` 这枚「无视权限表」的徽章。徽章只在「文件属主不是我自己」时才用得上。所以清空 capability 不影响功能，只是拆掉越权能力。
+
+**防线分工别搞混**：`mount` 被拦住根本原因是缺 `CAP_SYS_ADMIN`（内核在 mount 时做 capability 检查），`ptrace` 靠 uid 匹配 + `CAP_SYS_PTRACE`（默认 seccomp profile 里它是「带该 cap 才放行」的条件规则）。**capability 管「能做什么」，seccomp 管「能进哪些内核入口」**，两层不能合并成一句。
+
+按「日志解析器被恶意日志打穿（RCE）」这个场景看五道锁：
+
+| 攻击者想干的事 | 谁拦住 | 内核回应 |
+| --- | --- | --- |
+| 挂载宿主机磁盘（逃逸常用手段） | 缺 `CAP_SYS_ADMIN` | 拒绝 |
+| 给自己加回特权 | bounding set 启动时已降到底 | 永久加不回 |
+| 借 SUID 程序提权 | `allowPrivilegeEscalation: false` | SUID 失效 |
+| 写木马留持久后门 | `readOnlyRootFilesystem: true` | 镜像层只读（挂载卷仍可写） |
+| 调用 `kexec_load` 等高危 syscall | `seccompProfile: RuntimeDefault` | 不在白名单，拒绝 |
+
+爆炸半径收敛到「能读日志 + 能发网络」。想再收一层就用 NetworkPolicy 把出站限制到 `loki:3100`。
+
+**一个边界情况值得说明**：理论上 `uid≠0 + gid=0` 能靠 group 位读到日志，但采集器的位点目录是 hostPath，**不受 `fsGroup` 管理**，非 root 写不进去，等于拿位点持久化换非 root，不划算，所以没这么干。
+
+### 非 root 会影响使用吗
+
+几乎不会。
+
+- 90% 的应用只是读写自己的数据、监听端口、对外提供服务，普通用户完全够
+- 构建时 root、运行时非 root 是 Dockerfile 的标准写法
+- 低端口用端口映射或 sysctl 解决，不必为了绑 80 就给 uid=0

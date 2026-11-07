@@ -210,18 +210,18 @@ quantile_over_time(0.99,
 ### Pod日志存在哪里
 K8s 中所有 Pod 写到 stdout/stderr 的内容，会被容器运行时（Docker/containerd）自动落到宿主机的日志目录`/var/log/pods/*`
 ### Promtail如何采集到这些日志
-Promtail 以 DaemonSet（确保每个节点上都恰好运行一个该 Pod 的副本） 部署后，通过 **hostPath** 把宿主机的 `/var/log/pods/` 以只读方式挂载进容器——日志是容器运行时写到宿主机的，Promtail 只是**共享读**这份目录，自己不落盘也不影响日志写入。
+Promtail 以 DaemonSet 方式部署，保证集群**每一个节点上都会跑一个 Promtail Pod**，负责采集本节点上所有容器的日志。
+容器的 stdout/stderr 日志，本质是容器运行时（containerd）直接写到宿主机磁盘上的；Promtail 通过 `hostPath` 把宿主机目录只读挂载进自身容器，只是读取宿主机上已经生成好的日志文件，不会修改、删除原始日志，也不会自己额外存储日志。
 ```yaml
 volumeMounts:
   - name: pods
-    mountPath: /var/log/pods
+    mountPath: /var/log/pod_name   #容器内部的路径。
     readOnly: true            # 只读挂载，只采集不修改
 volumes:
   - name: pods
     hostPath:
-      path: /var/log/pods
+      path: /var/log/pods           #整个节点全部 Pod 的日志入口目录
 ```
-同时还会挂载 `/var/log/pods` 下软链指向的容器日志目录（Docker 运行时是 `/var/lib/docker/containers`，containerd 是 `/var/lib/containerd/`）以获取容器元数据（用于自动打上 app、namespace、node 等标签）。`/var/log/pods` 里的日志文件本身就是软链接，顺着链接读正文就得挂载真实目录。
 
 ### 完整数据流
 ```
