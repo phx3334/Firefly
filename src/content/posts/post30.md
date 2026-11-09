@@ -704,30 +704,99 @@ P95 的执行顺序：取原始分桶数据 → 计算各桶变化速率 → 按
 - 需要精确分位数且不聚合 → **Summary**
 
 
-## 部署Tempo
-Loki 管日志、Prometheus 管指标，第三支柱**链路（Traces）需要一个存储后端**。这里选 Grafana 家的 Tempo：专为分布式追踪设计，对象存储做底座（和 Loki 同款思路，成本低），原生接收 OTLP 协议——OTel SDK 的数据可以直接推给它，无需再装 Jaeger。
+## Tempo
 
-最小配置安装：
-```bash
-helm repo add grafana https://grafana.github.io/helm-charts
-helm repo update
-helm install tempo grafana/tempo -n monitoring
+**Tempo 是 Grafana Labs 出品的分布式追踪后端，专门解决"trace 存哪、怎么查"的问题**。它和前文采样、Collector 组成完整链路：SDK → OTLP → Collector（采样）→ Tempo（存储查询）。选型上对比 Jaeger：Jaeger 功能全但存储依赖 ES/Cassandra 这类重型索引系统；Tempo 把 trace 扔进便宜的对象存储、几乎不建索引，**运维只剩"给个 S3 地址"，成本低一个量级**——中小集群的默认选择。
+
+### 架构：一写一查两条路径
+
+![Tempo 架构：写入路径由 Distributor 分发给 Ingester 并刷入对象存储，旁路 Metrics generator 派生指标；查询路径 Grafana 经 Query Frontend 到 Querier 读缓存与对象存储，Compactor 负责合并压缩块](./images/tempo_arch.png)
+
+```text
+写入路径（接收 span）
+SDK/Collector ──OTLP──→ Distributor（校验、打租户标签、按 trace_id 一致性哈希分片）
+                            │ 双写
+                            ├──→ Ingester（按 trace_id 在内存拼树，攒批成 block）
+                            │        └──→ Object Storage（S3/GCS/Azure，trace 真正的家）
+                            └──→ Metrics generator（旁路，派生 RED 指标 → Prometheus）
+
+查询路径（Grafana 发起）
+Grafana → Query Frontend（按时间切片排队/限流/缓存，防大查询打挂后端）
+              → Querier（向 Ingester 要热数据 + 从对象存储拉 block 扫描，用完即弃）
+Compactor（离线）：合并小块、按保留期删除过期块、维护 bloom filter
+Cache（Redis/Memcached）：块元数据、bloom filter、查询结果，挡住对象存储的海量小读
 ```
 
-安装后同样在 Grafana 里添加数据源，URL 指向 `http://tempo.monitoring:3100`。**再回到 Prometheus 数据源的设置里开启 Exemplar 关联**：在 `exemplarTraceIdDestinations` 中填入 Tempo 数据源和 `trace_id` 字段名，图表上的绿点才能点击跳转到 Tempo（Grafana UI 里勾选 "Enable Exemplar data" 并选关联的 Trace 数据源即可，等效于下面的 YAML）：
+### 组件逐一拆解
 
-```yaml
-# Grafana Prometheus 数据源 provisioning 配置节选
-apiVersion: 1
-datasources:
-  - name: Prometheus
-    jsonData:
-      exemplarTraceIdDestinations:
-        - name: trace_id        # 指标 exemplar 中存 TraceID 的字段名
-          datasourceUid: tempo  # 跳转目标：Tempo 数据源的 uid
-```
+**Distributor（写入口，无状态）**
+接收 OTLP（兼容 Zipkin/Jaeger 协议），干三件事：校验批量化、打上租户/集群标签、**按 trace_id 做一致性哈希**——集群里所有 Ingester 登记在一个环（ring）上，哈希决定这条 trace 归谁。它是写入分片的唯一决策点，也是**限流第一道闸**（租户级限流在这里挡住突发流量，保护 Ingester）。生产随便加副本。
 
-至此三支柱的后端全部就位：Loki（日志）+ Prometheus（指标）+ Tempo（链路）。
+**Ingester（唯一有状态组件）**
+按 trace_id 接收分片来的 span，**在内存里按 parent_span_id 把零散 span 拼成完整 trace**，攒到时间/大小阈值切成 block 刷到对象存储。没刷盘的"热 trace"还在内存里，Querier 查询时会同时来问它。状态在内存是它唯一的运维敏感点：扩缩容触发环重分片，滚动重启有丢失未刷盘窗口的风险——生产靠多副本冗余兜底。
+
+**Metrics generator（旁路，可选）**
+Distributor 双写一份 span 给它（注意是从 distributor 分叉，不是 ingester 转发），按 service/route 聚合出 RED 指标，用 **Prometheus remote write** 协议推给 Prometheus。`span_metrics`、`service_graphs` 等处理器默认关闭，按租户开启。
+
+**Query Frontend（查询入口，无状态）**
+Grafana 实际打到这里。把一个大查询**按时间范围切成子查询排队执行**，加限流和结果缓存——保证"某人搜 7 天全量 TraceQL"不会拖垮整个集群，大查询只是自己排队。
+
+**Querier（计算层，无状态）**
+真正干活的：一个查询 = **两路合并**——向 Ingester 要还没刷盘的热数据 + 从对象存储拉已刷盘的 block 扫描（bloom filter 快速跳过不含目标的块），合并去重后返回。算完即扔，查询扩容就是加副本。
+
+**Compactor（离线整理）**
+周期性把小 block 合并成大 block（减少对象数、降低查询扫描次数）、按 retention 配置删过期数据、维护 bloom filter。它只影响整理效率，不参与读写路径——挂了也只是暂时的，数据不丢。
+
+**Cache 与对象存储**
+Memcached/Redis 缓存块元数据、bloom filter、查询结果——没有它，Querier 每次查询都对 S3 发海量小读，又慢又烧钱。对象存储是**唯一持久层**：容量、带宽、保留期全部外包，Tempo 组件全丢都能从它重建。
+
+> 上图是经典架构。Tempo 3.0 把写入路径改为 distributor → Kafka → block-builder（刷块）+ live-store（供查近期 trace），**分片与持久化解耦的思路没变**，读到新文档时对号入座即可。
+
+### 如何实现"真正的分布式"链路追踪
+
+追踪系统要配得上"分布式"四个字，得同时解决四个问题，Tempo 的答案一一对应：
+
+| 分布式追踪要解决的问题 | Tempo 的解法 |
+| --- | --- |
+| 跨服务、跨机器的 span 怎么拼回一条 trace | 按 trace_id 一致性哈希 → **同一 trace 的所有 span 永远进同一个 Ingester**，内存里按 parent_span_id 拼树；span 乱序到达、后到先到都没关系 |
+| 写入量大了怎么扛 | 加 Ingester = 环上多认领一段哈希空间，Distributor 无状态水平扩 |
+| 历史 trace 存不下怎么办 | 按时间切成 block 落对象存储——容量/带宽/保留期天然无限，永远不用"扩容存储集群"这件事 |
+| 查询怎么不被大范围搜索拖垮 | Query Frontend 按时间切片并行 + bloom filter 剪枝，Querier 无状态随便加副本 |
+
+一句话收拢：**trace_id 哈希分片解决"拼得回"，时间切块解决"存得下"，无状态副本 + 托管对象存储解决"扩得开"**——Tempo 不养分片集群、不建索引集群，把分片交给哈希算法、把容量交给 S3，这就是它比 Jaeger + ES 便宜一个量级还能横向扩展的根本原因。
+
+### 核心设计：不建索引，靠 trace_id 直查
+
+Tempo **只存 trace，不建"标签 → trace"的全量索引**（Jaeger/ES 的做法），换来极低的存储成本，查询分两种：
+
+1. **已知 trace_id 直查**（90% 的使用场景）：日志或指标里发现了 trace_id，拿去 Tempo 精确定位——利用块的 bloom filter 快速跳过不含该 ID 的块，**这是 Tempo 的"舒适区"，O(块数) 级别，快且便宜**。
+2. **TraceQL 条件搜索**（"找出所有 http.route=/settle 且 duration>1s 的 trace"）：没有索引兜底，只能挨个块扫，**块多时又慢又贵**——生产上要么限制时间范围，要么配合前文的采样从源头减块。
+
+实战教训：**不要把 Tempo 当"按任意条件搜 trace 的搜索引擎"用**。正确的排障动线是"指标发现异常 → 从日志/告警里拿 trace_id → 直查"，而不是在 Tempo 里裸搜。这也解释了为什么三大支柱必须联动——TraceQL 只是补刀手段，不是入口。
+
+### Metrics Generator 的价值与取舍
+
+机制见上文组件拆解，这里只说它换来什么：
+
+- **业务代码一行不改就有接口级 QPS、错误率、延迟分位**——埋点只埋了 trace，指标是免费送的；
+- 派生的指标自带 **exemplar（示例 trace_id）**，Grafana 里从 P95 曲线一键跳到慢请求的那条 trace——这就是"指标 → trace"的关联通道。
+
+代价是它常驻吃内存，小集群可以关掉，但只要在乎"从图表跳 trace"的排障体验就建议留着。
+
+### 在 Grafana 里把三大支柱缝起来
+
+Tempo 最大的卖点不是存 trace，而是**和 Prometheus/Loki 同属 Grafana 生态带来的互跳**：
+
+| 起点 | 动作 | 终点 |
+| --- | --- | --- |
+| Loki 日志 | 点日志详情里的 trace_id 链接（derived fields） | Tempo 瀑布图 |
+| Prometheus 指标 | 点数据点的 exemplar | 对应 trace |
+| Tempo 瀑布图 | 点某个 span 的 log 属性 | 该请求的日志 |
+
+生产排障的标准动线就靠这张表：**告警（指标）→ 看哪些请求慢（指标）→ 跳进一条具体 trace（Tempo）→ 定位到出错 span → 捞同一 trace_id 的日志（Loki）**——这正是下文"集成 OTEL SDK"要用 trace_id 缝合三者的原因。
+
+部署上一句话：小规模用 **monolithic 模式**（单二进制跑全部组件），流量上来再拆成微服务模式——组件和图中一一对应，架构图看懂了拆分也就看懂了。
+
 
 ## 集成OTEL SDK
 平台侧（Prometheus/Loki/Grafana）已就绪，现在轮到**应用侧**：接入 OpenTelemetry SDK，把三大支柱从应用里交出来，并用 trace_id 把它们缝在一起。分工原则：**组件监控靠配置（K8s 组件天生暴露 /metrics），业务可观测性必须代码埋点**（链路、业务指标、日志关联，配置变不出来）。
