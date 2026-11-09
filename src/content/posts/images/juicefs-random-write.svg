@@ -14,7 +14,6 @@
       <text x="810" y="46">对象存储中的 Block</text>
     </g>
 
-    <!-- 行1 顺序写 -->
     <text x="26" y="126" font-size="13" font-weight="600" fill="#0F172A">顺序写</text>
     <rect x="110" y="92" width="500" height="64" rx="8" fill="#FFFFFF" stroke="#E2E8F0"/>
     <rect x="118" y="100" width="484" height="48" rx="6" fill="#DCFCE7" stroke="#86EFAC"/>
@@ -32,7 +31,6 @@
     </g>
     <text x="678" y="172" font-size="11" fill="#94A3B8">16 × 4MiB</text>
 
-    <!-- 行2 随机写 -->
     <text x="26" y="288" font-size="13" font-weight="600" fill="#0F172A">随机写</text>
     <rect x="110" y="230" width="500" height="76" rx="8" fill="#FFFFFF" stroke="#E2E8F0"/>
     <g stroke-width="1">
@@ -50,7 +48,6 @@
     </g>
     <text x="678" y="322" font-size="11" fill="#94A3B8">Block 大多不满 4MiB</text>
 
-    <!-- 行3 Compaction -->
     <text x="26" y="432" font-size="13" font-weight="600" fill="#0F172A">Compaction</text>
     <rect x="110" y="400" width="500" height="64" rx="8" fill="#FFFFFF" stroke="#E2E8F0"/>
     <rect x="118" y="408" width="484" height="48" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-dasharray="6 4"/>

@@ -15,7 +15,6 @@
 
   <g font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
 
-    <!-- 左轴 -->
     <g font-size="11" fill="#94A3B8" text-anchor="end">
       <text x="52" y="96">微秒</text>
       <text x="52" y="230">毫秒</text>
@@ -23,32 +22,27 @@
     </g>
     <line x1="60" y1="60" x2="60" y2="400" stroke="#E2E8F0"/>
 
-    <!-- 层 1 -->
     <rect x="80" y="62" width="790" height="56" rx="10" fill="#F5F3FF" stroke="#DDD6FE"/>
     <text x="104" y="86" font-size="14" font-weight="600" fill="#6D28D9">内存缓冲区</text>
     <text x="104" y="105" font-size="11" fill="#7C3AED">客户端进程内 · --buffer-size 300MiB</text>
     <text x="846" y="95" font-size="11" fill="#7C3AED" text-anchor="end">写聚合 · 读合并</text>
 
-    <!-- 层 2 -->
     <rect x="80" y="186" width="790" height="56" rx="10" fill="#EFF6FF" stroke="#BFDBFE"/>
     <text x="104" y="210" font-size="14" font-weight="600" fill="#1D4ED8">本地磁盘缓存</text>
     <text x="104" y="229" font-size="11" fill="#2563EB">节点本地盘 · --cache-dir / --cache-size 100GiB</text>
     <text x="846" y="219" font-size="11" fill="#2563EB" text-anchor="end">缓存 Block</text>
 
-    <!-- 层 3 -->
     <rect x="80" y="314" width="790" height="56" rx="10" fill="#ECFDF5" stroke="#A7F3D0"/>
     <text x="104" y="338" font-size="14" font-weight="600" fill="#047857">对象存储</text>
     <text x="104" y="357" font-size="11" fill="#059669">远端 · 唯一数据源，永不失效</text>
     <text x="846" y="347" font-size="11" fill="#059669" text-anchor="end">按 Block 存取</text>
 
-    <!-- 写方向 -->
     <line x1="330" y1="118" x2="330" y2="180" stroke="#475569" stroke-width="1.6" marker-end="url(#c1)"/>
     <text x="340" y="154" font-size="12" fill="#475569">flush</text>
 
     <line x1="330" y1="242" x2="330" y2="308" stroke="#047857" stroke-width="1.6" marker-end="url(#c2)"/>
     <text x="340" y="280" font-size="12" fill="#047857">异步上传 PUT</text>
 
-    <!-- 读方向 -->
     <line x1="560" y1="308" x2="560" y2="248" stroke="#1D4ED8" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#c3)"/>
     <text x="570" y="284" font-size="12" fill="#1D4ED8">预读 GET</text>
 

@@ -18,7 +18,6 @@
 
   <g font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#1E293B">
 
-    <!-- 泳道头 -->
     <g text-anchor="middle" font-size="13">
       <rect x="45" y="18" width="110" height="32" rx="16" fill="#F1F5F9" stroke="#E2E8F0"/>
       <text x="100" y="39">应用</text>
@@ -32,7 +31,6 @@
       <text x="870" y="39" fill="#047857">对象存储</text>
     </g>
 
-    <!-- 生命线 -->
     <g stroke="#CBD5E1" stroke-width="1" stroke-dasharray="4 5">
       <line x1="100" y1="60" x2="100" y2="352"/>
       <line x1="290" y1="60" x2="290" y2="352"/>
@@ -46,12 +44,10 @@
       <line x1="870" y1="404" x2="870" y2="706"/>
     </g>
 
-    <!-- 分区标题 -->
     <text x="26" y="96" font-size="14" font-weight="700" fill="#0F172A">写入</text>
     <text x="26" y="440" font-size="14" font-weight="700" fill="#0F172A">读取</text>
     <line x1="26" y1="376" x2="954" y2="376" stroke="#E5EAF2"/>
 
-    <!-- 写路径 -->
     <g stroke-width="1.6" fill="none">
       <line x1="100" y1="118" x2="284" y2="118" stroke="#475569" marker-end="url(#a)"/>
       <line x1="290" y1="154" x2="474" y2="154" stroke="#475569" marker-end="url(#a)"/>
@@ -76,7 +72,6 @@
     </g>
     <text x="480" y="354" text-anchor="middle" font-size="11" fill="#94A3B8">↑ 应用早在第一行就拿到返回值了</text>
 
-    <!-- 读路径 -->
     <g stroke-width="1.6" fill="none">
       <line x1="100" y1="446" x2="284" y2="446" stroke="#475569" marker-end="url(#a)"/>
       <line x1="290" y1="480" x2="474" y2="480" stroke="#475569" marker-end="url(#a)"/>
