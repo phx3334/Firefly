@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 470" width="100%" role="img" aria-label="JuiceFS 元数据模型">
+  <defs>
+    <marker id="e1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#1D4ED8"/>
+    </marker>
+    <marker id="e2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#047857"/>
+    </marker>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="939" height="469" rx="14" fill="#FBFCFE" stroke="#E5EAF2"/>
+
+  <g font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+
+    <!-- Edge -->
+    <rect x="30" y="86" width="200" height="112" rx="8" fill="#EFF6FF" stroke="#BFDBFE"/>
+    <text x="46" y="110" font-size="13" font-weight="600" fill="#1D4ED8">Edge</text>
+    <g font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="11" fill="#334155">
+      <text x="46" y="132">parent_inode</text>
+      <text x="46" y="150">name</text>
+      <text x="46" y="168">type</text>
+      <text x="46" y="186">inode</text>
+    </g>
+
+    <!-- Node -->
+    <rect x="286" y="72" width="196" height="140" rx="8" fill="#F5F3FF" stroke="#DDD6FE"/>
+    <text x="302" y="96" font-size="13" font-weight="600" fill="#6D28D9">Node</text>
+    <g font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="11" fill="#334155">
+      <text x="302" y="118">inode</text>
+      <text x="302" y="136">type</text>
+      <text x="302" y="154">mode</text>
+      <text x="302" y="172">uid / gid</text>
+      <text x="302" y="190">size · mtime</text>
+    </g>
+
+    <!-- Chunk -->
+    <rect x="538" y="86" width="180" height="112" rx="8" fill="#EFF6FF" stroke="#BFDBFE"/>
+    <text x="554" y="110" font-size="13" font-weight="600" fill="#1D4ED8">Chunk</text>
+    <g font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="11" fill="#334155">
+      <text x="554" y="132">inode</text>
+      <text x="554" y="150">index</text>
+      <text x="554" y="168">[]Slice</text>
+    </g>
+
+    <!-- Slice -->
+    <rect x="774" y="72" width="146" height="140" rx="8" fill="#FFF7ED" stroke="#FED7AA"/>
+    <text x="790" y="96" font-size="13" font-weight="600" fill="#C2410C">Slice</text>
+    <text x="906" y="96" font-size="10" fill="#EA580C" text-anchor="end">24 B</text>
+    <g font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="11" fill="#334155">
+      <text x="790" y="118">pos</text>
+      <text x="790" y="136">id</text>
+      <text x="790" y="154">size</text>
+      <text x="790" y="172">off</text>
+      <text x="790" y="190">len</text>
+    </g>
+
+    <!-- 关系 -->
+    <g stroke="#1D4ED8" stroke-width="1.6" fill="none">
+      <line x1="232" y1="142" x2="280" y2="142" marker-end="url(#e1)"/>
+      <line x1="484" y1="142" x2="532" y2="142" marker-end="url(#e1)"/>
+      <line x1="720" y1="142" x2="768" y2="142" marker-end="url(#e1)"/>
+    </g>
+    <g font-size="10" fill="#64748B" text-anchor="middle">
+      <text x="256" y="134">指向</text>
+      <text x="508" y="134">1:N</text>
+      <text x="744" y="134">1:N</text>
+    </g>
+
+    <!-- Block -->
+    <rect x="774" y="288" width="146" height="56" rx="8" fill="#ECFDF5" stroke="#A7F3D0"/>
+    <text x="790" y="312" font-size="13" font-weight="600" fill="#047857">Block ID</text>
+    <text x="790" y="331" font-size="11" fill="#334155" font-family="ui-monospace,SFMono-Regular,Consolas,monospace">→ 对象 key</text>
+    <line x1="847" y1="214" x2="847" y2="284" stroke="#047857" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#e2)"/>
+
+    <!-- Setting -->
+    <rect x="30" y="246" width="200" height="88" rx="8" fill="#F1F5F9" stroke="#E2E8F0"/>
+    <text x="46" y="270" font-size="13" font-weight="600" fill="#475569">Setting</text>
+    <g font-family="ui-monospace,SFMono-Regular,Consolas,monospace" font-size="11" fill="#334155">
+      <text x="46" y="292">uuid · bucket</text>
+      <text x="46" y="310">block_size · trash_days</text>
+    </g>
+
+    <!-- Session -->
+    <rect x="286" y="272" width="196" height="62" rx="8" fill="#F1F5F9" stroke="#E2E8F0"/>
+    <text x="302" y="296" font-size="13" font-weight="600" fill="#475569">Session</text>
+    <text x="302" y="318" font-size="11" fill="#334155" font-family="ui-monospace,SFMono-Regular,Consolas,monospace">客户端心跳 · 超时清理</text>
+
+    <text x="30" y="392" font-size="12" fill="#64748B">读一个文件 = 沿这条链查下去，拿到 Block ID 再去对象存储取数据</text>
+  </g>
+</svg>

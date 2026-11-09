@@ -61,6 +61,128 @@ rules:
       paths: ["/api/pay"]                                  # 只许调支付接口
 ```
 
+### 节点内部通信都是 mTLS 吗
+
+先给结论：**只要通信两端都是被注入了 Sidecar 的 Pod，那么不管它们在不在同一台机器上，中间那一段都是 mTLS 的；反过来，只要有一端没进网格，或者流量压根没经过 Envoy，就是明文。** 加密发生在"两个 Envoy 之间"，与物理位置无关——同节点不构成例外。
+
+**为什么同节点也得走两次代理。** 很多人下意识认为同节点两个 Pod 走 loopback 直连、绕过了 Sidecar，这是错的。同节点 Pod 之间依然是 veth pair + 网桥转发，出方向被 Pod 网络命名空间里的 iptables 规则重定向到本 Pod Envoy 的 **15001**，对端入方向被重定向到对端 Envoy 的 **15006**：
+
+```text
+同节点 PodA → PodB（两端都注入）
+
+PodA 应用 :8080 访问 PodB:8080
+   │  出站被 iptables 拦下
+   ▼
+PodA Envoy :15001 ══mTLS 加密══► PodB Envoy :15006 ──明文──► PodB 应用 :8080
+        ▲                                  ▲
+        └──────── 同节点内的一段 veth/网桥 ────┘
+```
+
+同节点省掉的只是一次物理网卡往返，**没有省掉两个代理，也没有省掉 TLS 握手**。所以它不会让 mTLS 失效，也不会让延迟变成"本地调用"——同节点依然比 Pod 内进程间调用多出两跳代理，只是延迟差通常在亚毫秒级（长连接下 TLS 会话复用，开销可忽略）。
+
+**mTLS 只保护中间那一段。** 这是最容易被误解的地方：加密的是 `Envoy ↔ Envoy`，**不包含两端的 `应用 ↔ 本 Pod Envoy`**——那两段走 Pod 内的 loopback，永远是明文。
+
+```text
+   明文            密文                     明文
+应用 ⇄ 本Pod Envoy ══════════ 对端 Envoy ⇄ 对端应用
+   ↑ loopback      ↑ 跨节点 / 同节点网络          ↑ loopback
+```
+
+推论很硬：**拥有节点 root 权限的进程（特权 Pod、节点上的 agent、debug 容器）tcpdump 一下 lo，就能看到完整明文**。在节点上 `tcpdump -i any port 8080` 看到的 HTTP 内容依然清清楚楚。
+
+所以 mTLS 的信任边界是**主机边界**，不是"整个集群边界"。它防网络上的窃听和冒充，防不住同主机同内核的窥探——那一层要靠节点加固、禁止特权容器、Pod Security Admission 来兜。
+
+**一张表看清哪些流量其实没有 mTLS：**
+
+| 场景 | mTLS | 原因 |
+| ---- | ---- | ---- |
+| 同节点 Pod → Pod（两端都注入） | ✅ | 依然走两个 Envoy，auto mTLS 自动生效 |
+| 跨节点 Pod → Pod（两端都注入） | ✅ | 同上 |
+| 直连对端 **Pod IP**（不走 Service） | ❌ | 落到 passthrough cluster，auto mTLS 不参与 |
+| `DestinationRule` 显式写了 `tls.mode: DISABLE` | ❌ | 出站侧被手动关掉 |
+| Pod → 未注入的工作负载（kube-system 的 DaemonSet、Job、旧 Pod） | ❌ | 对端无 Sidecar，auto mTLS 退化成明文 |
+| 同 Pod 内两个容器互访（localhost） | ❌ | 不出 Pod 网络命名空间，不经 Envoy |
+| kubelet → 容器（liveness/readiness 探针） | ❌ | 流量来自节点侧，不是 Pod |
+| Pod → 集群外（不经 egressgateway） | ❌ | 明文出网 |
+| hostNetwork Pod | ❌ | 通常被排除注入（注入还会端口冲突） |
+| 被 `excludeInboundPorts` / `excludeOutboundPorts` 等注解排除的端口 | ❌ | 刻意绕过 Envoy，等于刻意明文 |
+
+**六个必须注意的点：**
+
+**1. 默认 PERMISSIVE —— 加密是自动的，但明文也照收。**
+
+这里必须澄清一个流传极广的旧结论：**"必须给每个服务配 `DestinationRule` 的 `ISTIO_MUTUAL`，客户端 Sidecar 才会加密"**——那是 Istio **1.5 之前**的模型。1.5 起 **auto mTLS 默认开启**：Pilot 给每个带 Sidecar 的 endpoint 打上 `tlsMode: istio` 元数据，客户端 Envoy 发现对端有 Sidecar 就自动用 mTLS 发起连接，发现对端没有才退化成明文。**所以不需要写任何 `DestinationRule`。**
+
+三者分工要分清：
+
+| 资源 | 管哪一侧 | 缺了会怎样 |
+| ---- | ---- | ---- |
+| `PeerAuthentication` | **入站**：我这个 Sidecar 接受什么 | 默认 PERMISSIVE，明文也收 |
+| auto mTLS（默认开） | **出站**：我对谁加密 | 对端有 Sidecar 就加密，没有就明文 |
+| `DestinationRule.tls` | **覆盖**上面两条的默认 | 只在要强制关 / 强制开时才需要写 |
+
+**PERMISSIVE 的真正风险不是"两边都不加密"，而是"门一直开着"**：网格内 Pod 之间照样是 mTLS，但任何没有 Sidecar 的来源（未注入的 Pod、节点上的进程、共享 hostNetwork 的组件）都能以明文接进来；这类连接没有 principal，只有 `AuthorizationPolicy` 才拦得住。
+
+要关掉这扇明文的门，得显式下发：
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: prod          # 按 namespace 生效；放 istio-system 则为全局默认
+spec:
+  mtls:
+    mode: STRICT
+```
+
+**2. STRICT 会打断谁，上线前必须盘点。**
+
+探针、未注入的 DaemonSet/Job、网格外 namespace 的调用方、集群外客户端、Prometheus 抓取——这些一旦断了就是 P0。正确姿势是先在测试 namespace 开 STRICT，`istioctl analyze` 扫一遍，再推生产。
+
+**3. 探针要单独确认。**
+
+Istio 默认开启 `rewriteAppHTTPProbe`，把 kubelet 的 **HTTP** 探针改成由 Sidecar 发起（走 localhost 打到容器），所以 HTTP 探针不受 STRICT 影响。但 **TCP 探针不会被重写**，STRICT 下可能被 15006 直接拒掉——这类服务优先改成 HTTP 探针，或单独排除探针端口（排除即明文，要接受这个代价）。
+
+**4. localhost 永远是明文，别指望 mTLS 兜底。**
+
+同 Pod 的容器互访、Sidecar 与应用的通信都走 loopback。如果同一 Pod 里塞了 app + 本地 exporter + 本地缓存，它们之间的流量对任何有节点权限的人都是可读的。
+
+**5. 监控抓取是最常见的"暗门"。**
+
+按 `prometheus.io/scrape` 注解直抓应用端口时，请求会被当成入站流量进 15006。Istio 的正解是 **merged metrics**：Sidecar 在 **15020** 端口把自身和应用指标聚合暴露，Prometheus 只抓 Sidecar。如果为了省事给抓取端口加 `excludeInboundPorts`，**那条路径就是明文**——排障时先查这个注解，很多"mTLS 没生效"的案子都死在这。
+
+**6. mTLS ≠ 网络隔离 ≠ 应用层授权。**
+
+- mTLS 只证明"我是谁"，不限制"能不能连"。要限制连接得配 `AuthorizationPolicy`（按 principal）或 `NetworkPolicy`（按 IP/端口，但 Pod IP 不可信）。
+- 同节点 Pod 之间默认全通。mTLS 不会阻止一个被入侵的 Pod 去连它并不该连的数据库——除非你写了策略。
+- 反过来说，`principals` 这类字段只在 mTLS 下可信；PERMISSIVE 模式里明文连接的 principal 为空，策略会表现得时灵时不灵。
+
+另外两个运维细节：证书默认 **24 小时轮换**，节点时钟漂移过大会导致握手失败（现象是 `upstream connect error or disconnect/reset before headers`），用 `istioctl proxy-config secret` 看 `NotAfter` 能确认；应用与 Sidecar 的启动顺序用 `holdApplicationUntilProxyStarts: true` 保证，否则应用可能先于代理就绪而被连接拒绝。
+
+**验证四连：**
+
+```bash
+# 1. 看某个 Pod 实际拿到的证书与有效期
+istioctl proxy-config secret <pod> -n <ns>
+
+# 2. 看某对工作负载之间的 mTLS 状态（谁在加密、谁在明文）
+istioctl x describe pod <pod> -n <ns>
+
+# 3. 看客户端 Envoy 的目标 cluster 到底有没有挂 TLS —— 判断 auto mTLS 是否生效的硬证据
+istioctl proxy-config cluster <client-pod> -n <ns> \
+  --fqdn <svc>.<ns>.svc.cluster.local -o json | grep -A3 transport_socket
+#   有 envoy.transport_sockets.tls + ISTIO_MUTUAL → 出站加密
+#   没有 transport_socket → 明文（对端无 Sidecar，或走了 passthrough）
+
+# 4. 抓包验证：同节点对端只应看到 TLS 握手，读不到 HTTP 明文
+kubectl debug -it <src-pod> -n <ns> --image=nicolaka/netshoot -- tcpdump -i eth0 -A port 8080
+```
+
+补一句 Ambient 的对照：换到 Ambient 后加密终点从"每个 Pod 的 Sidecar"变成"每个节点的 ztunnel"，**覆盖边界的规则一模一样**——Pod 到本节点 ztunnel 那一段仍是明文，ztunnel 与 ztunnel 之间才是 mTLS，localhost 和未纳入网格的流量照旧不在保护范围内。
+
+一句话总结：**mTLS 的覆盖范围 = 经过两个 Envoy（或两个 ztunnel）的流量。加密是自动的（auto mTLS），但覆盖范围只到"线上的那一段"，到不了"主机里的那一段"；PERMISSIVE 则额外给所有非网格来源留了一扇明文的门，只有 STRICT 能关上它。**
+
 ### 服务网格可以解决哪些问题
 
 微服务把一个进程拆成几十个服务后，"调一次接口"从函数调用变成了跨越网络的远程调用，原来根本不存在的问题全冒出来了。逐个看，每个问题对应网格的一个能力：

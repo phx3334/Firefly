@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 500" width="100%" role="img" aria-label="顺序写、随机写与 Compaction 对比">
+  <defs>
+    <marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#94A3B8"/>
+    </marker>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="979" height="499" rx="14" fill="#FBFCFE" stroke="#E5EAF2"/>
+
+  <g font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+
+    <g font-size="12" fill="#64748B" text-anchor="middle">
+      <text x="360" y="46">Chunk 内的 Slice</text>
+      <text x="810" y="46">对象存储中的 Block</text>
+    </g>
+
+    <!-- 行1 顺序写 -->
+    <text x="26" y="126" font-size="13" font-weight="600" fill="#0F172A">顺序写</text>
+    <rect x="110" y="92" width="500" height="64" rx="8" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <rect x="118" y="100" width="484" height="48" rx="6" fill="#DCFCE7" stroke="#86EFAC"/>
+    <text x="360" y="130" font-size="12" fill="#15803D" text-anchor="middle">Slice A</text>
+    <line x1="614" y1="124" x2="666" y2="124" stroke="#94A3B8" stroke-width="1.6" marker-end="url(#m1)"/>
+    <g fill="#DCFCE7" stroke="#86EFAC">
+      <rect x="678" y="100" width="13" height="48" rx="2"/><rect x="694" y="100" width="13" height="48" rx="2"/>
+      <rect x="710" y="100" width="13" height="48" rx="2"/><rect x="726" y="100" width="13" height="48" rx="2"/>
+      <rect x="742" y="100" width="13" height="48" rx="2"/><rect x="758" y="100" width="13" height="48" rx="2"/>
+      <rect x="774" y="100" width="13" height="48" rx="2"/><rect x="790" y="100" width="13" height="48" rx="2"/>
+      <rect x="806" y="100" width="13" height="48" rx="2"/><rect x="822" y="100" width="13" height="48" rx="2"/>
+      <rect x="838" y="100" width="13" height="48" rx="2"/><rect x="854" y="100" width="13" height="48" rx="2"/>
+      <rect x="870" y="100" width="13" height="48" rx="2"/><rect x="886" y="100" width="13" height="48" rx="2"/>
+      <rect x="902" y="100" width="13" height="48" rx="2"/><rect x="918" y="100" width="13" height="48" rx="2"/>
+    </g>
+    <text x="678" y="172" font-size="11" fill="#94A3B8">16 × 4MiB</text>
+
+    <!-- 行2 随机写 -->
+    <text x="26" y="288" font-size="13" font-weight="600" fill="#0F172A">随机写</text>
+    <rect x="110" y="230" width="500" height="76" rx="8" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <g stroke-width="1">
+      <rect x="118" y="238" width="380" height="12" rx="6" fill="#DBEAFE" stroke="#93C5FD"/>
+      <rect x="240" y="254" width="180" height="12" rx="6" fill="#FEF3C7" stroke="#FCD34D"/>
+      <rect x="330" y="270" width="120" height="12" rx="6" fill="#DBEAFE" stroke="#93C5FD"/>
+      <rect x="150" y="286" width="260" height="12" rx="6" fill="#FEF3C7" stroke="#FCD34D"/>
+    </g>
+    <line x1="614" y1="268" x2="666" y2="268" stroke="#94A3B8" stroke-width="1.6" marker-end="url(#m1)"/>
+    <g fill="#FEE2E2" stroke="#FCA5A5">
+      <rect x="678" y="238" width="13" height="22" rx="2"/><rect x="694" y="278" width="13" height="16" rx="2"/>
+      <rect x="726" y="244" width="13" height="26" rx="2"/><rect x="758" y="284" width="13" height="14" rx="2"/>
+      <rect x="790" y="240" width="13" height="20" rx="2"/><rect x="822" y="276" width="13" height="18" rx="2"/>
+      <rect x="854" y="246" width="13" height="24" rx="2"/><rect x="886" y="282" width="13" height="16" rx="2"/>
+    </g>
+    <text x="678" y="322" font-size="11" fill="#94A3B8">Block 大多不满 4MiB</text>
+
+    <!-- 行3 Compaction -->
+    <text x="26" y="432" font-size="13" font-weight="600" fill="#0F172A">Compaction</text>
+    <rect x="110" y="400" width="500" height="64" rx="8" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <rect x="118" y="408" width="484" height="48" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-dasharray="6 4"/>
+    <text x="360" y="438" font-size="12" fill="#15803D" text-anchor="middle">合并为一个 Slice</text>
+    <line x1="614" y1="432" x2="666" y2="432" stroke="#94A3B8" stroke-width="1.6" marker-end="url(#m1)"/>
+    <g fill="#DCFCE7" stroke="#86EFAC">
+      <rect x="678" y="408" width="13" height="48" rx="2"/><rect x="694" y="408" width="13" height="48" rx="2"/>
+      <rect x="710" y="408" width="13" height="48" rx="2"/><rect x="726" y="408" width="13" height="48" rx="2"/>
+      <rect x="742" y="408" width="13" height="48" rx="2"/><rect x="758" y="408" width="13" height="48" rx="2"/>
+      <rect x="774" y="408" width="13" height="48" rx="2"/><rect x="790" y="408" width="13" height="48" rx="2"/>
+      <rect x="806" y="408" width="13" height="48" rx="2"/><rect x="822" y="408" width="13" height="48" rx="2"/>
+      <rect x="838" y="408" width="13" height="48" rx="2"/><rect x="854" y="408" width="13" height="48" rx="2"/>
+      <rect x="870" y="408" width="13" height="48" rx="2"/><rect x="886" y="408" width="13" height="48" rx="2"/>
+      <rect x="902" y="408" width="13" height="48" rx="2"/><rect x="918" y="408" width="13" height="48" rx="2"/>
+    </g>
+    <text x="678" y="480" font-size="11" fill="#94A3B8">旧 Block 进回收站</text>
+  </g>
+</svg>
