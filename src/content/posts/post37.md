@@ -9,6 +9,7 @@ draft: false
 lang: '中文'
 ---
 
+
 ## Kafka：它到底是什么
 
 ### 定位与作用
@@ -226,3 +227,82 @@ Kafka 默认是裸奔的：任何连上 Broker 端口的客户端都能读写任
 | Kafka 中的用途 | 生产端日志追加写、写索引之外的普通文件 | .index/.timeindex 索引文件的随机查找 | 消费端 Fetch 响应的数据传输 |
 
 三个机制不是互斥关系，而是各守一段：**写入靠 read/write（顺序追加），索引靠 mmap（随机查找），消费传输靠 sendfile（定向搬运）**——Kafka 按数据访问模式各选其技，这也是它高吞吐的底层细节之一。
+
+## 生产运维视角：监控、容量与变更红线
+
+前面讲的是"它怎么工作"，这一节讲"它坏了怎么知道"。内容不多，但都是上线前该落到监控面板和操作规范里的基线。
+
+### 监控：Prometheus + kafka_exporter
+
+Kafka 自身没有 Prometheus 端点，要靠两个 exporter 补上：
+
+| 组件 | 采集视角 | 部署方式 |
+| --- | --- | --- |
+| **kafka_exporter** | topic / 分区 / 消费组：分区数、同步副本数、各分区 offset、消费组 lag | 独立进程，连任意 broker，默认 9308 端口 |
+| **JMX Exporter** | Broker 内部：副本管理、Controller、请求处理线程池、JVM GC | javaagent 挂到 `kafka-server-start.sh`，默认 9404 |
+
+只上 kafka_exporter 就能覆盖"消费有没有积压"这类最常用的问题；要看到 Controller 状态和副本健康度，必须再加 JMX Exporter。
+
+**六个必看指标：**
+
+| 指标 | 含义 | 异常的典型原因 |
+| --- | --- | --- |
+| 副本不足分区数 | 有副本没跟上 Leader | 磁盘 IO 打满、Full GC 停顿 |
+| 离线分区数 | 分区没有可用 Leader | P0，分区不可读写 |
+| ActiveControllerCount | 当前 Controller 数量 | 必须恒为 1，出现 0 或 2 都是脑裂级 |
+| ISR 收缩速率 | 单位时间掉队次数 | 持续收缩比一次收缩更危险，说明是间歇性超时 |
+| 消费组 lag | 已生产 offset − 已提交 offset | 持续单调上涨 = 消费能力不足 |
+| 请求处理线程空闲率 | RequestHandler 线程池余量 | 低于 30% 说明 Broker 快扛不住 |
+
+对应的 PromQL（前两条走 kafka_exporter，其余走 JMX Exporter）：
+
+```promql
+# 有副本掉队的分区：总副本数 > 同步副本数
+kafka_topic_partition_replicas - kafka_topic_partition_in_sync_replica > 0
+
+# 消费积压 Top 10
+topk(10, sum by (consumergroup, topic) (kafka_consumergroup_lag))
+
+# 离线分区，任何大于 0 的值都该立刻告警
+kafka_controller_kafkacontroller_offlinepartitionscount > 0
+
+# Controller 必须唯一
+sum(kafka_controller_kafkacontroller_activecontrollercount) != 1
+
+# ISR 抖动
+rate(kafka_server_replicamanager_isrshrinks_total[5m]) > 0
+
+# 请求处理线程空闲率过低
+kafka_server_kafkarequesthandlerpool_requesthandleravgidlepercent < 0.3
+```
+
+告警门限给一组保守基线：副本不足**持续 5 分钟**、离线分区**立即**、lag 持续上涨**超过 10 分钟**、Controller 数量异常**立即**。
+
+### 容量规划：三个必须算的数
+
+```text
+磁盘容量 = 日增数据量 × 副本数 × 保留天数 ÷ 压缩比 × 1.3（预留）
+跨 AZ 流量 = 写入速率 × (副本数 − 1)
+分区数 ≈ 目标吞吐 ÷ 单分区吞吐（经验值约 10 MB/s），同时受 broker 文件句柄数约束
+```
+
+第一个决定买多少盘；第二个决定网络带宽和云上跨 AZ 流量费（常被忽略的一笔大钱）；第三个决定并发上限。
+
+### 变更红线
+
+- **分区数只能增不能减**。扩之前想清楚，减回去只能重建 topic。
+- **分区迁移必须限流**。`kafka-reassign-partitions` 不限流会把磁盘和网络打满，直接触发 ISR 掉队。
+- **`unclean.leader.election.enable` 保持关闭**。打开等于允许用"非同步副本"上位，换来的是静默数据丢失。
+- **滚动重启开 `controlled.shutdown.enable=true`**，让 Broker 先把 Leader 主动交出去再停，避免每个分区各走一次选举。
+- **单 Broker 磁盘使用率压到 70% 以下**。写满导致的不是变慢，是直接躺下。
+
+### 四类高频故障的快速定位
+
+| 现象 | 第一怀疑对象 | 先看什么 |
+| --- | --- | --- |
+| ISR 频繁抖动 | 磁盘延迟或 Full GC | `iostat` 的 `await`、GC 日志里的停顿时间 |
+| 消费 lag 持续上涨 | 消费逻辑慢 / 分区数不够 | lag 曲线斜率、分区数与消费者实例数的比值 |
+| Broker 频繁掉线 | 磁盘写满或内存超限 | 磁盘使用率、容器 memory limit、OOMKill 记录 |
+| Rebalance 风暴 | `max.poll.interval.ms` 太小 | 单批消息处理耗时是否超过该值 |
+
+一句话：**Kafka 的稳定运行不靠"不出故障"，靠"故障发生时能在指标上第一时间看见"——副本不足和离线分区这两个数只要盯着，大半事故都能提前发现。**
