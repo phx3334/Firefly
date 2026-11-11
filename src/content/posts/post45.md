@@ -17,7 +17,31 @@ lang: '中文'
 
 **服务网格（Service Mesh）是把"服务间网络通信"这件事从业务代码里抽出来，下沉到一个独立的基础设施层**。Istio 是这个领域的事实标准实现。
 
-先解释一个文中反复出现的词——**Sidecar（边车）**：K8s 的通用设计模式，指**和业务容器跑在同一个 Pod 里的辅助容器**，两者共享网络命名空间和存储卷，随 Pod 一起创建、一起销毁（如同摩托车的边车挂在主车旁）。它的价值是**把通用能力从业务代码里剥离**：日志收集（Promtail/Fluent Bit）、指标采集（post30 的思路）、加密代理（下文的 Envoy）都可以塞进辅助容器，业务代码一行不用改。Istio 只是 Sidecar 模式最著名的一个用户。
+先解释一个文中反复出现的词——**Sidecar（边车）**，一句话：就是"**同一个 Pod 里的第二个容器**"。Pod 是 K8s 的最小调度单位，一个 Pod 里可以放多个容器，它们：
+
+- **共享网络命名空间**：同一个 IP、同一个 localhost，容器之间用 `127.0.0.1:端口` 直接互访；
+- **共享存储卷**：可以挂同一个 emptyDir、ConfigMap；
+- **同生共死**：一起调度到同一节点，一起创建、一起销毁。
+
+"边车"是这种用法的俗名：**主容器干活，副容器在旁边辅助**，如同摩托车的边斗。它的价值是把通用能力从业务代码里剥离——业务镜像只专注自己的事，辅助能力塞进旁边的容器，业务代码一行不用改。
+
+拿 Kafka 的 JMX 举个真实例子，开了 `metrics.jmx.enabled` 之后，Pod 里就是两个容器：
+
+```text
+Pod: kafka-0
+├── kafka           主容器：9092 业务端口、9093 controller 端口
+└── jmx-exporter    边车  ：9404 指标端口
+        └─ 用 localhost 读同 Pod 内 kafka JVM 的 JMX MBean
+            翻译成 Prometheus 文本，暴露在 :9404/metrics
+```
+
+Service 的 selector 选中这个 Pod、`targetPort: metrics` 指向边车的端口——Prometheus 抓的是 Pod 里的边车，不是单独的工作负载；exporter 不需要独立部署，它"寄生"在 kafka Pod 里。
+
+**为什么 JMX 用 sidecar、lag exporter 却是独立 Deployment？判断标准就一条：数据源是不是"本 Pod 内才拿得到"。** JMX 的 MBean 是 JVM 本地管理接口，只有贴着 broker 才能低成本读到，所以 exporter 必须放同 Pod、和 broker 1:1；而消费组 lag 走 Kafka 协议、连 9092 跨网络去读 `__consumer_offsets`，数据哪都能拿，就做成独立 Deployment——1 个 exporter 能看所有 broker 和消费组，还能独立扩缩、独立重启，不牵连主容器。
+
+**两个容易混的点。** 一是"注入"这个词：Kafka 的 jmx-exporter 是**静态声明**——chart 在 StatefulSet 模板里直接写死的第二个容器，看 manifest 就能看到；而 Istio 的 istio-proxy 是**动态注入**——通过 MutatingWebhook 在 Pod 创建时才塞进去，你写 Deployment 时根本看不到这个容器。两者都叫 sidecar，一静一动，后文讲的都是后者。二是**代价**：边车的资源要算进同一个 Pod 的 requests/limits（Kafka Pod 的总资源 = broker + exporter）；生命周期绑定，改 exporter 的配置 ConfigMap 会滚动重启整个 Kafka Pod，不是只重启边车；边车挂了还可能拖垮 Pod 的 readiness。sidecar 不是免费的，它用耦合换便利。
+
+生产上最常见的 sidecar 就三类：**指标采集**（上面的 JMX exporter）、**日志采集**（Fluent Bit / Filebeat）、**代理**（Envoy）——共同点都是"必须贴着主容器干活"。Istio 属于第三类，也是这个模式最著名的一个用户。
 
 Istio 的架构只有两个角色：
 
