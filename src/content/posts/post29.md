@@ -19,6 +19,7 @@ helm是k8s的包管理工具，可以将k8s应用打包成类似于windows/mac�
 ### release
 - 定义: Chart安装后的运行实例
 - 特点: 同一Chart可在不同命名空间多次安装，形成多个Release
+- 资源最终叫什么名、nameOverride/fullnameOverride 怎么用，统一见后文「命名」一节
 ### 典型目录结构
 一个 chart 就是一个普通目录，`helm upgrade --install vote .` 里的 `.` 指向的就是它的根目录：
 ``` 
@@ -324,9 +325,39 @@ spec:
 要点：
 - `define` 定义片段、`include` 调用片段。`include` 返回字符串，可以接管道过滤器（如 `| trunc 63（截断字符串，取前63个） | trimSuffix "-"（丢弃字符串末尾的 "-"）| nindent 4`（缩进4空格））；`include "vote.fullname" .` 末尾的 `.` 是把当前作用域的上下文（.Values、.Release 等）传进去，漏传会导致模板内取不到变量。
 - 命名必须加 chart 名前缀（如 `vote.`），否则会和子 chart 的同名 define 冲突。
-- fullname 的拼接细节对应 K8s 命名规范：`printf "%s-%s"` 用 `Release.Name + Chart.Name` 拼接，同一 chart 装多个 release 时资源名天然不冲突（这也是 release 机制支持多实例的底层约定）；`trunc 63` 因为 K8s 资源名（DNS label）最长 63 字符；`trimSuffix "-"` 因为名字不能以连字符结尾——三步合起来自动生成合法且不冲突的资源名。
+- fullname 的拼接对应 K8s 命名规范（release 名、chart 名、63 字符上限、不能以连字符结尾），完整规则和生产用法统一放在下一节「命名」里讲。
 - 核心价值是**一致性**：`selectorLabels` 同时被 Service 的 `selector` 和 Pod 的 `template.labels` 引用，保证两者永远匹配（Service 选不中 Pod 的经典故障就是这两处手写改岔了）；`labels` 统一输出 `app.kubernetes.io/*` 标准标签，改一处全生效。
 - 维护优势：命名、标签逻辑集中在 `_helpers.tpl` 一处，改一个文件，deployment/service/ingress 全部生效，不用挨个配置文件改——典型场景是统一管理微服务各组件的名称格式。
+### 命名：release 名、chart 名与两个 override 【必掌握】
+
+资源最终叫什么名字，由三个名字共同决定——这个话题前面散落在 chart/release 定义、values 示例和 `_helpers.tpl` 里，这里一处说清。
+
+**三个名字先分清**
+
+| 名字 | 从哪来 | 能不能变 |
+| --- | --- | --- |
+| Chart 名 | `Chart.yaml` 的 `name` | 基本不变（它是包的身份） |
+| Release 名 | `helm install <名字>` 时指定 | 随时可指定，同一 chart 装多次靠它区分 |
+| 资源名 | 模板渲染出的 K8s 对象名（Deployment/Service 的 `metadata.name`） | 由下面的规则决定 |
+
+release 名要进资源名，是有实际意义的：同一 chart 在两个命名空间各装一份，资源名不同才不会在全局（如 PV、ClusterRole 这类集群级对象）撞名——这就是 chart 作为"安装包"、release 作为"运行实例"的底层约定。
+
+**默认规则**（`helm create` 生成的 `_helpers.tpl` 里）：`fullname = .Release.Name + "-" + .Chart.Name`，再 `trunc 63` 截到 K8s 资源名的 63 字符上限、`trimSuffix "-"` 去掉结尾连字符。所以 release `vote` 装 chart `vote`，默认资源名是 `vote-vote`；很多 chart 还会判断两值相等时只留一个，实际得到 `vote`。完整拼接逻辑就是前一节 `vote.fullname` 那段。
+
+**两个 override**（写在 `values.yaml` 或 `-f` 里，只影响 `fullname`，即 `metadata.name` 和对应 label）：
+
+- `fullnameOverride`：完全接管——资源名就用这个值，不再拼 release 和 chart 名。用于**外部系统按固定名访问你的场景**（比如外部 Prometheus 按固定名抓 Service、别的团队按约定名直连）。
+- `nameOverride`：只替换拼接里的 chart 名那一段，release 名前缀保留。想把 `vote-vote` 里的 chart 段换成应用名时用它。
+- 两者都**不影响 `selectorLabels`**——Service 的 selector 和 Pod 的 labels 依然匹配，这是 override 改名而服务不断流的关键。
+
+**生产一般怎么用**
+
+1. **release 名 = 应用名 = 命名空间名**（如都叫 `vote`），`helm list -n vote` 一眼对应；多环境靠命名空间区分，release 名保持一致，`helm history vote -n prod` 查的就是你熟悉的那个应用。
+2. **默认规则不动**：资源名天然带 release 前缀，多实例、多环境不冲突，多数场景零配置。
+3. **`fullnameOverride` 只在被外部按名依赖时用**，且一旦上线就不能随意改——它对同一 release 是改名（旧资源名的残留对象需要手动清理），对下游是接口变更。
+4. **CI/CD 永远不要每次换 release 名**：release 名变了 helm 会当成全新实例重复部署，旧实例变孤儿。
+5. 仓库里其它地方出现的 `fullnameOverride`（如 values 示例里的 redis）是子 chart 的——父 chart 通过 values 把这个名字传给子 chart，让中间件的资源名也服从同一套规划，不被子 chart 默认名（`vote-redis` 这种双拼）打乱。
+
 ### Hooks
 Hooks（钩子）是 helm 提供的一种机制，可以让某些资源不随 release 的常规生命周期安装/卸载，而是在特定时间点执行，例如数据库迁移、数据初始化、发送通知等。通过给资源添加 annotation 声明：  
 ``` yaml
