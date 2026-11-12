@@ -494,6 +494,41 @@ secretGenerator:
 上一节 production 示例中的 `helmCharts` 就是混合用法：中间件（redis/postgresql）不想手写 manifest，直接引现成的 chart，由 kustomize 统一渲染。要点：  
 - `valuesInline` 相当于 helm 的 `-f`/`--set`，用来覆写 chart 默认值  
 - 命令行要加 `--enable-helm` 才会调用 helm 渲染 chart：  
+### kustomization.yaml 实战应用：从写到上线
+「常用配置」是字段清单，这里把字段组合成一个真实可用的 overlay，并走完"预览 → 比对 → 上线 → 验证"的完整流程。staging 环境的 kustomization.yaml：
+``` yaml
+# overlays/staging/kustomization.yaml
+resources:
+  - ../../base
+
+namespace: staging                # 给所有资源统一写 metadata.namespace，base 里不用挨个文件写
+namePrefix: vote-                 # 资源名统一加前缀：vote → vote-vote，同集群装多套同名应用不撞名
+
+labels:                           # 给所有资源统一打标签（查询、计费、按标签筛资源用）
+  - pairs:
+      env: staging
+      team: shop
+    includeSelectors: false       # 只当展示标签，别写进 Service/Pod 的 selector
+
+replicas:                         # 按资源名改副本数，比 JSON patch 直白
+  - name: vote                    # 填 base 里的资源名
+    count: 2
+
+images:
+  - name: dockersamples/examplevotingapp_vote
+    newTag: "staging-abc123"
+```
+上线流程：
+``` bash
+kubectl kustomize overlays/staging     # 1. 只渲染不提交：先看最终 yaml 长什么样
+kubectl diff -k overlays/staging       # 2. 和集群现状逐字段比对，apply 前必看
+kubectl apply -k overlays/staging      # 3. 正式下发
+kubectl get deploy,svc -n staging      # 4. 验证：命名空间、vote- 前缀、副本数都应到位
+```
+要点：
+- **"整批资源统一改"的诉求一律用字段声明**（namespace/namePrefix/replicas/labels），别回 base 里挨个文件改——base 一旦混入环境差异，"通用部分"就名存实亡了。
+- **`labels` 别无脑 `includeSelectors: true`**：标签一旦写进 Deployment 的 selector 就是**不可变字段**，下次改标签 `kubectl apply` 直接报 `field is immutable`；老字段 `commonLabels` 默认把标签全写进 selector 和 Pod 模板，是这个坑的重灾区。
+- **`kubectl diff` 是多环境发布的安全网**：patches 改了副本数却没生效？diff 一眼看出覆写没命中，比 apply 完再排查便宜得多。
 ### kustomize与helm对比
 |          | helm                                   | kustomize                                            |
 | -------- | -------------------------------------- | ---------------------------------------------------- |
