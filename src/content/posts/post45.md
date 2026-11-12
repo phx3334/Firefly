@@ -236,6 +236,8 @@ kubectl debug -it <src-pod> -n <ns> --image=nicolaka/netshoot -- tcpdump -i eth0
 
 之前，Pilot、Citadel、Galley 是三个独立部署的控制平面组件，后来合并进了一个二进制——**istiod**。所以今天在集群里只有一个 istiod Deployment，但内部仍保留这三个逻辑模块（老架构图仍按它们分开画）：
 
+注意这里的"控制平面"是 Istio 自己的逻辑概念（对应数据平面），与 K8s 的 master 节点无关——istiod 就是 `istio-system` 里一个普通 Deployment，没有 hostNetwork、没有绑定 master 的 nodeSelector，被调度到哪台工作节点都行，会漂移、可多副本，`kubectl get pod -o wide` 一眼能看到它的 IP。
+
 | 模块 | 职责 | 关键词 |
 | ---- | ---- | ---- |
 | **Pilot** | Watch 所有流量 CR（VirtualService/DestinationRule/ServiceEntry），翻译成 xDS 配置下发给 Envoy；同时维护服务发现（对接 K8s API Server） | 配置翻译 + 流量下发，istiod 的**大脑** |
@@ -312,6 +314,8 @@ kubectl label namespace bookinfo istio-injection=enabled
 # Ambient 模式：换一个标签（原理完全不同：Pod 不注入，流量由节点级 ztunnel 接管）
 kubectl label namespace bookinfo istio.io/dataplane-mode=ambient
 ```
+
+**补充：`istio.io/rev`（revision 标签）是同一入口的另一套选择器。** `istio-injection=enabled` 只会被**默认版本**的 istiod 认领；当集群里装了命名版本的 istiod（`istioctl install --set revision=canary`，新旧并存做网格自身的灰度升级）时，它的 webhook 只认 `istio.io/rev=canary` 标签——所以两种注入方式的选择器都落在"给命名空间打标签"这一个动作上，但**标签永远是你自己打的**（`istioctl tag` 也只是帮你批量切换），安装时不会自动给任何 namespace 打标。revision 的价值在升级与回滚：把一批 namespace 的标签从 `default` 切到 `canary` 就是交给新版控制平面，出问题改回标签即回滚，Sidecar 侧不用重新注入。注入成功的 Pod 会自动带上 `istio.io/rev=<版本名>` 标签，`kubectl get pod --show-labels` 可以看出它归哪个 istiod 管。
 
 两个必须知道的细节：
 
