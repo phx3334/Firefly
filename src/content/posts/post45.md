@@ -83,6 +83,7 @@ mTLS（双向 TLS）是普通 TLS 的加强版，区别只在握手阶段：
 1. **服务间加密**：内网明文通信的时代结束了——一台 Pod 被入侵后抓包即可看到所有敏感数据，mTLS 让链路上全是密文。
 2. **服务身份认证**：连接方必须证明"我是支付服务"，无证书的陌生 Pod 根本握不上手，横向渗透被阻断在握手阶段。
 3. **细粒度授权的依据**：支付服务只想让结账服务调它。开了 mTLS 后写一条 AuthorizationPolicy 限定调用方身份为 `sa/checkout`；此时黑客拿下了内网另一台 Pod，它没有（也伪造不了）checkout 的证书。
+
 ```yaml
 rules:
 - from:
@@ -124,6 +125,37 @@ PodA Envoy :15001 ══mTLS 加密══► PodB Envoy :15006 ──明文─�
 
 所以 mTLS 的信任边界是**主机边界**，不是"整个集群边界"。它防网络上的窃听和冒充，防不住同主机同内核的窥探——那一层要靠节点加固、禁止特权容器、Pod Security Admission 来兜。
 
+### 收紧 mTLS：PeerAuthentication
+
+mTLS 怎么工作、保护到哪讲完了，这里补上"开关在哪"。Istio 装完默认就是 **auto mTLS**：两端都进网格时自动加密，对端没进网格就降级成明文——能通，但不设防。**PeerAuthentication** 就是管这个策略的 CR，按 namespace/Pod 粒度生效：
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: bookinfo
+spec:
+  mtls:
+    mode: STRICT          # 本 namespace 的 Pod 只接受 mTLS 流量
+```
+
+| 模式 | 行为 | 用途 |
+| ---- | ---- | ---- |
+| **UNSET**（缺省） | 继承上级：Pod → namespace → mesh 根策略 | 不表态，跟着全局走 |
+| **PERMISSIVE** | 同时接受明文和 mTLS | 迁移过渡期（auto mTLS 的底层默认） |
+| **STRICT** | 只接受 mTLS，明文直接拒 | 正式收紧，零信任的落点 |
+| **DISABLE** | 强制明文 | 纯排障用，生产禁用 |
+
+**生产收紧路径**（顺序错了会直接把业务打挂）：
+
+1. **先验证 auto mTLS 正常**：`istioctl proxy-config listener <pod> -n <ns>` 确认 inbound/outbound 已带 mTLS 上下文，两端互访确实走了密文；
+2. **先接网格、再开 STRICT**：STRICT 生效后，**没注入 Sidecar 的调用方**（裸 Job、未接管的 Pod、集群外组件）会被握手直接拒掉——这些流量源必须先接入网格，或明确接受它们不通；
+3. **按 namespace 分批上 STRICT**：先给非核心 namespace 打 STRICT → 重建 Pod → 验证调用正常再推下一个，出问题摘标签回滚（与前文注入标签同一套分批思路）；
+4. **策略各管一层**：PeerAuthentication 管"**怎么连**"（必须 mTLS），"**谁可以连**"由 AuthorizationPolicy 管（见前文 `principals` 示例）——两者配合才是完整的服务间零信任。
+
+一句话：**auto mTLS 让"有网格就加密"，STRICT 让"不加密就别进来"**——前者是默认收益，后者才是安全基线。
+
 ### 服务网格可以解决哪些问题
 
 微服务把一个进程拆成几十个服务后，"调一次接口"从函数调用变成了跨越网络的远程调用，原来根本不存在的问题全冒出来了。逐个看，每个问题对应网格的一个能力：
@@ -159,13 +191,13 @@ PodA Envoy :15001 ══mTLS 加密══► PodB Envoy :15006 ──明文─�
 | ---- | ---- | ---- |
 | **Pilot** | Watch 所有流量 CR（VirtualService/DestinationRule/ServiceEntry），翻译成 xDS 配置下发给 Envoy；同时维护服务发现（对接 K8s API Server） | 配置翻译 + 流量下发，istiod 的**大脑** |
 | **Citadel** | 签发和管理 SPIFFE 身份证书：给每个 Pod/工作负载发 X.509 证书，支撑自动 mTLS 的双向认证 | 身份与证书，mTLS 的**信任根** |
-| **Galley** | 配置的校验与转发层：校验用户提交的 CR 合法性（写错字段直接拒绝），再分发给 Pilot | 配置的**质检员** |
+| **Galley** | 配置校验的逻辑模块：校验用户提交的 CR 合法性（写错字段直接拒绝）。实际由 istiod 暴露的 ValidatingWebhook 承接校验，写错的 CR 在 `kubectl apply` 阶段就被打回 | 配置的**质检员** |
 
 三者各管一段：**Galley 收配置 → Pilot 翻译成 xDS 推给数据面；Citadel 另一条线发证书给数据面**。合并成 istiod 的动机就是简化部署——三个组件拆开时版本对齐、互相调用都是运维负担。
 
 （本文只讲单集群：多集群下 istiod 还会通过 remote secret 读取远端集群的服务发现、共用同一套根证书签发跨集群身份——拓扑另文展开，不是本文重点。）
 
-排查问题时的对应关系：路由不生效查 Pilot 的翻译结果（`istioctl proxy-config`，见下文）；mTLS 握手失败查 Citadel 发的证书（`istioctl proxy-config secret`）；CR 提交被拒、无效果但没报错，先看 Galley 的校验日志。
+排查问题时的对应关系：路由不生效查 Pilot 的翻译结果（`istioctl proxy-config`，见下文）；mTLS 握手失败查 Citadel 发的证书（`istioctl proxy-config secret`）；CR 提交被直接拒绝是 ValidatingWebhook 拦下的（`kubectl` 侧就有报错信息），提交成功但没效果再查 istiod 日志与下发结果。
 
 ### Sidecar和Ambient模式
 
@@ -223,7 +255,9 @@ istio-system namespace（Istio 自己的组件住这）
 
 这两个网关 Deployment 是**全集群共享**的：全集群的南北向流量都汇聚到这一两个 Pod，业务 Pod 有几千个、网关副本通常只有 1~2 个——是共享的进出口关卡，不是每 Pod 一份的东西。
 
-**接入业务 Pod**：Sidecar 注入靠 namespace 标签触发——istiod 里的 sidecar injector webhook 监听所有 Pod 创建请求，发现 Pod 所在 namespace 带了这个标签，就自动把 istio-init（init 容器：K8s 的特殊容器，在业务容器启动前跑一次 iptables 劫持规则后即退出，让所有进出业务容器的流量先经过 Envoy） + istio-proxy（常驻容器，Envoy 进程住在这里）两个容器塞进 Pod：
+**接入业务 Pod**：Sidecar 注入靠 namespace 标签触发——istiod 里的 sidecar injector webhook 监听所有 Pod 创建请求，发现 Pod 所在 namespace 带了这个标签，就自动把 **istio-proxy**（常驻容器，Envoy 进程住在这里）塞进 Pod，并让所有进出业务容器的流量先经过 Envoy。
+
+**iptables 规则谁来配**：主流版本默认启用 **istio-cni**——由节点上的 CNI 插件在 Pod 创建时配好重定向规则，所以注入完成的 Pod 里**没有 istio-init 容器**，只有"业务容器 + istio-proxy"；老版本才是注入 istio-init（init 容器，业务容器启动前跑一次 iptables 后即退出）。对应命令：
 
 ```bash
 # Sidecar 模式：namespace 打标签，之后新建的 Pod 自动注入
@@ -232,12 +266,13 @@ kubectl label namespace bookinfo istio-injection=enabled
 # Ambient 模式：换一个标签（原理完全不同：Pod 不注入，流量由节点级 ztunnel 接管）
 kubectl label namespace bookinfo istio.io/dataplane-mode=ambient
 ```
-1. 两种注入标签：   
-- `istio-injection=enabled`：交给**无 revision（默认版）istiod**注入
-- `istio.io/rev=canary`：交给**revision=canary 命名版 istiod**注入
-2. 用途：istiod 自身灰度升级，多版本 istiod 并存   
-3. 切换方式：改 namespace 标签，Pod 重建后由对应版本 istiod 注入 sidecar；改标签即可快速回滚   
-4. 要点：标签需要手动打，安装 istiod 不会自动打；注入完成的 Pod 会带上对应的`istio.io/rev`标签，标识归属哪个 istiod。   
+
+1. 两种注入标签：
+   - `istio-injection=enabled`：交给**无 revision（默认版）istiod**注入
+   - `istio.io/rev=canary`：交给**revision=canary 命名版 istiod**注入
+2. 用途：istiod 自身灰度升级，多版本 istiod 并存
+3. 切换方式：改 namespace 标签，Pod 重建后由对应版本 istiod 注入 sidecar；改标签即可快速回滚
+4. 要点：标签需要手动打，安装 istiod 不会自动打；注入完成的 Pod 会带上对应的`istio.io/rev`标签，标识归属哪个 istiod。
 
 两个必须知道的细节：
 
@@ -296,7 +331,7 @@ spec:
   - port: { number: 80, name: http, protocol: HTTP }
     hosts: ["bookinfo.example.com"]   # 大门只放行请求这个域名的流量，其他域名直接拒之门外
 ```
-**`hosts` 字段的含义**：只有 Host 头为 `bookinfo.example.com` 的请求能进门。一个 ingressgateway 上可以声明多个 Gateway，分别对应不同域名（`api.example.com`、`admin.example.com`），实现"一个入口按域名分流给多套业务"——生产完整实例见后文「南北向入口实战」一节。/
+**`hosts` 字段的含义**：只有 Host 头为 `bookinfo.example.com` 的请求能进门。一个 ingressgateway 上可以声明多个 Gateway，分别对应不同域名（`api.example.com`、`admin.example.com`），实现"一个入口按域名分流给多套业务"——生产完整实例见后文「南北向入口实战」一节。
 
 **`selector` 选中的 Pod 从哪来**：Gateway 不是进程，真正监听 80 的是 `selector` 匹配的那批网关 Pod——`istioctl install` 时自动生成的 **istio-ingressgateway Deployment**（骨架，只保留与 selector 相关的部分）：
 
@@ -397,7 +432,37 @@ http:
 
 一句话对比：**redirect = "客户端自己去新地址"（地址栏变、两次请求）；rewrite = "我帮你改好了再转发"（地址栏不变、一次完成）**。生产高频坑：redirect 不能与 route 共存（同一规则里写了会校验报错）；rewrite 必须与 route 配套出现——先改写再路由，两步在一条规则里完成。
 
+### 超时与重试：控制失败的传播速度
+
+熔断是"下游不行了把它摘掉"，超时与重试是更前置的一对：**超时决定一次调用最多等多久，重试决定失败后再给几次机会**。两者都写在 VirtualService 的路由规则里，由**调用方一侧的 Envoy** 执行——重试不是业务代码或客户端 SDK 干的，是 Sidecar 替你干的。
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: reviews
+spec:
+  hosts: [reviews]
+  http:
+  - route:
+    - destination: { host: reviews, port: { number: 9080 } }
+    timeout: 2s                     # 整个调用（含所有重试）的总预算，超时 Envoy 直接回 504
+    retries:
+      attempts: 3                   # 最多重试 3 次（加上首发共 4 次尝试）
+      perTryTimeout: 500ms          # 单次尝试的超时
+      retryOn: connect-failure,refused-stream,unavailable,cancelled
+```
+
+三个必须想清楚的点：
+
+- **timeout 是总预算，不是单次超时**：预算耗尽的瞬间整个调用终止，重试不会突破 `timeout`。所以 `attempts × perTryTimeout` 必须装得进 `timeout`（3 × 500ms = 1.5s < 2s），否则后面的重试轮次永远轮不到，`attempts` 形同虚设。
+- **重试会放大故障**：下游处理能力跟不上时，每次超时重试都等于向它多砸一轮流量，形成"越慢越重试、越重试越慢"的正反馈（与前文熔断一节的队列雪崩同源）。所以 attempts 要克制（1~3 次），并配 DestinationRule 的 `connectionPool` 限制重试排队——重试风暴的最后防线。
+- **retryOn 决定"什么样的失败值得再试"**：`connect-failure`（连接没建立）、`refused-stream`、`unavailable` 这类**没打到后端业务逻辑**的错误可以放心重试；默认**不含 5xx**——业务返回 500 说明请求已被处理过，POST 下单这类非幂等接口跟着重试就是重复扣款，确要重试需显式加 `retriable-status-codes` + `retriableStatusCodes` 并确认接口幂等。
+
+生产默认建议：**超时必须显式设**——不设就没有全链路的时间约束，慢下游会长期占住调用方的连接与并发；重试 attempts ≤ 3、perTryTimeout 明确给出。配完用后文的故障注入实测一遍：延迟注入到 5s，确认调用方在 2s 干净超时、按预期重试、没有拖垮整条链路。
+
 ### DestinationRule：定义目的地
+
 VirtualService 说"把 5% 流量给 reviews 的 v2"，但**v2 是哪些 Pod、按什么策略负载均衡，由 DestinationRule 回答**。它按 Pod label 把一个服务切分成命名的 subset；`trafficPolicy` 可以写在 `spec` 下（全局，对所有 subset 生效），也可以写在某个 subset 里（局部，仅该 subset 生效），**subset 级覆盖全局**：
 
 ```yaml
@@ -562,11 +627,13 @@ metadata:
 spec:
   hosts: ["api.thirdparty.com"]        # 外部服务的域名，网格内从此可以用它做路由
   ports:
-  - number: 443
-    name: https
-    protocol: HTTPS
+  - number: 80                         # 示例统一用 80/HTTP，与后文 egressgateway 全链路保持一致
+    name: http
+    protocol: HTTP
   location: MESH_EXTERNAL              # 声明这是网格外的目标
 ```
+
+> 真实的三方 API 基本都是 HTTPS：此时 SE 填 `443/HTTPS`，并要给出口配 **TLS origination**（DestinationRule 里 `tls: { mode: SIMPLE }`），否则 Envoy 发往外部的仍是明文 HTTP——端口、协议、网关、VS 路由必须整条链对齐，改一处要全改。
 
 注册之后，这个外部域名和其他内部服务一视同仁——可以给它写 VirtualService 做路由、配 DestinationRule 做超时重试，再配合 AuthorizationPolicy 限定"哪些服务允许访问它"。
 
@@ -680,7 +747,7 @@ spec:
         - { containerPort: 80 }
         - { containerPort: 443 }  # ①里两道门都监听 443，就落在这
 ---
-# 对外暴露：LB Service（验证章节里的入口 IP 1.2.3.4 就是它分配的）
+# 对外暴露：LB Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -695,7 +762,7 @@ spec:
   - { name: https, port: 443, targetPort: 443 }
 ```
 
-> 生产里这份 Deployment/Service 由 `istioctl install` 自动生成（见前文「安装与接入」），贴出来是为了对齐三件事：**Gateway 的 selector ↔ Deployment 模板 label**、**证书 Secret 要和网关同 namespace（istio-system）**、**验证用的 LB IP 从哪来**。
+> 生产里这份 Deployment/Service 由 `istioctl install` 自动生成（见前文「安装与接入」），贴出来是为了对齐三件事：**Gateway 的 selector ↔ Deployment 模板 label**、**证书 Secret 要和网关同 namespace（istio-system）**、**对外暴露的 LB IP 从哪来**。
 
 **① Gateway ×2：同一网关池上的两道门**（selector 都指向同一批 ingress Pod，靠域名区分）：
 
