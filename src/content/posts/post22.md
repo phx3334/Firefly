@@ -1119,7 +1119,3 @@ kubectl api-resources
 # 看某个资源该用哪个 apiVersion（VERSION 行）以及能写哪些字段
 kubectl explain deployment
 ```
-
-
-
-

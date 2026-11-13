@@ -268,33 +268,66 @@ k8s中有几十种Controller，这里简单罗列一些Controller
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Node Controller**（节点控制器）                               | 负责在节点出现故障时进行通知和响应                                                                                                                                                                                                                                           |
 | **Replication Controller**（副本控制器）                        | 负责为系统中的每个副本控制器对象维护正确数量的 Pod                                                                                                                                                                                                                           |
+| **Deployment Controller**（部署控制器）                          | 监听 Deployment，管理其名下的 ReplicaSet：创建新 RS、调整旧 RS 副本数实现滚动更新，回滚就是把副本指回旧 RS                                                                                                                                                                    |
+| **ReplicaSet Controller**（RS 控制器）                           | 监听 ReplicaSet，保证实际 Pod 数量始终等于 spec.replicas，多了删、少了建                                                                                                                                                                                                     |
 | **Endpoints Controller**（端点控制器）                          | 一个 Pod 的 IP+Port 对应一个 Endpoint 资源。K8s 将多个副本的 Endpoint 加入 Service 管理，这与配置 Nginx 是同样的道理；不同的是，Pod 的下线、重启等引起的 IP 地址变化（即 Endpoint 变化），都会被 K8s 监听到，然后动态更新到 Service 中，负责控制这件事的就是 Endpoint 控制器 |
 | **Service Account & Token Controllers**（服务账户和令牌控制器） | 为新的命名空间创建默认账户和 API 访问令牌                                                                                                                                                                                                                                    |
 | **ResourceQuota Controller**（资源配额控制器）                  | 确保指定的资源对象在任何时候都不会超量占用系统物理资源                                                                                                                                                                                                                       |
 | **Namespace Controller**（命名空间控制器）                      | 管理 Namespace 的生命周期                                                                                                                                                                                                                                                    |
 | **Service Controller**（服务控制器）                            | 属于 K8s 集群与外部的云平台之间的一个接口控制器                                                                                                                                                                                                                              |
 **控制器进程**都只存在于主节点
+
+结合前面的组件知识，把几个高频原生资源"谁存、谁管、谁执行"理清楚：
+
+| 资源            | 谁存                         | 谁监听并干活                                                                                     |
+| --------------- | ---------------------------- | ------------------------------------------------------------------------------------------------ |
+| Pod             | apiserver 存对象与 status    | kubelet 监听分配给自己的 Pod，调 CRI/CNI 拉起容器                                                 |
+| Deployment      | apiserver 存期望状态         | DeploymentController 管 RS，支持滚动更新/回滚                                                     |
+| ReplicaSet      | apiserver 存期望状态         | ReplicaSetController 保证指定数量 Pod 存活                                                        |
+| Service         | apiserver 存对象             | kube-proxy 监听 Service & Endpoints，在节点生成 iptables/ipvs 规则实现负载均衡                    |
+| ConfigMap/Secret | apiserver 存数据            | 没有控制器参与：kubelet 在 Pod 启动时把它挂载成文件或注入环境变量                                 |
+| Namespace       | apiserver 存对象             | NamespaceController 管生命周期（配额清理、删除回收）                                              |
 #### 客户端工具
 kubctl这个客户端程序的调用操作都是过kube-apiserver提供的HTTP Restful API接口进行。
 
 
-## POD创建流程
-- 客户端执行kubectl命令，默认读取固定路径~/.kube/config的配置，该配置里记录着你的访问凭证
-（本质就是账号密码），还有API Server的ip+port，即kubeclt命令一旦执行就会去配置文件中拿到凭
-证，然后去指定的地址访问API Server
-- 访问API Server前，先经过Auth模块进行身份认证
-- 请求打到API Server，API Server存取Etcd数据库集群（只有API Server可以访问etcd）
-- contoller-manager从apiserver获取到创建pod的事件，然后contoller-manager作为控制器的管理
-者，会调用具体的控制器从API server获取到kubectl提交过来的关于pod状态的变更、例如副本数增加
-一个，然后生成一个创建pod的事件
-- scheduler从apiserver获取到创建pod的事件，根据一些预定条件以及整个集群的资源状态选出合适
-创建pod的物理节点
-- 某个物理node上的kubelet从apiserver获取到了创建pod的任务，会调用容器引擎创建出容器放入
-POD中，创建过程中kubelet会调用网络插件为容器创建好网络    
-**注意** 1-6流程中并没有提到kube-proxy组件，没错，如果你只是创建pod的话，其实
+## 一个 apply 的完整流程（以 Deployment 为例）
+### 核心模型：apply 原生资源到底发生了什么
+K8s 原生资源（`Deployment`/`Service`/`Pod`/`ConfigMap` 这类内置 kind），你 apply YAML，本质是两件事：
+1. **把资源对象提交给 apiserver 存到 etcd**——这只是存了一份"期望状态"；
+2. **对应的控制器（controller）持续 watch 这个资源的变更，去调底层能力干活**。
+
+> **和 Istio CR 的区别只在"谁监听"**：原生资源是 K8s 自带的各个 controller 负责（跑在 kube-controller-manager 里）；Istio 的 VirtualService 这类 CR 则是 istiod 监听并翻译下发（见 Istio 文章 post45）。CRD 本身只是"注册一种新资源"的机制，资源对象（YAML）永远只是躺在 etcd 里的数据，**注册完还得有自己的控制器来干活**。
+
+### 完整流程（8 步）
+1. `kubectl apply -f deploy.yaml`
+   kubectl 先读取 `~/.kube/config` 拿访问凭证和 apiserver 地址，把 YAML 转成 JSON，发 HTTP 请求给 **kube-apiserver**
+2. apiserver 做校验（身份认证 Auth、字段合法性、权限），校验通过 → **写入 etcd 持久化存储**
+   此时集群里就有了这个 Deployment 对象。**还没有 Pod**，etcd 里只存了一份期望状态（副本数 3、镜像 xxx、标签 xxx）
+3. **kube-controller-manager 里的 DeploymentController** 通过 list-watch 监听到 Deployment 新增，读到期望状态
+4. DeploymentController 对比现状：还没有对应的 ReplicaSet，Pod 数量是 0，不满足期望
+   → 它创建对应的 **ReplicaSet（RS）** 对象（RS 也是原生资源），写入 etcd（每次改 Deployment 的 spec 换镜像，都会新建一个 RS——滚动更新/回滚的来源）
+5. ReplicaSetController 监听到 RS 新增，发现当前 Pod 不够
+   → 按 RS 里的 Pod 模板创建 **Pod** 对象，写入 etcd（此时 Pod 处于 Pending，还没选节点）
+6. **kube-scheduler** 调度器监听到未绑定节点的 Pod
+   看 Pod 的资源请求、亲和、污点，走预选+优选选一个合适节点，把 nodeName 写回 etcd
+7. 目标节点上的 **kubelet** 一直 watch 分配给自己的 Pod
+   kubelet 发现有新 Pod 调度到本机 → 调用 CRI（containerd 等）拉镜像、调 CNI 配网络、创建并启动容器
+8. 容器启动后，kubelet 持续上报 Pod 状态给 apiserver，更新 etcd 里 Pod 的 status
+
+每一步都是"**写 etcd → 下一个组件 watch 到变更 → 继续写**"，组件之间从不直接通信，全部经 apiserver 中转（list-watch 机制一节详述）。
+
+> 整个模型叫：**声明式 API + 控制器调谐（Reconcile）**
+> 你写 YAML 是写【期望状态】，控制器无限循环：`期望状态 vs 实际状态`，缺啥补啥，偏差就纠正。spec 由你写、status 由控制器回填，就是这套模型在 YAML 上的体现。
+
+**注意**：上面 8 步中并没有提到 kube-proxy 组件，没错，如果你只是创建Deployment/pod的话，其实
 kube-proxy并不会工作。你需要知道pod只是k8s集群管理的诸多资源中的一种，除了pod外还有很多其
 他资源，比如service资源。只有在你用kubectl命令提交创建service资源的时候，kube-proxy组件才会
 工作-帮你创建出service资源用于代理pod，此时，外部访问者就可以通过internet->防火墙->kube proxy访问到你的容器
+
+### 一个很关键的误区
+❌ **不是 apply yaml 直接创建容器！**
+✅ apply 只是把期望状态存在 etcd；**控制器是异步的调谐引擎**，是控制器循环去补齐现实。所以 `kubectl apply` 返回成功 ≠ 容器已经跑起来——中间隔着"控制器创建 RS → RS 创建 Pod → 调度 → kubelet 起容器"好几跳异步链条，排障要看 events 定位卡在哪一跳。
 
 
 ## List-watch机制
@@ -417,7 +450,7 @@ Pod（最底层，实际跑容器）
 kube-controller-manager  → 调谐（Reconcile）：副本够不够、滚动更新、回滚
 kube-scheduler           → 调度（Schedule）：新 Pod 放哪个节点
 ```
-对应前面的 POD 创建流程：controller-manager 生成"创建 Pod"的事件 → scheduler 选好节点 → 节点上的 kubelet 创建容器。两者分工不同、缺一不可。
+对应前面的 apply 完整流程：controller-manager 里的控制器生成"创建 Pod"的动作 → scheduler 选好节点 → 节点上的 kubelet 创建容器。两者分工不同、缺一不可。
 
 
 ## csi,cni,cri
@@ -432,7 +465,7 @@ k8s 自己不干"搬砖"的活——它把容器怎么跑、网络怎么通、�
 
 **为什么要搞这三套接口**：k8s 是通用编排平台，不可能自己内置所有运行时、所有网络方案、所有存储驱动。接口化的好处和"USB 标准化"一样——**kubelet 只管调接口，换实现不用改 k8s 一个字**：containerd 换 CRI-O、flannel 换 calico、自建存储换云盘，都是装插件的事。
 
-**调用关系**（对应前面 Pod 创建流程）：
+**调用关系**（对应前面 apply 完整流程的第 7 步）：
 
 ```text
 kubelet（每节点代理，唯一的"总调用方"）

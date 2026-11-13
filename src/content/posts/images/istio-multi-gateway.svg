@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540" role="img" aria-label="一个 istio-ingressgateway 挂两个 Gateway：www-gateway 与 api-gateway 共用同一批独立部署的 Envoy，istiod 把 Gateway、VirtualService、DestinationRule 规则翻译成 xDS 配置下发，外部流量经 SNI 分流到 web 与 api 服务">
+  <style>
+    .t   { fill:#171717; font:500 14px/20px -apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif; text-anchor:middle; }
+    .tm  { fill:#171717; font:500 13px/18px -apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif; text-anchor:middle; }
+    .ts  { fill:#52525B; font:400 12px/18px -apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif; text-anchor:middle; }
+    .tsl { fill:#52525B; font:400 12px/18px -apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif; text-anchor:start; }
+    .flow { stroke:#2563EB; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; fill:none; }
+    .ctrl { stroke:#52525B; stroke-width:1.5; stroke-linecap:round; fill:none; stroke-dasharray:5 5; }
+    .node { fill:#FFFFFF; stroke:rgba(23,23,23,0.16); }
+    .gw   { fill:#EFF6FF; stroke:#2563EB; }
+    .rule { fill:#FFFFFF; stroke:#2563EB; }
+  </style>
+
+  <defs>
+    <marker id="arrB" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M1 1 L6 4 L1 7" fill="none" stroke="#2563EB" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrM" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M1 1 L6 4 L1 7" fill="none" stroke="#52525B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="959" height="539" rx="16" fill="#F7F7F8" stroke="rgba(23,23,23,0.12)"/>
+
+  <!-- 图例 -->
+  <path d="M40 64 L80 64" class="flow"/>
+  <text x="88" y="68" class="tsl">数据面：真实流量</text>
+  <path d="M40 96 L80 96" class="ctrl"/>
+  <text x="88" y="100" class="tsl">控制面：xDS 配置（不碰流量）</text>
+
+  <!-- 外部用户 -->
+  <rect x="30" y="195" width="110" height="56" rx="8" class="node"/>
+  <text x="85" y="219" class="t">外部用户</text>
+  <text x="85" y="239" class="ts">浏览器 / APP</text>
+
+  <!-- 入口流量 -->
+  <path d="M145 223 L212 223" class="flow" marker-end="url(#arrB)"/>
+  <rect x="152" y="213" width="44" height="20" rx="8" fill="#FFFFFF" stroke="#2563EB"/>
+  <text x="174" y="227" class="ts">:443</text>
+
+  <!-- istio-ingressgateway：独立部署的 Envoy -->
+  <rect x="215" y="60" width="400" height="300" rx="12" class="gw"/>
+  <text x="415" y="86" class="t">istio-ingressgateway —— 独立部署的 Envoy</text>
+  <text x="415" y="106" class="ts">容器名 istio-proxy · 多副本 Deployment，前置 LoadBalancer</text>
+
+  <!-- lane 1：www.mall.com -->
+  <rect x="227" y="125" width="110" height="70" rx="8" class="rule"/>
+  <text x="282" y="148" class="tm">Gateway</text>
+  <text x="282" y="167" class="ts">www-gateway</text>
+  <text x="282" y="184" class="ts">www.mall.com</text>
+  <path d="M339 160 L354 160" class="flow" marker-end="url(#arrB)"/>
+  <rect x="356" y="125" width="110" height="70" rx="8" class="rule"/>
+  <text x="411" y="148" class="tm">VirtualService</text>
+  <text x="411" y="167" class="ts">路径分流 + 灰度</text>
+  <text x="411" y="184" class="ts">95/5 → web</text>
+  <path d="M468 160 L483 160" class="flow" marker-end="url(#arrB)"/>
+  <rect x="485" y="125" width="110" height="70" rx="8" class="rule"/>
+  <text x="540" y="148" class="tm">DestinationRule</text>
+  <text x="540" y="167" class="ts">web: v1/v2 子集</text>
+  <text x="540" y="184" class="ts">LEAST_REQUEST</text>
+  <path d="M597 160 L668 160" class="flow" marker-end="url(#arrB)"/>
+
+  <!-- lane 2：api.mall.com -->
+  <rect x="227" y="215" width="110" height="70" rx="8" class="rule"/>
+  <text x="282" y="238" class="tm">Gateway</text>
+  <text x="282" y="257" class="ts">api-gateway</text>
+  <text x="282" y="274" class="ts">api.mall.com</text>
+  <path d="M339 250 L354 250" class="flow" marker-end="url(#arrB)"/>
+  <rect x="356" y="215" width="110" height="70" rx="8" class="rule"/>
+  <text x="411" y="238" class="tm">VirtualService</text>
+  <text x="411" y="257" class="ts">全部转发</text>
+  <text x="411" y="274" class="ts">→ api</text>
+  <path d="M468 250 L483 250" class="flow" marker-end="url(#arrB)"/>
+  <rect x="485" y="215" width="110" height="70" rx="8" class="rule"/>
+  <text x="540" y="238" class="tm">DestinationRule</text>
+  <text x="540" y="257" class="ts">连接池限流</text>
+  <text x="540" y="274" class="ts">http2MaxRequests</text>
+  <path d="M597 250 L668 250" class="flow" marker-end="url(#arrB)"/>
+
+  <text x="230" y="310" class="tsl">同一个 Envoy 进程，按 SNI / Host 把两道门分开</text>
+  <text x="230" y="330" class="tsl">VS/DR 在这里执行——ingress 就是这两次调用的“客户端 Envoy”</text>
+
+  <!-- 目标服务 -->
+  <rect x="672" y="125" width="150" height="70" rx="8" class="node"/>
+  <text x="747" y="150" class="t">web（v1 / v2）</text>
+  <text x="747" y="168" class="ts">Service + Pod</text>
+  <text x="747" y="184" class="ts">Pod 带 sidecar</text>
+
+  <rect x="672" y="215" width="150" height="70" rx="8" class="node"/>
+  <text x="747" y="240" class="t">api</text>
+  <text x="747" y="258" class="ts">Service + Pod</text>
+  <text x="747" y="274" class="ts">Pod 带 sidecar</text>
+
+  <!-- 控制面 -->
+  <rect x="45" y="430" width="230" height="76" rx="8" class="node"/>
+  <text x="160" y="456" class="t">你写的规则（CR）</text>
+  <text x="160" y="476" class="ts">Gateway×2 · VirtualService×2</text>
+  <text x="160" y="494" class="ts">DestinationRule×2</text>
+
+  <path d="M279 468 L368 468" class="ctrl" marker-end="url(#arrM)"/>
+  <text x="323" y="460" class="ts">kubectl apply</text>
+
+  <rect x="372" y="430" width="180" height="76" rx="8" fill="#FEF3C7" stroke="#F59E0B"/>
+  <text x="462" y="456" class="t">istiod</text>
+  <text x="462" y="476" class="ts">Watch → 翻译成 xDS</text>
+  <text x="462" y="494" class="ts">不碰流量，只发配置</text>
+
+  <path d="M462 430 L462 368" class="ctrl" marker-end="url(#arrM)"/>
+  <text x="472" y="404" class="tsl">xDS 下发给 Envoy</text>
+</svg>

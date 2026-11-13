@@ -23,7 +23,7 @@ lang: '中文'
 - **共享存储卷**：可以挂同一个 emptyDir、ConfigMap；
 - **同生共死**：一起调度到同一节点，一起创建、一起销毁。
 
-"边车"是这种用法的俗名：**主容器干活，副容器在旁边辅助**，如同摩托车的边斗。它的价值是把通用能力从业务代码里剥离——业务镜像只专注自己的事，辅助能力塞进旁边的容器，业务代码一行不用改。
+"边车"是这种用法的俗名：**主容器干活，副容器在旁边辅助**。它的价值是把通用能力从业务代码里剥离——业务镜像只专注自己的事，辅助能力塞进旁边的容器，业务代码一行不用改。
 
 拿 Kafka 的 JMX 举个真实例子，开了 `metrics.jmx.enabled` 之后，Pod 里就是两个容器：
 
@@ -39,9 +39,9 @@ Service 的 selector 选中这个 Pod、`targetPort: metrics` 指向边车的端
 
 **为什么 JMX 用 sidecar、lag exporter 却是独立 Deployment？判断标准就一条：数据源是不是"本 Pod 内才拿得到"。** JMX 的 MBean 是 JVM 本地管理接口，只有贴着 broker 才能低成本读到，所以 exporter 必须放同 Pod、和 broker 1:1；而消费组 lag 走 Kafka 协议、连 9092 跨网络去读 `__consumer_offsets`，数据哪都能拿，就做成独立 Deployment——1 个 exporter 能看所有 broker 和消费组，还能独立扩缩、独立重启，不牵连主容器。
 
-**两个容易混的点。** 一是"注入"这个词：Kafka 的 jmx-exporter 是**静态声明**——chart 在 StatefulSet 模板里直接写死的第二个容器，看 manifest 就能看到；而 Istio 的 istio-proxy 是**动态注入**——通过 MutatingWebhook 在 Pod 创建时才塞进去，你写 Deployment 时根本看不到这个容器。两者都叫 sidecar，一静一动，后文讲的都是后者。二是**代价**：边车的资源要算进同一个 Pod 的 requests/limits（Kafka Pod 的总资源 = broker + exporter）；生命周期绑定，改 exporter 的配置 ConfigMap 会滚动重启整个 Kafka Pod，不是只重启边车；边车挂了还可能拖垮 Pod 的 readiness。sidecar 不是免费的，它用耦合换便利。
-
 生产上最常见的 sidecar 就三类：**指标采集**（上面的 JMX exporter）、**日志采集**（Fluent Bit / Filebeat）、**代理**（Envoy）——共同点都是"必须贴着主容器干活"。Istio 属于第三类，也是这个模式最著名的一个用户。
+
+**两个容易混的点。** 一是"注入"这个词：Kafka 的 jmx-exporter 是**静态声明**——chart 写死在 StatefulSet 模板里，看 manifest 就能看到；而 Istio 的 istio-proxy 是**动态注入**——通过 MutatingWebhook 在 Pod 创建时才塞进去，你写 Deployment 时根本看不到这个容器。两者都叫 sidecar，一静一动，后文讲的都是后者。二是**代价**：边车的资源要算进同一个 Pod 的 requests/limits，生命周期绑定（改边车配置的 ConfigMap 会滚动重启整个 Pod），边车挂了还可能拖垮 Pod 的 readiness——sidecar 用耦合换便利，不是免费的。
 
 Istio 的架构只有两个角色：
 
@@ -57,6 +57,14 @@ Istio 的架构只有两个角色：
 ```
 
 关键认知：**业务代码感知不到 Sidecar 的存在**——应用以为自己在直连对方，实际上流量被透明劫持。这个"透明"正是服务网格最大的卖点，也解释了它的收益和代价（后文展开）。
+
+### Envoy 与 istio-proxy
+
+前文的"Sidecar 代理"、以及后文所有的网关，跑的都是同一个引擎——**Envoy**：CNCF 毕业的高性能 L7 代理（C++ 编写，HTTP/gRPC/TCP 都能解析），是 Istio 整个数据平面的本体。它自己不做任何业务决策，工作方式只有一条：**接收 xDS 协议下发的配置，照着配置转发流量**——没有配置，它就是个空转发器。
+
+**istio-proxy：Istio 打包定制后的 Envoy**——加上 Istio 配套插件（遥测、安全、策略执行）和与 istiod 对接 xDS 的逻辑，**镜像/容器名就叫 `istio-proxy`**。所以 `kubectl get pod` 看到的 Sidecar 容器不是什么新东西，它就是 Envoy。
+
+全文从此只有两族角色反复出场：**一群 Envoy（执行者）+ 一个 istiod（把规则翻译成 Envoy 配置下发）**——"谁执行、谁描述"的完整关系见后文「CR与Envoy」一节。
 
 ### mTLS是什么
 
@@ -116,97 +124,6 @@ PodA Envoy :15001 ══mTLS 加密══► PodB Envoy :15006 ──明文─�
 
 所以 mTLS 的信任边界是**主机边界**，不是"整个集群边界"。它防网络上的窃听和冒充，防不住同主机同内核的窥探——那一层要靠节点加固、禁止特权容器、Pod Security Admission 来兜。
 
-**一张表看清哪些流量其实没有 mTLS：**
-
-| 场景 | mTLS | 原因 |
-| ---- | ---- | ---- |
-| 同节点 Pod → Pod（两端都注入） | ✅ | 依然走两个 Envoy，auto mTLS 自动生效 |
-| 跨节点 Pod → Pod（两端都注入） | ✅ | 同上 |
-| 直连对端 **Pod IP**（不走 Service） | ❌ | 落到 passthrough cluster，auto mTLS 不参与 |
-| `DestinationRule` 显式写了 `tls.mode: DISABLE` | ❌ | 出站侧被手动关掉 |
-| Pod → 未注入的工作负载（kube-system 的 DaemonSet、Job、旧 Pod） | ❌ | 对端无 Sidecar，auto mTLS 退化成明文 |
-| 同 Pod 内两个容器互访（localhost） | ❌ | 不出 Pod 网络命名空间，不经 Envoy |
-| kubelet → 容器（liveness/readiness 探针） | ❌ | 流量来自节点侧，不是 Pod |
-| Pod → 集群外（不经 egressgateway） | ❌ | 明文出网 |
-| hostNetwork Pod | ❌ | 通常被排除注入（注入还会端口冲突） |
-| 被 `excludeInboundPorts` / `excludeOutboundPorts` 等注解排除的端口 | ❌ | 刻意绕过 Envoy，等于刻意明文 |
-
-**六个必须注意的点：**
-
-**1. 默认 PERMISSIVE —— 加密是自动的，但明文也照收。**
-
-这里必须澄清一个流传极广的旧结论：**"必须给每个服务配 `DestinationRule` 的 `ISTIO_MUTUAL`，客户端 Sidecar 才会加密"**——那是 Istio **1.5 之前**的模型。1.5 起 **auto mTLS 默认开启**：Pilot 给每个带 Sidecar 的 endpoint 打上 `tlsMode: istio` 元数据，客户端 Envoy 发现对端有 Sidecar 就自动用 mTLS 发起连接，发现对端没有才退化成明文。**所以不需要写任何 `DestinationRule`。**
-
-三者分工要分清：
-
-| 资源 | 管哪一侧 | 缺了会怎样 |
-| ---- | ---- | ---- |
-| `PeerAuthentication` | **入站**：我这个 Sidecar 接受什么 | 默认 PERMISSIVE，明文也收 |
-| auto mTLS（默认开） | **出站**：我对谁加密 | 对端有 Sidecar 就加密，没有就明文 |
-| `DestinationRule.tls` | **覆盖**上面两条的默认 | 只在要强制关 / 强制开时才需要写 |
-
-**PERMISSIVE 的真正风险不是"两边都不加密"，而是"门一直开着"**：网格内 Pod 之间照样是 mTLS，但任何没有 Sidecar 的来源（未注入的 Pod、节点上的进程、共享 hostNetwork 的组件）都能以明文接进来；这类连接没有 principal，只有 `AuthorizationPolicy` 才拦得住。
-
-要关掉这扇明文的门，得显式下发：
-
-```yaml
-apiVersion: security.istio.io/v1
-kind: PeerAuthentication
-metadata:
-  name: default
-  namespace: prod          # 按 namespace 生效；放 istio-system 则为全局默认
-spec:
-  mtls:
-    mode: STRICT
-```
-
-**2. STRICT 会打断谁，上线前必须盘点。**
-
-探针、未注入的 DaemonSet/Job、网格外 namespace 的调用方、集群外客户端、Prometheus 抓取——这些一旦断了就是 P0。正确姿势是先在测试 namespace 开 STRICT，`istioctl analyze` 扫一遍，再推生产。
-
-**3. 探针要单独确认。**
-
-Istio 默认开启 `rewriteAppHTTPProbe`，把 kubelet 的 **HTTP** 探针改成由 Sidecar 发起（走 localhost 打到容器），所以 HTTP 探针不受 STRICT 影响。但 **TCP 探针不会被重写**，STRICT 下可能被 15006 直接拒掉——这类服务优先改成 HTTP 探针，或单独排除探针端口（排除即明文，要接受这个代价）。
-
-**4. localhost 永远是明文，别指望 mTLS 兜底。**
-
-同 Pod 的容器互访、Sidecar 与应用的通信都走 loopback。如果同一 Pod 里塞了 app + 本地 exporter + 本地缓存，它们之间的流量对任何有节点权限的人都是可读的。
-
-**5. 监控抓取是最常见的"暗门"。**
-
-按 `prometheus.io/scrape` 注解直抓应用端口时，请求会被当成入站流量进 15006。Istio 的正解是 **merged metrics**：Sidecar 在 **15020** 端口把自身和应用指标聚合暴露，Prometheus 只抓 Sidecar。如果为了省事给抓取端口加 `excludeInboundPorts`，**那条路径就是明文**——排障时先查这个注解，很多"mTLS 没生效"的案子都死在这。
-
-**6. mTLS ≠ 网络隔离 ≠ 应用层授权。**
-
-- mTLS 只证明"我是谁"，不限制"能不能连"。要限制连接得配 `AuthorizationPolicy`（按 principal）或 `NetworkPolicy`（按 IP/端口，但 Pod IP 不可信）。
-- 同节点 Pod 之间默认全通。mTLS 不会阻止一个被入侵的 Pod 去连它并不该连的数据库——除非你写了策略。
-- 反过来说，`principals` 这类字段只在 mTLS 下可信；PERMISSIVE 模式里明文连接的 principal 为空，策略会表现得时灵时不灵。
-
-另外两个运维细节：证书默认 **24 小时轮换**，节点时钟漂移过大会导致握手失败（现象是 `upstream connect error or disconnect/reset before headers`），用 `istioctl proxy-config secret` 看 `NotAfter` 能确认；应用与 Sidecar 的启动顺序用 `holdApplicationUntilProxyStarts: true` 保证，否则应用可能先于代理就绪而被连接拒绝。
-
-**验证四连：**
-
-```bash
-# 1. 看某个 Pod 实际拿到的证书与有效期
-istioctl proxy-config secret <pod> -n <ns>
-
-# 2. 看某对工作负载之间的 mTLS 状态（谁在加密、谁在明文）
-istioctl x describe pod <pod> -n <ns>
-
-# 3. 看客户端 Envoy 的目标 cluster 到底有没有挂 TLS —— 判断 auto mTLS 是否生效的硬证据
-istioctl proxy-config cluster <client-pod> -n <ns> \
-  --fqdn <svc>.<ns>.svc.cluster.local -o json | grep -A3 transport_socket
-#   有 envoy.transport_sockets.tls + ISTIO_MUTUAL → 出站加密
-#   没有 transport_socket → 明文（对端无 Sidecar，或走了 passthrough）
-
-# 4. 抓包验证：同节点对端只应看到 TLS 握手，读不到 HTTP 明文
-kubectl debug -it <src-pod> -n <ns> --image=nicolaka/netshoot -- tcpdump -i eth0 -A port 8080
-```
-
-补一句 Ambient 的对照：换到 Ambient 后加密终点从"每个 Pod 的 Sidecar"变成"每个节点的 ztunnel"，**覆盖边界的规则一模一样**——Pod 到本节点 ztunnel 那一段仍是明文，ztunnel 与 ztunnel 之间才是 mTLS，localhost 和未纳入网格的流量照旧不在保护范围内。
-
-一句话总结：**mTLS 的覆盖范围 = 经过两个 Envoy（或两个 ztunnel）的流量。加密是自动的（auto mTLS），但覆盖范围只到"线上的那一段"，到不了"主机里的那一段"；PERMISSIVE 则额外给所有非网格来源留了一扇明文的门，只有 STRICT 能关上它。**
-
 ### 服务网格可以解决哪些问题
 
 微服务把一个进程拆成几十个服务后，"调一次接口"从函数调用变成了跨越网络的远程调用，原来根本不存在的问题全冒出来了。逐个看，每个问题对应网格的一个能力：
@@ -245,6 +162,8 @@ kubectl debug -it <src-pod> -n <ns> --image=nicolaka/netshoot -- tcpdump -i eth0
 | **Galley** | 配置的校验与转发层：校验用户提交的 CR 合法性（写错字段直接拒绝），再分发给 Pilot | 配置的**质检员** |
 
 三者各管一段：**Galley 收配置 → Pilot 翻译成 xDS 推给数据面；Citadel 另一条线发证书给数据面**。合并成 istiod 的动机就是简化部署——三个组件拆开时版本对齐、互相调用都是运维负担。
+
+（本文只讲单集群：多集群下 istiod 还会通过 remote secret 读取远端集群的服务发现、共用同一套根证书签发跨集群身份——拓扑另文展开，不是本文重点。）
 
 排查问题时的对应关系：路由不生效查 Pilot 的翻译结果（`istioctl proxy-config`，见下文）；mTLS 握手失败查 Citadel 发的证书（`istioctl proxy-config secret`）；CR 提交被拒、无效果但没报错，先看 Galley 的校验日志。
 
@@ -314,8 +233,12 @@ kubectl label namespace bookinfo istio-injection=enabled
 # Ambient 模式：换一个标签（原理完全不同：Pod 不注入，流量由节点级 ztunnel 接管）
 kubectl label namespace bookinfo istio.io/dataplane-mode=ambient
 ```
-
-**补充：`istio.io/rev`（revision 标签）是同一入口的另一套选择器。** `istio-injection=enabled` 只会被**默认版本**的 istiod 认领；当集群里装了命名版本的 istiod（`istioctl install --set revision=canary`，新旧并存做网格自身的灰度升级）时，它的 webhook 只认 `istio.io/rev=canary` 标签——所以两种注入方式的选择器都落在"给命名空间打标签"这一个动作上，但**标签永远是你自己打的**（`istioctl tag` 也只是帮你批量切换），安装时不会自动给任何 namespace 打标。revision 的价值在升级与回滚：把一批 namespace 的标签从 `default` 切到 `canary` 就是交给新版控制平面，出问题改回标签即回滚，Sidecar 侧不用重新注入。注入成功的 Pod 会自动带上 `istio.io/rev=<版本名>` 标签，`kubectl get pod --show-labels` 可以看出它归哪个 istiod 管。
+1. 两种注入标签：   
+- `istio-injection=enabled`：交给**无 revision（默认版）istiod**注入
+- `istio.io/rev=canary`：交给**revision=canary 命名版 istiod**注入
+2. 用途：istiod 自身灰度升级，多版本 istiod 并存   
+3. 切换方式：改 namespace 标签，Pod 重建后由对应版本 istiod 注入 sidecar；改标签即可快速回滚   
+4. 要点：标签需要手动打，安装 istiod 不会自动打；注入完成的 Pod 会带上对应的`istio.io/rev`标签，标识归属哪个 istiod。   
 
 两个必须知道的细节：
 
@@ -340,9 +263,7 @@ Istio 的流量治理全靠几类 CR，按"流量从哪进、到哪去"理解它
 
 ### CR与Envoy：逻辑规则与真实执行者
 
-上表四类资源都是**逻辑声明**，集群里没有一个"叫 VirtualService 的进程"在转发流量。真正干活的是 **Envoy**——CNCF 毕业的高性能 C++ 代理，L3 到 L7 全能（HTTP/gRPC/TCP 都能解析），是 Istio 整个数据平面的引擎。它的工作方式只有一个：**接受 xDS 协议下发的配置，然后照着配置转发流量**。
-
-理解 Envoy 是什么，四个资源的关系就一目了然：
+上表四类资源都是**逻辑声明**，集群里没有一个"叫 VirtualService 的进程"在转发流量——执行者 Envoy 是什么、`istio-proxy` 和它什么关系，前文「Envoy 与 istio-proxy」一节已说清。四类规则与执行者的关系只有一条链：
 
 ```text
 你写的 CR（逻辑规则，不存在于流量路径上）
@@ -378,7 +299,7 @@ spec:
     hosts: ["bookinfo.example.com"]   # 大门只放行请求这个域名的流量，其他域名直接拒之门外
 ```
 
-**`hosts` 字段的含义**：只有 Host 头为 `bookinfo.example.com` 的请求能进门。一个 ingressgateway 上可以声明多个 Gateway，分别对应不同域名（`api.example.com`、`admin.example.com`），实现"一个入口按域名分流给多套业务"。
+**`hosts` 字段的含义**：只有 Host 头为 `bookinfo.example.com` 的请求能进门。一个 ingressgateway 上可以声明多个 Gateway，分别对应不同域名（`api.example.com`、`admin.example.com`），实现"一个入口按域名分流给多套业务"——生产完整实例见后文「南北向入口实战」一节。
 
 ### VirtualService：定义路由规则
 
@@ -641,51 +562,174 @@ spec:
 
 注册之后，这个外部域名和其他内部服务一视同仁——可以给它写 VirtualService 做路由、配 DestinationRule 做超时重试，再配合 AuthorizationPolicy 限定"哪些服务允许访问它"。
 
-### istio-ingressgateway与istio-egressgateway
+## 南北向入口实战：一个 ingress 挂两个 Gateway
 
-```text
-外部用户 ──→ istio-ingressgateway ──→ 网格内服务      （入口：南北向流入）
-网格内服务 ──→ istio-egressgateway ──→ 外部 API/DB    （出口：南北向流出）
-```
+先把入口四件套的本质钉死——**谁是进程、谁是规则**：
 
-**istio-ingressgateway**：入口网关，即 Gateway CR 的 `selector: istio: ingressgateway` 选中的那批 Pod。生产上它前面通常再挂一个 LoadBalancer Service 把入口暴露出去。
+- **istio-ingressgateway：独立部署的 Envoy**。普通 Deployment、无业务容器，跑的和 Sidecar 同一个定制版 Envoy（`istio-proxy`，前文一节），只是站位在网格边缘接管南北向流量，生产上前面通常再挂一个 LoadBalancer Service 对外暴露。
+- **Gateway / VirtualService / DestinationRule：规则描述，不是进程**。Gateway 定"监听哪些域名/端口"，VS 定"进门后转发到哪"，DR 定"到达后按什么策略连"——三者都是 CR，由 istiod 翻译成 xDS 配置、下发给 Envoy 执行：Gateway/VS 的规则落到 ingressgateway 这个 Envoy 上；DR 在**发起调用一侧**的 Envoy 生效（此刻就是 ingressgateway，服务间互调时则是双方 Sidecar）。流量永远不经过 istiod。
 
-**istio-egressgateway**：出口网关。没有它时，Pod 访问外部 API 的流量会被 Sidecar 直接放出去——**出站策略分散在每个 Sidecar 上，外部审计看不到统一的出口 IP**。加了 egressgateway 后，"访问外部"的流量统一流经这个关卡，两个典型用途：
+下面用一个完整例子把四件套串起来，并故意做成**多个 Gateway 挂在同一个 ingress 上**——这是生产最常见的摆法。
 
-1. **统一出口 IP**：三方系统（银行、政府接口）通常要白名单对端 IP，几十个业务 Pod 的出口 IP 漂移没法维护；全部走 egressgateway 后给对方一个 IP 就行。
-2. **出口审计与管控**：哪些服务能访问外网、访问哪些域名，在出口集中执行（配合 ServiceEntry + AuthorizationPolicy），而不是相信每个 Sidecar 的配置都配对了。
+### 完整例子：两个域名、两道门、一个网关
 
-一句话对比：**ingressgateway 管"别人怎么进来"，egressgateway 管"自己怎么出去"**——两者都是独立的 Envoy Deployment。demo 配置两个都装；default 配置不含 egressgateway，需要时 `istioctl install --set components.egressGateways[0].enabled=true` 补开。
+一个电商入口：`www.mall.com`（官网，带 5% 灰度）与 `api.mall.com`（开放接口），共用同一个 istio-ingressgateway：
 
-**出口资源配置**：入口就是前文 Gateway CR（`selector: istio: ingressgateway` + VirtualService 绑定），不再重复；**出口**需要几个资源配合，让"productpage 访问外部 API"的流量强制流经 egressgateway：
+![一个 istio-ingressgateway 挂两个 Gateway：www-gateway 经 VirtualService 做路径分流与 95/5 灰度、DestinationRule 定义 web v1/v2 子集；api-gateway 经 VirtualService 转发、DestinationRule 限流；istiod 把 Gateway/VS/DR 翻译成 xDS 配置下发给这个独立部署的 Envoy](./images/istio-multi-gateway.svg)
+
+**① Gateway ×2：同一网关池上的两道门**（selector 都指向同一批 ingress Pod，靠域名区分）：
 
 ```yaml
-# ① ServiceEntry：把外部域名注册进网格（前提条件，见前文）
-apiVersion: networking.istio.io/v1
-kind: ServiceEntry
-metadata:
-  name: external-api
-spec:
-  hosts: ["api.thirdparty.com"]
-  ports:
-  - number: 443
-    name: https
-    protocol: HTTPS
-  location: MESH_EXTERNAL
----
-# ② Gateway：在 egressgateway 上开一道通往该域名的小门
 apiVersion: networking.istio.io/v1
 kind: Gateway
 metadata:
-  name: egress-api-gateway
+  name: www-gateway
 spec:
   selector:
-    istio: egressgateway          # 关键：selector 换成 egressgateway 的 Pod
+    istio: ingressgateway        # 和 api-gateway 选中同一批网关 Pod
   servers:
   - port: { number: 443, name: https, protocol: HTTPS }
-    hosts: ["api.thirdparty.com"]
+    hosts: ["www.mall.com"]      # 第一道门：只放行 www.mall.com
+    tls:
+      mode: SIMPLE
+      credentialName: mall-www-cert  # 该域名证书（存为 ingressgateway 同 namespace 的 Secret）
 ---
-# ③ VirtualService：把网格内访问该域名的流量"改道"到 egressgateway
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: api-gateway
+spec:
+  selector:
+    istio: ingressgateway        # 同一批 Pod，第二道门
+  servers:
+  - port: { number: 443, name: https, protocol: HTTPS }
+    hosts: ["api.mall.com"]
+    tls:
+      mode: SIMPLE
+      credentialName: mall-api-cert
+```
+
+**② VirtualService ×2：进门之后的路线**（各自绑定各自的门）：
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: www
+spec:
+  hosts: ["www.mall.com"]
+  gateways: ["www-gateway"]      # 只挂 www 的门；漏写这行 = 规则送不到网关，表现为 404
+  http:
+  - match:
+    - uri: { prefix: /api }      # 官网页面里的接口请求转给 api 服务
+    route:
+    - destination: { host: api, port: { number: 8080 } }
+  - route:                       # 兜底：官网流量按 95/5 灰度到 web 的两个版本
+    - destination: { host: web, subset: v1, port: { number: 8080 } }
+      weight: 95
+    - destination: { host: web, subset: v2, port: { number: 8080 } }
+      weight: 5
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: api
+spec:
+  hosts: ["api.mall.com"]
+  gateways: ["api-gateway"]
+  http:
+  - route:
+    - destination: { host: api, port: { number: 8080 } }
+```
+
+**③ DestinationRule ×2：到达目的地之后的策略**（在发起调用的 ingress Envoy 上生效）：
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: web
+spec:
+  host: web                       # 上面 VS 的 subset: v1/v2 必须在此有定义，否则 503
+  subsets:
+  - name: v1
+    labels: { version: v1 }
+  - name: v2
+    labels: { version: v2 }
+  trafficPolicy:
+    loadBalancer: { simple: LEAST_REQUEST }
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: api
+spec:
+  host: api
+  trafficPolicy:                  # 没有版本分组也要写 DR：限住并发，过载快速失败
+    loadBalancer: { simple: LEAST_REQUEST }
+    connectionPool:
+      http: { http2MaxRequests: 1000 }
+```
+
+**职责一表收口**：
+
+| 环节 | 配置 | 本质 | 回答的问题 |
+| ---- | ---- | ---- | ---- |
+| 站岗的 | istio-ingressgateway | **进程**：独立部署的 Envoy（`istio-proxy`） | 谁在监听 443？ |
+| 大门 | Gateway ×2 | 规则 → 下发给这个 Envoy 的 listener | 哪些域名进得来？ |
+| 门内路线 | VirtualService ×2 | 规则 → 下发给这个 Envoy 的路由表 | 进门后转发给谁？ |
+| 目的地策略 | DestinationRule ×2 | 规则 → 下发给**发起调用一侧**的 Envoy | 到了目标怎么连（版本子集 / 负载均衡 / 熔断）？ |
+| 翻译工头 | istiod | 控制平面 | Watch CR → 翻译成 xDS → 下发，不碰流量 |
+
+**验证**：
+
+```bash
+# 网关 Envoy 是否已按两个域名建好监听与路由
+istioctl proxy-config listener deploy/istio-ingressgateway -n istio-system
+istioctl proxy-config route deploy/istio-ingressgateway -n istio-system --name 443
+
+# 本地压 hosts 测试两个域名（假设入口 LB IP 为 1.2.3.4）
+curl --resolve www.mall.com:443:1.2.3.4 https://www.mall.com/    # 反复请求可见约 5% 打到 web v2
+curl --resolve api.mall.com:443:1.2.3.4 https://api.mall.com/health
+```
+
+### 多个 Gateway 挂一个 ingress：何时用、优劣与大厂策略
+
+**本质**：Gateway 只是挂在这批共享 Envoy 上的"逻辑大门"，按域名/端口/SNI 各占一条 filter chain——**拆 Gateway 不拆部署，是零成本的逻辑隔离**。
+
+**什么时候用**：
+
+1. **多个域名共用一个入口 IP**：证书、路由、限流按域名各自独立，对外只发布一个 LB 地址；
+2. **多团队协作**：平台团队持有 ingressgateway Deployment（升级、HPA、PDB 归它管），业务团队各自维护自己的 Gateway/VS——RBAC 按资源隔离，各改各的 YAML，互不冲突；
+3. **协议/端口拆分**：80 端口强跳 HTTPS 一个门、443 业务一个门，互不牵连。
+
+**优势**：
+
+- **成本**：共享 LB IP 和网关副本池，域名再多也不加机器；
+- **拆分零成本**：Gateway 是 CR，多挂一个 = Envoy 多一条 filter chain，秒级生效；
+- **变更影响面小**：团队只碰自己的 Gateway/VS，出了问题定位到自己的门。
+
+**劣势**：
+
+- **故障域共享**：网关 Pod 是同一批，一个域名的大流量或坏配置可能拖累所有域名（Envoy 的 worker 线程与内存共享）；
+- **升级同频**：网关滚动升级，所有域名一起抖——只能靠多副本 + PDB + 优雅终止缓解；
+- **隔离靠约定**：网络层没有隔离，只靠 RBAC 和配置校验兜底，管不住"合法但有害"的配置。
+
+**中大厂的一般策略：逻辑拆、物理合。**
+
+- **常态**：一个集群就 1~2 个 ingressgateway Deployment（多副本 + HPA），上面挂几十个 Gateway CR——**按域名/业务域拆 Gateway，不按团队拆 Deployment**。原因很实在：Envoy 单端口靠 SNI/Host 天然分流多域名，拆逻辑规则是免费的；拆 Deployment 则意味着每个小团队各养 2 副本、各自的 LB/证书/HPA，网关碎片化、资源闲置率高、升级标准分裂，运维成本指数上升。
+- **例外才物理拆**（拆 Deployment 或拆集群）：公网入口与内网入口要分安全域、流量等级差异大（核心交易链路不能被营销活动挤兑）、跨机房容灾。**分组维度是"安全域 + 流量等级"，不是组织架构**。
+- 补一句：不少大厂最外层入口根本不走 istio-ingressgateway，而是 APISIX/自研网关打头阵、Istio 网关退到内层做网格入口——但"逻辑拆、物理合"的原则同样适用。
+
+### 出口简介：istio-egressgateway
+
+与入口完全对称：`网格内服务 ──→ istio-egressgateway ──→ 外部 API/DB`。没有它时，访问外部的流量由各 Sidecar 直接放出去——**出站策略分散在每个 Sidecar 上，外部审计看不到统一的出口 IP**。装上它（default profile 不包含，demo 包含；也可 `istioctl install --set components.egressGateways[0].enabled=true`）有两个典型理由：
+
+1. **统一出口 IP**：三方系统（银行、政务接口）通常要白名单对端 IP，几十个业务 Pod 的出口 IP 漂移没法维护；全部走 egressgateway 后给对方一个 IP 就行。
+2. **出口审计与管控**：哪些服务能访问外网、访问哪些域名，在出口集中执行（配合 ServiceEntry + AuthorizationPolicy），而不是相信每个 Sidecar 的配置都配对了。
+
+```yaml
+# 网格外域名先用 ServiceEntry 注册（前文一节），核心是这条"两跳改道"的 VirtualService：
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
@@ -703,49 +747,21 @@ spec:
     - destination:
         host: istio-egressgateway.istio-system.svc.cluster.local
         subset: external-api
-        port: { number: 443 }
+        port: { number: 443 }     # 第一跳：改道到出口网关
   - match:
     - gateways: ["egress-api-gateway"]
       port: 443
     route:
-    - destination: { host: api.thirdparty.com }
-      # egressgateway 收到流量后，转发给真正的外部域名
----
-# 配套：给 egressgateway 定义上面的 subset（无 labels 的命名分组，供 VirtualService 引用）
-apiVersion: networking.istio.io/v1
-kind: DestinationRule
-metadata:
-  name: egress-external-api
-spec:
-  host: istio-egressgateway.istio-system.svc.cluster.local
-  subsets:
-  - name: external-api
----
-# ④（可选）AuthorizationPolicy：只允许 productpage 借道出口
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: egress-allow-productpage
-  namespace: istio-system         # 作用于 egressgateway 所在 namespace
-spec:
-  selector:
-    matchLabels:
-      app: istio-egressgateway
-  action: ALLOW
-  rules:
-  - from:
-    - source:
-        principals: ["cluster.local/ns/bookinfo/sa/productpage"]   # 按服务身份放行（Bookinfo 部署在 bookinfo namespace）
-    to:
-    - operation:
-        hosts: ["api.thirdparty.com"]
+    - destination: { host: api.thirdparty.com }   # 第二跳：出口网关转发给真实外部域名
 ```
-①②③ 三步的逻辑：ServiceEntry 让网格"认识"外部域名 → VirtualService 里 `gateways: ["mesh"]` 把所有出向流量第一跳改道到 egressgateway → 第二跳（egressgateway 收到后）按 `gateways: ["egress-api-gateway"]` 匹配，转发给真实目标。验证：`curl -I https://api.thirdparty.com` 从 productpage 发出后，egressgateway 的访问日志（`kubectl logs`）里应能看到这条请求——出口审计从此有据可查。
 
+配套三件与入口完全对称：**Gateway**（`selector: istio: egressgateway`，在出口网关上开这道门）、**DestinationRule**（为上面的 `external-api` subset 声明分组）、**AuthorizationPolicy**（限定哪个服务身份可以借道出口）。
+
+**验证**：从 Pod `curl -I https://api.thirdparty.com`，egressgateway 的 `kubectl logs` 里应能看到这条请求——出口审计从此有据可查。
 
 ## 入口方案选型
 
-网格自身的流量资源讲完了，回过头看"集群入口"这个特殊场景：K8s 原生还有 Gateway API 和 Ingress 两套方案，它们与 Istio 的关系值得单独讲清楚。
+入口实战与出口都讲完了，最后补两个入口体系的选型问题：K8s 原生的 Gateway API 和 Ingress，与 Istio 是什么关系。
 
 ### 与 K8s Gateway API 的关系
 
@@ -767,8 +783,7 @@ Istio 完全覆盖了 K8s Ingress 的功能，并且远超它：
 | 东西向流量治理 | 与入口无关，完全管不到 | 全网格覆盖 |
 | 语义可移植性 | annotation 不跨实现 | Gateway API 是标准，实现可替换 |
 
-结论：**在已经部署 Istio 的集群里，Ingress 没有存在价值**——上表前五行说明 Istio Gateway 是 Ingress 的严格超集，后两行更是 Ingress 永远补不齐的能力。保留 Ingress 等于维护两套入口逻辑，应该下线；唯一需要 Ingress 的场景是集群没上网格、又不值得为入口引入整个网格——那时 Ingress 才作为轻量替代出场。
-
+**结论**：上表前五行说明 Istio Gateway 是 Ingress 的严格超集，后两行是 Ingress 永远补不齐的能力——**已经上网格的集群，Ingress 应当直接下线**，留着等于维护两套入口逻辑。唯一用得上 Ingress 的场景是集群根本没网格、又不值得为入口引入整个网格，那时它才是轻量替代。
 
 ## 流量管理的最佳实践：以Bookinfo为例
 
