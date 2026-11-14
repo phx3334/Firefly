@@ -166,7 +166,19 @@ spec:
 
 ### Workspace：跨Step/Task的文件通道
 
-同一个 Task 内的 Step 共享 Pod 文件系统，但**跨 Task 传文件必须走 workspace**——它是 Tekton 里跨 Step、跨 Task 共享文件的唯一正规通道。其设计精髓同样是"模板与实现分离"：Task/Pipeline 只声明"我需要一个叫 source 的工作空间"，**具体落到什么存储，由 Run 层绑定决定**。五种绑定载体，生命周期完全不同：
+同一个 Task 内的 Step 共享 Pod 文件系统，但**跨 Task 传文件必须走 workspace**——它是 Tekton 里跨 Step、跨 Task 共享文件的唯一正规通道。
+
+**workspace 到底是什么**：它本质上是**对 K8s Volume 的声明式抽象**，整个生命周期分三层落地：
+
+```text
+① 声明（Task/Pipeline 层）：只写"我需要一个叫 source 的工作空间"，不指定任何存储
+      ↓ ② 绑定（Run 层）：把插槽落实成一个具体的 K8s Volume（emptyDir/PVC/secret/configmap…）
+      ↓ ③ 挂载（Tekton 执行层）：卷被挂进本次 Run 的 Pod，Step 内用 $(workspaces.source.path) 这个路径读写
+```
+
+由此得到"传文件"的全部机制：**跨 Task 传文件 = 多个 Task 引用同一个 workspace、最终挂到同一块卷上**——fetch Task 写进卷，build Task 从同一个路径读出，所谓"通道"没有更多魔法。注意 emptyDir 是例外：它跟着 Pod 走，**每个 TaskRun 的 Pod 各拿一份、不跨 Task**（官方因此建议 Pipeline 级共享用 PVC）。
+
+其设计精髓同样是"模板与实现分离"：Task/Pipeline 只声明"我需要一个叫 source 的工作空间"，**具体落到什么存储，由 Run 层绑定决定**。五种绑定载体，生命周期完全不同：
 
 | 绑定载体 | 装什么 | 生命周期 | 典型用途 |
 | ---- | ---- | ---- | ---- |
@@ -177,6 +189,23 @@ spec:
 | configmap | 构建配置 | 常驻，只读挂载 | 代理地址等易变配置，改配置不改模板 |
 
 两条生产铁律：**凭证类 workspace 一律只读**（`readOnly: true`，防止脚本误写）；**RWO 的 PVC 要求所有挂载它的 Pod 落在同一节点**（在 Run 层用 nodeSelector 固定构建 Pod，后文实践会用到）。
+
+**tmpfs 加速：把易失工作区搬进内存**。emptyDir 默认落在节点磁盘，绑定时加一行就能换成内存盘——K8s 的 emptyDir 原生支持 `medium: Memory`（即 tmpfs），Tekton 的 emptyDir 绑定直接透传这个字段：
+
+```yaml
+workspaces:
+- name: source
+  emptyDir:
+    medium: Memory          # 底层换成 tmpfs（内存），读写不再经过磁盘
+    sizeLimit: 1Gi          # 必须给上限：tmpfs 占用计入 Pod 内存配额，不设限可能把节点内存打满
+```
+
+**适用场景**（共同点：数据易失、但 I/O 是瓶颈）：
+
+- **小文件密集的热工作区**：Go 的 GOCACHE、node_modules、ccache 这类上万个小文件的编译缓存，瓶颈常在磁盘随机 I/O 而不是 CPU，搬进内存后编译/测试提速明显；
+- **不想留痕的敏感临时数据**：tmpfs 只存在于内存，Pod 一死什么都不剩——处理临时凭证、密钥材料比落盘干净，节点磁盘上也不会有残留。
+
+**代价与边界**：① tmpfs 用的是**节点内存**，占用计入所在容器的 memory limits，给工作区设了 1Gi 的 sizeLimit，就要同步把 step 的 memory limit 留出余量，否则直接 OOMKill；② 它和普通 emptyDir 一样**跟 Pod 走、跑完即删**，跨 Run 复用的依赖缓存依然只能靠 PVC——tmpfs 管"单次 Run 内的热数据"，别拿它装跨 Run 缓存；③ 附带的好处：tmpfs 不是 PVC，**没有 RWO 同节点约束**（见后文 RWO 一节），并行 Task 各自绑独立 tmpfs 即可自由跨节点调度。
 
 ### TaskRun与PipelineRun：让定义真正跑起来
 
