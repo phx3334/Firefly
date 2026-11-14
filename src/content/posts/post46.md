@@ -304,12 +304,33 @@ Git push ──Webhook──→ EventListener（收到事件）
 
 ## 自动化构建go服务
 
-### kaniko：容器里做镜像的构建工具
-传统构建镜像（例如Jenkins）的方式是找一台装了 Docker 的机器跑 `docker build`：依赖常驻的 docker daemon（守护进程），且 build 时要挂载节点的 `docker.sock`——**等于把宿主机的 root 权限交给构建过程**，这在多租户的 K8s 集群里是不可接受的安全模型。
+### BuildKit：容器里做镜像的构建工具
 
-**kaniko 是 Google 开源的镜像构建工具，专门解决"没有 docker daemon 怎么构建镜像"**：它在普通容器内运行，直接解包基础镜像的文件层，按 Dockerfile 指令逐层追加文件，最后把新镜像推送到任意 registry（Harbor/Docker Hub 等）——**全程不碰 docker daemon、不需要特权容器、不需要挂 docker.sock**。这意味着"构建镜像"可以直接变成一个 Pod 里的一步，天然融入 Tekton 的"每步一个容器"模型。
+背景一句带过：传统做法是找一台装了 Docker 的机器跑 `docker build`，依赖常驻的 docker daemon 还要挂节点的 `docker.sock`——**等于把宿主机 root 交给构建过程**；曾经常用来绕开它的 kaniko 已经归档、不再维护，新流水线直接上 **BuildKit**
 
-使用直觉：把 kaniko 的官方镜像（`gcr.io/kaniko-project/executor`）当作 step 的 `image`，`args` 里给上 Dockerfile 路径、构建上下文和目标镜像地址，它就开始干活——下文 Task 里的 ④ kaniko 步骤就是原样照此使用。它还自带 `--cache` 选项，把镜像层缓存推回 registry 复用，代码没大改时构建能快到秒级。
+**核心优势**：
+
+1. **C/S 架构 + LLB 中间表示**：`buildctl` 把 Dockerfile 解析成一张标明依赖关系的构建图（LLB），`buildkitd` 按图**并行执行互不依赖的步骤**。kaniko 是沿 Dockerfile 顺序逐层追加的单线执行器，多阶段构建的提速主要来自这里。
+2. **缓存是一等公民**：`--export-cache/--import-cache type=registry` 把层缓存推回镜像仓库，任意节点重建都能命中（`mode=max` 连中间层一起缓存）；Dockerfile 里还可用 `RUN --mount=type=cache` 给编译过程做持久缓存。
+3. **构建期密钥不落层**：`RUN --mount=type=secret` 让密钥只在构建容器内短暂可见，不写进任何镜像层与 history——用 `--build-arg` 传密钥做不到这一点。
+4. **多架构**：`--platform` 一条命令出多架构镜像，QEMU 模拟与交叉编译都支持。
+
+**rootless 是怎么跑起来的**：buildkitd 默认要 root 才能建 namespace、执行 mount，非特权场景必须同时满足三件事——
+
+- **非 root uid + 用户命名空间**：容器以镜像内置的 `1000` 运行，容器内的 root 被映射成宿主机普通用户，即使逃逸也拿不到节点 root；
+- **`--oci-worker-no-process-sandbox`**：跳过给每个构建容器再套一层 PID namespace（非特权下做不到）。代价是构建容器之间的进程隔离被削弱，只适合构建可信代码；
+- **`seccompProfile: Unconfined`**：rootless 依赖 `unshare`/`clone` 等系统调用，默认 seccomp 会直接拒绝。
+
+**上线前必须确认的四个点**：
+
+| 注意点 | 说明 |
+| --- | --- |
+| 节点内核开关 | 需要开启非特权用户命名空间（`kernel.unprivileged_userns_clone=1` 或等价配置），部分发行版和托管集群默认关闭，选型前先在目标集群验证 |
+| PSA 冲突 | `Unconfined` 与 `restricted` 策略互斥，CI namespace 至少放宽到 `baseline`，这是 rootless 方案落地的主要阻力 |
+| 存储驱动退化 | 非特权下 overlayfs 不可用，worker 退回 `native`（整层复制）或 fuse-overlayfs，**层数多的大镜像会明显变慢**，建议给 CI 单独节点池 |
+| 能力边界 | `RUN` 里做不了需要特权内核能力的操作（挂载、mknod、改宿主机路径等），这类镜像仍需 privileged 构建或专用构建机 |
+
+使用直觉：step 容器里起一个 `buildkitd`，`buildctl` 通过 unix socket 连上它，`--output type=image,name=...,push=true` 一步出镜像。注意**客户端要和 daemon 用同一个 uid 运行**，否则连不上 socket；socket 和 state 目录都放容器可写层（`/tmp`、`$HOME`）即可，随 Pod 一起销毁——下文 Task 的 ④ 就是照此写的。
 
 ### 流程总览
 
@@ -324,7 +345,7 @@ GitLab（私有代码仓库）                     Harbor（私有镜像仓库�
 │   ① git-clone  拉取源码（凭证来自 git-auth secret）     │
 │   ② init       初始化构建环境（GOPROXY 来自 configmap） │
 │   ③ build      go build（缓存落在共享 PVC）             │
-│   ④ kaniko     依据 Dockerfile 制镜像并推送（凭证来自    │
+│   ④ buildkit   依据 Dockerfile 制镜像并推送（凭证来自    │
 │                 dockerconfig secret，无 docker daemon）│
 └──────────────────────────────────────────────────────┘
 ```
@@ -344,7 +365,7 @@ kubectl create secret generic gitlab-auth -n ci \
   --from-file=known_hosts=known_hosts
 
 # Harbor 凭证：镜像仓库没有 SSH 一说——Registry API 走 HTTPS，认证就用 dockerconfigjson
-# （docker-registry 是 secret 的子类型，kaniko 默认读取 /kaniko/.docker/）
+# （docker-registry 是 secret 的子类型，buildkit 从 $DOCKER_CONFIG/config.json 读凭证）
 kubectl create secret docker-registry harbor-auth -n ci \
   --docker-server=harbor.example.com \
   --docker-username=ci-bot \
@@ -388,7 +409,7 @@ spec:
   - name: git-auth
     mountPath: /git-auth                      # SSH 凭证挂载点：deploy key + known_hosts
   - name: dockerconfig
-    mountPath: /kaniko/.docker                # kaniko 默认凭证目录，挂上即可推送私有仓库
+    mountPath: /dockerconfig                  # 配合 DOCKER_CONFIG 环境变量，供 buildkit 推送认证
   - name: build-config
     mountPath: /build-config
   steps:
@@ -438,19 +459,40 @@ spec:
       go mod download                          # 首次慢（写缓存），此后秒级（命中缓存）
       go build -o $(workspaces.source.path)/artifacts/app ./...
 
-  - name: kaniko                              # ④ 制镜像并推送
-    image: gcr.io/kaniko-project/executor:v1.23.2
+  - name: build-image                         # ④ 制镜像并推送（Pod 内起 rootless buildkitd）
+    image: moby/buildkit:v0.15.2-rootless
+    securityContext:                          # rootless 必需：非 root 用户 + 放开 seccomp
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile: { type: Unconfined }
     resources:
       requests: { cpu: 500m, memory: 512Mi }
       limits: { cpu: "2", memory: 2Gi }
-    command: ["/kaniko/executor"]
-    args:
-    - --dockerfile=$(workspaces.source.path)/src/Dockerfile
-    - --context=$(workspaces.source.path)     # context 用 source 根目录，Dockerfile 直接 COPY artifacts/app
-    - --destination=$(params.image-name):$(params.image-tag)
-    - --digest-file=$(results.image-digest.path)   # 把不可变的 digest 写进 results，供下游引用
-    - --cache=true                            # 镜像层缓存推回 Harbor，代码没大改时秒级出镜像
+    env:
+    - name: DOCKER_CONFIG
+      value: /dockerconfig                    # buildkit 从这里读 Harbor 的推送凭证
+    script: |
+      #!/bin/sh
+      set -e
+      # 容器内起守护进程，无需宿主机 docker daemon；no-process-sandbox 是 rootless 的必需开关
+      buildkitd --addr unix:///tmp/buildkitd.sock --oci-worker-no-process-sandbox &
+      # 等 socket 就绪再连（有超时上限，daemon 起不来就快速失败而不是死等）
+      timeout 15 sh -c 'until [ -S /tmp/buildkitd.sock ]; do sleep 0.2; done'
+      buildctl --addr unix:///tmp/buildkitd.sock build \
+        --frontend=dockerfile.v0 \
+        --local=context=$(workspaces.source.path) \
+        --local=dockerfile=$(workspaces.source.path)/src \
+        --opt=filename=Dockerfile \
+        --output=type=image,name=$(params.image-name):$(params.image-tag),push=true \
+        --export-cache=type=registry,ref=$(params.image-name):buildcache,mode=max \
+        --import-cache=type=registry,ref=$(params.image-name):buildcache \
+        --metadata-file=/tmp/meta.json
+      # metadata-file 是 JSON，把不可变 digest 摘出来写进 results，供下游引用
+      grep -o '"containerimage.digest":"[^"]*"' /tmp/meta.json | cut -d'"' -f4 \
+        > $(results.image-digest.path)
 ```
+
+三个参数解释一下：`--export-cache/--import-cache` 是 BuildKit 的缓存方案——把层缓存推回 Harbor 的 `<镜像名>:buildcache` 标签下，下次构建先拉它命中；`mode=max` 表示连中间层一起缓存（默认 `min` 只缓存最终层，多阶段构建时命中率差一截）。`--output ...push=true` 让 buildkitd 直接推送，不需要在 Task 里再排一个 push 步骤。
 
 配套的 Dockerfile 极简（放在仓库根目录）：
 
@@ -460,7 +502,7 @@ COPY artifacts/app /app/app
 ENTRYPOINT ["/app/app"]
 ```
 
-**关键认知：编译为什么放在 Dockerfile 外面做？** 多阶段构建也能编译，但那时代码在 kaniko 的容器里跑，GOMODCACHE 无法指向我们的 cache workspace——**缓存红利全部丢失**。先在 build 步编译、产物经 workspace 传给 kaniko 只做 COPY，缓存才能落到 PVC。这是 Tekton 构建与 Dockerfile 多阶段构建的本质取舍。
+**关键认知：编译为什么放在 Dockerfile 外面做？** 多阶段构建也能编译，但那时代码在 buildkitd 的构建容器里跑，GOMODCACHE 无法指向我们的 cache workspace——**缓存红利全部丢失**。用 Dockerfile 的 `RUN --mount=type=cache` 也不解决：那份 cache 只存在构建 worker 的本地目录，Pod 一销毁就没了，跨 Run 复用还得靠推拉 registry cache，成本远高于直接挂 PVC。先在 build 步编译、产物经 workspace 传给 buildkit 只做 COPY，缓存才能稳稳落在 PVC 上。这是 Tekton 构建与 Dockerfile 多阶段构建的本质取舍。
 
 下游 Task（扫描/部署）在 Pipeline 里编排为 `runAfter: [go-build-push]`，引用镜像时传 **digest 而非 tag**（`$(params.image-name)@$(tasks.go-build-push.results.image-digest)`）——tag 可被覆盖，digest 不可变，确保扫的严格就是刚构建的那个镜像。Pipeline 本体就是前文的透传套路，不再重复。
 
