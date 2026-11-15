@@ -614,105 +614,7 @@ GRANT ALL PRIVILEGES ON DATABASE notary_signer TO egg;
 ### 在项目根目录编写Jenkinsfile
 采用 Pipeline SCM 模式：Jenkins 任务里只保留 Git 地址等基础配置，流水线代码放在项目根目录的 `Jenkinsfile` 中（**文件名首字母必须大写**）。流水线代码和项目耦合度高、随项目一起变动，因此跟随项目做版本控制。注意**每个分支都必须有该文件**，否则 Webhook 触发构建时会因找不到文件而报错。
 完整示例（对应测试、构建、镜像、发布四个阶段）：
-```groovy
-// 每次构建动态生成唯一 label：Jenkins 会按这个 label 在 K8s 里创建 Pod，
-// 若多个任务并发构建都用固定名称，Pod Template 会互相覆盖/冲突，因此用 UUID 保证唯一
-def label = "slave-${UUID.randomUUID().toString()}"
 
-// podTemplate：声明这次构建需要什么样的"Slave Pod"
-// cloud: 'kubernetes' 表示交给 K8s 插件按需拉起这个 Pod，构建结束自动销毁
-podTemplate(label: label, cloud: 'kubernetes',
-    // workspaceVolume：所有容器共享同一个 PVC 作为工作目录，kubernetes 插件会自动把它 挂进 Pod 里的每一个容器
-    // 这是阶段间传递产物的关键——golang 编译的二进制，docker 容器才能直接取到
-    workspaceVolume: persistentVolumeClaim('jenkins-pvc'),
-    containers: [
-        // jnlp 是 Jenkins 自动注入的容器，负责 Slave 与 Master 的通信，不用手动操作
-        containerTemplate(name: 'jnlp', image: 'jenkins/inbound-agent:jdk11'),
-        // command: 'cat' + ttyEnabled: true 让容器常驻运行不被回收，
-        // 后续用 container('golang') 进入执行命令（否则容器跑完入口命令就退出了）
-        containerTemplate(name: 'golang', image: 'golang:1.17', command: 'cat', ttyEnabled: true),
-        // DinD 方式：挂载宿主机的 docker.sock，
-        // 容器里的 docker 命令实际是发给宿主机 Daemon 执行的，无需在容器里装完整 Docker
-        containerTemplate(name: 'docker', image: 'docker:latest', command: 'cat', ttyEnabled: true,
-            volumes: [hostPathVolume(hostPath: '/var/run/docker.sock', mountPath: '/var/run/docker.sock')]),
-        // 自定义 kubectl 镜像：版本必须与集群版本一致（默认 latest 会因版本不匹配报 API 错误）
-        containerTemplate(name: 'kubectl', image: '172.16.10.16:30002/tools/my-kubectl:v1.0', command: 'cat', ttyEnabled: true)
-]) {
-    node(label) {   // 在刚才声明的 Pod 上执行后续流水线
-        // checkout scm：按任务的 Git 配置拉代码。
-        // 注意：必须在 checkout 之后才能取分支/commit，否则变量为空导致后续判断全部失效
-        def my_repo = checkout scm
-        def git_branch = my_repo.GIT_BRANCH                         // 当前分支，用于后面"分支即环境"的路由
-        def image_tag = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-        // 镜像 tag 用 commit id：每次构建 tag 唯一，出问题可以精确回滚到任意历史版本
-        // （用 latest 的话新旧镜像无法区分，这是典型的标签陷阱）
-        def image = "172.16.10.16:30002/green_hat/go_test:${image_tag}"
-        println "本次构建的分支是: ${git_branch}，镜像: ${image}"
-
-        stage('代码测试') {
-            container('golang') {   // 只在 golang 容器里执行，其他容器闲置等待
-                sh 'echo "模拟单元测试..."'
-            }
-        }
-        stage('程序构建') {
-            container('golang') {
-                sh '''
-                  export GOPROXY=https://goproxy.cn   // 国内代理加速 go mod 拉包
-                  export GOOS=linux GOARCH=amd64      // 交叉编译：目标环境是 K8s 节点上的 Linux amd64
-                  go build -v -o egan_go .
-                '''   // 编译产物落在共享 PVC 上，等下被镜像阶段直接 ADD 进去
-            }
-        }
-        stage('创建镜像') {
-            container('docker') {
-                // 动态生成 Dockerfile：heredoc 内容必须顶格写，
-                // 缩进会被一起写进文件导致 Dockerfile 语法错误
-                sh '''cat << EOF > Dockerfile
-FROM centos:7
-USER root
-ADD ./egan_go /opt/egan_go
-RUN chmod +x /opt/egan_go
-CMD ["/opt/egan_go"]
-EOF'''
-                // withCredentials：临时注入 Harbor 账号（存进 Jenkins 凭证库，不落日志、不进代码）
-                withCredentials([usernamePassword(credentialsId: 'docker-os',
-                        usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-                    sh "docker login -u ${DOCKER_USER} -p ${DOCKER_PASS} 172.16.10.16:30002"
-                }
-                sh "docker build -t ${image} . && docker push ${image}"   // 构建并推送到 Harbor
-            }
-        }
-        stage('发布到K8S') {
-            container('kubectl') {
-                // 分支即环境：master → 生产（人工确认），develop → 测试（全自动）
-                if (git_branch == 'origin/master') {
-                    // 生产发布必须人工确认，input 会暂停流水线等人点按钮
-                    input message: '是否发布到生产环境?', ok: '继续'
-                    // kubeconfig 等同于密码，平时锁在 Jenkins 凭证库里；
-                    // withCredentials 注入临时文件路径，用完即销毁，绝不进 Git、不落日志
-                    withCredentials([file(variable: 'KUBECONFIG_FILE', credentialsId: 'kuber-config-prod')]) {
-                        // kubectl 默认读 ~/.kube/config，把凭证文件拷过去它才知道
-                        // API Server 在哪（clusters）、用什么身份（users）、有什么权限（RBAC）
-                        sh 'mkdir -p ~/.kube && cp $KUBECONFIG_FILE ~/.kube/config'
-                        //首次部署test pod(副本数、端口、探针、label、Service……)是由运维手动部署的。
-                        sh "kubectl set image deployment test test_image=${image}"   // 通知集群换镜像，触发滚动更新
-                    }
-                } else if (git_branch == 'origin/develop') {
-                    // 测试环境全自动发布，kubeconfig 用权限更小的测试集群凭证
-                    withCredentials([file(variable: 'KUBECONFIG_FILE', credentialsId: 'kuber-config-test')]) {
-                        sh 'mkdir -p ~/.kube && cp $KUBECONFIG_FILE ~/.kube/config'
-                        sh "kubectl set image deployment test test_image=${image}"
-                    }
-                }
-                // 回滚依赖"tag 用 commit id"：每个历史版本镜像都还在 Harbor 里，
-                // rollout undo 让 Deployment 回退到上一个 ReplicaSet 的版本
-                input message: '是否回滚?', ok: 'YES'
-                sh 'kubectl rollout undo deployment test'
-            }
-        }
-    }
-}
-```
 ### 总结流程
 **① 提交与触发（GitLab → Jenkins）**
 开发者把代码 push 到 GitLab。GitLab 的 Webhook 按预先配置的 URL，向 Jenkins 发一个 POST 请求，body 里带着仓库地址、分支、commit ID 等信息。Jenkins 的任务配置里勾选了 "Build when a change is pushed to GitLab"，收到请求即触发构建——注意每个分支都要带 Jenkinsfile，否则 Webhook 构建会失败。
@@ -737,7 +639,6 @@ Jenkins Master 读到 Jenkinsfile 开头的 `podTemplate` 声明，通过 kubern
 3. **镜像 tag 用 commit id 而非 latest**：每次构建 tag 唯一，出问题可回滚到任意历史版本——这正是前面提到的 `latest` 标签陷阱的解法。
 4. **分支即环境**：develop 自动发布测试环境，master 走 `input` 人工确认后发布生产。
 5. **踩坑记录**：获取分支/commit 的代码必须放在 `checkout scm` 之后；Pod Template 里的 kubectl 版本要与集群版本一致
-
 
 ## 补充
 ### 给 Jenkins 流水线一个最小权限身份
@@ -792,25 +693,14 @@ roleRef:
 ```
 为什么要分成两个身份，而不是一个 ServiceAccount 全包？这正是 RBAC 最小权限原则的实际落地：链路一能 `exec` 进任意容器，一旦泄漏等于交出构建环境；链路二只能改目标命名空间的 Deployment，泄漏后攻击面有限。如果混用一个权限大而全的身份，两条链路的安全边界就都失效了——权限按「用途」切分，是共享集群里最基础的隔离手段，多团队共用集群时（各团队绑定各自命名空间的 Role）遵循的也是同一个思路。
 
-## ArgoCD
-### Jenkins的劣势
-没有 ArgoCD 时，常见的 CD 流程是：Jenkins 这类 CI 工具在构建镜像后，直接调用 `kubectl apply` 或 `helm` 命令把 Kubernetes 配置文件**推送**到集群——也就是前文整条 Jenkins 流水线所采用的方式。回看前文的做法，就能发现这种方式有三个主要问题：
-- **配置冗余**：需要在 Jenkins-master 上配置 kubectl、helm 以及集群凭证kubeconfig，50 个项目就要配 50 份，维护成本随项目数量线性增长。
-- **凭证暴露**：前文强调过 kubeconfig 是等同于密码的凭证文件，只应放在凭证管理系统里；而推送模式恰恰要把集群的 kubeconfig 暴露给集群外部的工具，攻击面被拉到了 Jenkins 这一侧。
-- **状态盲区**：前文流水线里 Jenkins 执行完 `kubectl set image` / `apply` 就结束，看不到集群里实际的部署状态，应用到底健不健康、Pod 有没有起来完全不知道。
-本质上这是「推送型（push）」部署的固有缺陷——发布动作的发起方在集群之外，既要把凭证交给外部工具，又无法感知最终的真实运行状态。
+### Jenkins 的主要劣势
 
-### ArgoCD的优势
-ArgoCD 的核心思路是把推送流程**反转为拉取流程（pull）**：把 ArgoCD 本身部署在集群内部，由它主动去监听 Git 仓库的变化，自动拉取 manifests 并应用到集群。好处有三：
+上面这套方案能跑通，但 Jenkins 的短板在生产里会逐步暴露，选型前心里要有数：
 
-**1. Git 成为集群状态的唯一可信源（GitOps）**
-所有变更都通过 Git 提交完成，天然带有版本历史和审计追踪——谁、什么时候、改了什么，全在 commit 记录里，回滚也是一次 `git revert`。
+1. **插件是最大的运维负担**：核心只提供调度骨架，Git、K8s、Docker、流水线能力全靠插件，插件之间还有版本耦合——升级 Jenkins 前往往要先排查一圈兼容性，"插件停更导致卡在老版本"是常态。生产故障里插件不兼容的比例，远高于 Jenkins 本体出问题。
+2. **配置没有统一模型，环境不可重建**：Master 的配置散落在 `$JENKINS_HOME` 的一堆 XML、插件配置、全局工具配置里，Jenkinsfile 只覆盖了流水线逻辑，凭证、Pod 模板、共享库仍在 UI 上点。结果是"再搭一套"基本等于备份恢复，而不是声明式部署，配置漂移无从收敛。
+3. **安全边界天然薄弱**：Master 持有全部凭证且是单点；Slave 构建镜像要挂 `docker.sock`（等价节点 root）或开 privileged；具有安全隐患。前面做的最小权限 RBAC 只能约束"发布"链路，"构建"链路依然是高权限区。
+4. **资源与缓存靠人工维护**：Master 常驻吃内存（JVM + 几十个插件，2C4G 起步），动态 Slave 冷启动慢（拉镜像 + 装工具）；
+5. **可观测性弱**：能看到的只有构建日志，队列和执行器指标要额外装插件且只到 JVM 层，没有流水线级的 trace；失败定位、耗时分析基本靠翻日志。
 
-**2. 持续比对 + 自愈（self-heal）**
-ArgoCD 会持续比对「Git 里的期望状态」和「集群里的实际状态」，发现不一致就以 Git 为准强制同步（self-heal）。视频里演示了三种典型行为：
-- 把 `deployment.yaml` 里的镜像版本从 `1.0` 改成 `1.2` → ArgoCD 自动触发滚动更新。
-- 删掉或重命名某个资源 → 开启 prune（自动清理）后，集群里对应的旧资源会被同步删除。
-- 手动 `kubectl edit` 改副本数 → 会被 ArgoCD 立刻覆盖回 Git 定义的状态。
-
-**3. 配置与源码分离**
-最佳实践是把「应用源代码」和「应用配置代码」（deployment、service、configmap 这些 Kubernetes manifest）放在**两个独立仓库**。这样改配置不会触发整个 CI 流水线去重新测试和构建镜像，职责清晰、互不影响。
+一句话总结：**Jenkins 强在生态和存量，弱在"平台化"**——它本质是一台"可编程调度器 + 一堆插件"，而不是有统一 API、声明式模型、租户隔离的 CI 平台。已有大量存量 Job、强依赖某个插件生态时，继续用它是最理性的选择；但新集群、新项目更建议直接上 Tekton、Argo Workflows 或 GitLab CI 这类云原生方案。

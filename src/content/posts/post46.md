@@ -304,34 +304,6 @@ Git push ──Webhook──→ EventListener（收到事件）
 
 ## 自动化构建go服务
 
-### BuildKit：容器里做镜像的构建工具
-
-背景一句带过：传统做法是找一台装了 Docker 的机器跑 `docker build`，依赖常驻的 docker daemon 还要挂节点的 `docker.sock`——**等于把宿主机 root 交给构建过程**；曾经常用来绕开它的 kaniko 已经归档、不再维护，新流水线直接上 **BuildKit**
-
-**核心优势**：
-
-1. **C/S 架构 + LLB 中间表示**：`buildctl` 把 Dockerfile 解析成一张标明依赖关系的构建图（LLB），`buildkitd` 按图**并行执行互不依赖的步骤**。kaniko 是沿 Dockerfile 顺序逐层追加的单线执行器，多阶段构建的提速主要来自这里。
-2. **缓存是一等公民**：`--export-cache/--import-cache type=registry` 把层缓存推回镜像仓库，任意节点重建都能命中（`mode=max` 连中间层一起缓存）；Dockerfile 里还可用 `RUN --mount=type=cache` 给编译过程做持久缓存。
-3. **构建期密钥不落层**：`RUN --mount=type=secret` 让密钥只在构建容器内短暂可见，不写进任何镜像层与 history——用 `--build-arg` 传密钥做不到这一点。
-4. **多架构**：`--platform` 一条命令出多架构镜像，QEMU 模拟与交叉编译都支持。
-
-**rootless 是怎么跑起来的**：buildkitd 默认要 root 才能建 namespace、执行 mount，非特权场景必须同时满足三件事——
-
-- **非 root uid + 用户命名空间**：容器以镜像内置的 `1000` 运行，容器内的 root 被映射成宿主机普通用户，即使逃逸也拿不到节点 root；
-- **`--oci-worker-no-process-sandbox`**：跳过给每个构建容器再套一层 PID namespace（非特权下做不到）。代价是构建容器之间的进程隔离被削弱，只适合构建可信代码；
-- **`seccompProfile: Unconfined`**：rootless 依赖 `unshare`/`clone` 等系统调用，默认 seccomp 会直接拒绝。
-
-**上线前必须确认的四个点**：
-
-| 注意点 | 说明 |
-| --- | --- |
-| 节点内核开关 | 需要开启非特权用户命名空间（`kernel.unprivileged_userns_clone=1` 或等价配置），部分发行版和托管集群默认关闭，选型前先在目标集群验证 |
-| PSA 冲突 | `Unconfined` 与 `restricted` 策略互斥，CI namespace 至少放宽到 `baseline`，这是 rootless 方案落地的主要阻力 |
-| 存储驱动退化 | 非特权下 overlayfs 不可用，worker 退回 `native`（整层复制）或 fuse-overlayfs，**层数多的大镜像会明显变慢**，建议给 CI 单独节点池 |
-| 能力边界 | `RUN` 里做不了需要特权内核能力的操作（挂载、mknod、改宿主机路径等），这类镜像仍需 privileged 构建或专用构建机 |
-
-使用直觉：step 容器里起一个 `buildkitd`，`buildctl` 通过 unix socket 连上它，`--output type=image,name=...,push=true` 一步出镜像。注意**客户端要和 daemon 用同一个 uid 运行**，否则连不上 socket；socket 和 state 目录都放容器可写层（`/tmp`、`$HOME`）即可，随 Pod 一起销毁——下文 Task 的 ④ 就是照此写的。
-
 ### 流程总览
 
 一条 Task 四步串行，代码从 GitLab 进、镜像从 Harbor 出：
@@ -546,26 +518,6 @@ spec:
       nodeSelector:
         tekton-ci: "builder"          # 所有构建 Pod 固定到同一节点——RWO PVC 的前提，见下文
 ```
-
-### 环境解耦：同一模板，dev/test两套注入
-
-现在兑现前文"模板 + 参数注入"的承诺。Pipeline 和 Task 一行不改，**换环境只是 PipelineRun 换三个注入点**：
-
-| 注入点 | dev 环境 | test 环境 |
-| ---- | ---- | ---- |
-| `image-name` | `harbor.example.com/dev/go-demo` | `harbor.example.com/test/go-demo` |
-| `git-ref` | main / feature 分支 | release tag（如 v1.4.2） |
-| `cache` PVC | `go-cache-pvc`（可按环境拆 PVC，防缓存互相污染） | `go-cache-pvc-test` |
-| 触发方式 | push 到 main 自动触发（Triggers） | 手动 `kubectl apply` 或 merge 事件 |
-
-```yaml
-# test 环境的 PipelineRun，与 dev 版仅以下差异：
-#   params.image-name → harbor.example.com/test/go-demo
-#   params.git-ref    → v1.4.2
-#   workspaces.cache  → persistentVolumeClaim: { claimName: go-cache-pvc-test }
-```
-
-这就是 workspace 作为"抽象插槽"的价值：**模板只声明"我需要一个缓存空间、一份凭证、一份配置"，绑定决定它们落在哪块 PVC、哪个 secret**。开发环境和测试环境用不同的存储后端、不同的凭证边界，模板零改动——存储和凭证的编排被完整地从流水线逻辑里剥离出来了。
 
 ## 补充
 
