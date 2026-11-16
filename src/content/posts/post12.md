@@ -119,7 +119,6 @@ int main()
 } 
 ```
 
-
 ## 联合挂载文件系统
 - **概念**：联合挂载把多个目录（层）**叠加挂载**到同一个挂载点，上层覆盖下层同名文件，读取时看到的是合并后的统一视图。Docker 镜像/容器正是靠它实现「只读层复用 + 可写层独立」。
 - **OverlayFS**：Linux 原生联合文件系统，核心由四部分组成：
@@ -132,6 +131,28 @@ int main()
     -o lowerdir=/l1:/l2,upperdir=/upper,workdir=/work \
     /merged
   ```
+
+### 挂载位置：层目录在宿主机，容器根就是 merged
+
+先纠正一个常见误解：**overlay 不是「把宿主机目录挂进容器」**。`lowerdir` / `upperdir` / `workdir` / `merged` 四个路径**全部是宿主机路径**，`mount -t overlay` 的合并动作发生在**宿主机**上；容器的根目录只是**直接站在这个 merged 挂载点里**——runc 挂完之后 `pivot_root`（系统调用，切换整个 mount namespace 的根挂载点） 到 merged，容器的 `/` 就是它。
+
+```text
+宿主机磁盘
+├── lower1 ... lowerN   只读层目录（镜像各层，多容器共享）
+├── upper               可写目录（本容器独有，修改全落这里）
+├── work                内部暂存（内核用，别看别动）
+└── merged              ← overlay 挂载点（宿主机上的一个真实路径）
+      └─ 容器的 /  ──────┘   pivot_root 到这里的视图
+```
+
+同一份数据，三个视角：
+
+| 视角 | 路径 |
+| --- | --- |
+| 容器内看到的 | `/app/config.yaml`（merged 的合并视图） |
+| 宿主机 merged 下 | `/var/lib/docker/overlay2/<id>/merged/app/config.yaml` |
+| 真正落盘的位置 | 改过的文件在 `.../<id>/diff/app/config.yaml`；没改过的还在镜像层 `.../<layerid>/diff/` 下 |
+
 - **Overlay2（Docker 默认存储驱动）的层级结构**：相比早期 `overlay`（只支持单层 lower），`overlay2` 支持**多层 lowerdir 串联**，更贴合镜像「一层层叠出来」的模型：
   - 镜像层：都是只读 `lowerdir`，按从底到顶顺序 `lower1:lower2:...:lowerN` （导出的新镜像中原来的upperdir会成为lowerdir中的一个放在顶部）串联；
   - 容器层：在最上面加一个可读写 `upperdir`；
@@ -150,6 +171,28 @@ int main()
   - **高效**：CoW 保证只读层零拷贝复用，直到真正修改才复制，避免整层复制的开销。
   > 一句话：Overlay2 把「多个只读镜像层 + 一个可写容器层」联合成统一视图，靠 CoW 和白障实现高效复用与隔离——这正是 Docker 镜像轻量、启动飞快的根本原因之一。
 
+### overlayfs 与 fuse-overlayfs 的区别
+
+**两者是同一套模型的两种实现**，不是两种模型：lower / upper / work / merged 四要素、CoW、白障全都一样，唯一区别是**「合并」这个动作在内核态还是用户态执行**。
+
+| 对比维度 | overlayfs（内核） | fuse-overlayfs（用户态） |
+| --- | --- | --- |
+| 谁做合并 | 内核 overlay 模块，直接操作目录 | 用户态 `fuse-overlayfs` 进程，经 `/dev/fuse` 冒充一个文件系统 |
+| 挂载点类型 | `overlay` | `fuse.fuse-overlayfs` |
+| 前提 | 需要 `CAP_SYS_ADMIN` 才能挂载 | 只要能读写 `/dev/fuse`，**不需要特权** |
+| 典型场景 | 常规 `docker build`、containerd snapshotter | **rootless buildkit** / podman、无特权 CI |
+| 数据落点 | upperdir 是宿主机上的真实目录，可直接 `ls` | 同样是buildkit snapshotter管理的 upperdir，数据不会丢 |
+| 性能 | 快，只走内核 | 每次 IO 多一次内核↔用户态切换，明显更慢 |
+
+**正常内核 overlay（原生 overlay）IO 链路：**    
+> 容器进程 → 内核 VFS → 内核 overlay 模块 → 直接读写宿主机上 upper/lower 文件  
+   
+**fuse-overlayfs 的 IO 链路：**  
+容器进程发起 write/read → 内核 VFS → FUSE 内核驱动  
+→ 把 IO 请求打包，通过 /dev/fuse 发给用户态 fuse-overlayfs 进程（上下文切换：内核→用户态）   
+→ fuse-overlayfs 收到请求，去 open/read/write 宿主机上 upperdir 里的真实文件  
+→ 结果再通过 /dev/fuse 传回内核（上下文切换：用户态→内核）  
+→ 内核返回给容器进程  
 
 ## docker
 ### 安装docker前需要做的一些准备工作
@@ -164,7 +207,7 @@ sudo systemctl disable firewalld   # 禁止开机自启
 #立即关闭。注释/etc/fab文件中的Swap分区自动挂载防止开机自启
 swapoff -a
 ```
-### 常用命令
+### 常用命令（不重要，基本现在都用k8s了）
 #### docker及其容器的信息查看
 ```bash
 #-d 代表后台运行容器进程，sleep 10000是容器启动后的第一个进程，这个进程必须一直存在且要是前台进程，不能过一会容器就退出了。此外，这个命令必须存在于你指定的镜像里面。如果你自己不指定命令，那么就按照镜像配置中CMD的命令

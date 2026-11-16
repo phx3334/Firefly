@@ -38,8 +38,6 @@ cgroup v2 支持的控制器（`cat /sys/fs/cgroup/cgroup.controllers` 看当前
 | rdma | RDMA 资源用量 |
 | misc | 其他杂项资源（如 `misc.max`） |
 
-**两个 v1 有、v2 没有的坑**：`devices`（设备访问控制）在 v2 里改由 **eBPF 程序**实现，运行时加 `--device` 时通过 BPF 挂过滤器，所以 v2 机器上根本没有 `/sys/fs/cgroup/.../devices.allow`；`net_cls` / `net_prio` 已被移除，给网络包打标签改用 **tc + eBPF**。
-
 ### v2 的结构：一棵树 + 三条规则
 
 - **单层级树**：所有控制器统一挂在 `/sys/fs/cgroup`（unified hierarchy），一个进程**只属于一个 cgroup 节点**，不再像 v1 那样分散在多棵树里
