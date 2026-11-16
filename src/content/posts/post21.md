@@ -300,6 +300,32 @@ cat /proc/19838/stat
 
 ## 容器安全
 
+### 隔离根基：六个 namespace
+
+下面所有关于权限的讨论，都建立在"容器先被关进一个独立视图"之上。这个视图就是 namespace——**它不管"能用多少"（cgroup 的事），也不管"能做什么"（capability 的事），只管"能看见什么"**。容器必用的有六种：
+
+| namespace | 隔离什么 | 对应的逃逸面 |
+| --- | --- | --- |
+| **Mount**（mnt） | 挂载点列表、根文件系统视图 | 最关键的一层，rootfs 靠它；一旦 `-v /:/host` 或 `hostPath` 把宿主目录挂进来，这层等于作废 |
+| **PID** | 进程号分配与进程可见性 | 容器内 PID 1 与宿主 PID 毫无关系；但 `/proc/self/status` 的 `NSpid` 会暴露宿主侧编号，配合 `CAP_SYS_PTRACE` 可注入宿主进程 |
+| **Network**（net） | 网卡、Pod IP、端口空间、路由、iptables | 共享 `hostNetwork` 等于让容器改节点 iptables、抓节点流量 |
+| **IPC** | 共享内存、消息队列、信号量 | 共享 host IPC 时可读写别的进程的 shm 段（SysV 共享内存是重灾区） |
+| **UTS** | hostname / domainname | 危害最小，但容器 hostname 常被当成情报收集入口（能推断节点名/集群名） |
+| **User** | UID/GID 映射与权限判定 | 唯一**改变权限语义**的 namespace，下一段单独讲 |
+
+"共享宿主的某个 ns"在实现上就是**不新建、直接沿用**（`-v` 挂宿主目录 = 不新建 mount ns 的对应挂载点；`hostNetwork: true` = 不新建 net ns）。这也解释了一个日常现象：同一个 Pod 里 A 容器监听端口，B 容器用 `localhost` 能连（共享 net ns），换成另一个 Pod 就连不上。
+
+**User namespace：容器 root ≠ 宿主机 root 的根基**。其余五个 ns 只改变"看得见什么"，只有 user ns 改变"内核认你是谁"：
+
+```text
+容器内 uid 0  ──映射──>  宿主机 uid 1000
+     ↓                        ↓
+能 mount、能 chown        落盘文件属主是 1000
+（但只对 ns 内的对象生效，出了 ns 一点权力都没有）
+```
+
+映射规则写在 `/proc/<pid>/uid_map`（格式：`ns内ID 宿主ID 长度`）。rootless 容器、rootless BuildKit 全靠它——ns 内是 root，逃逸上限被钉死在宿主那个普通 uid 上。代价是功能缺口（不能监听1–1023这些"特权端口"、部分内核文件系统挂不上、chown 受限），所以 **Docker 默认不开**，**K8s 也要显式开**（k8s 1.30 起 默认开启，是否生效取决于运行时和内核）
+
 ### 能力模型：容器里的 root 不是宿主机的 root
 
 宿主机 root 拥有全部 capability；容器里的 root 只有运行时给的**默认集合**（Docker / containerd 默认 14 个：CHOWN、DAC_OVERRIDE、FOWNER、FSETID、KILL、SETGID、SETUID、SETPCAP、NET_BIND_SERVICE、NET_RAW、SYS_CHROOT、MKNOD、AUDIT_WRITE、SETFCAP）。
@@ -433,6 +459,52 @@ kubelet 会替你做两件事：
 | `hostPath` | **不生效** |
 
 因为 hostPath 挂的是宿主机目录，kubelet 不会去改宿主机上文件的属组——上面采集器要读的 `/var/log/pods` 正是 hostPath，所以 fsGroup 在这里帮不上忙，只能手动 `chgrp`（或走判定链里的 uid=0 方案）。
+
+### seccomp：把「能进哪些内核入口」收掉
+
+capability 按**操作能力**授权（mount、chown、改内核参数），seccomp 按**系统调用**授权。两者不重叠，因为有一批危险 syscall **不需要任何 capability** 就能调：`keyctl`、`perf_event_open`、`bpf`、`clone` 的危险 flag 组合。这就是 seccomp 存在的理由
+
+三种 profile：
+
+| 类型 | 含义 | 生产建议 |
+| --- | --- | --- |
+| `Unconfined` | 完全不过滤 | 只给构建类 Pod（rootless BuildKit 必须，见后文） |
+| `RuntimeDefault` | seccomp默认值，docker / containerd 自带白名单，放行常用 syscall | **业务 Pod 的基线，且要显式写出来** |
+| `Localhost` | 自写 JSON 白名单 | 只对高敏感负载（跑不可信代码的沙箱）值得投入 |
+
+### readOnlyRootFilesystem
+
+**本质**：把容器的根挂载点以只读方式重新挂载，容器内任何写 rootfs 的操作都会被内核以 `Read-only file system`（EROFS）拒绝。**业务 Pod 一般都推荐打开**——它成本极低，却是「RCE（远程代码执行） 之后拿不到落盘持久化」最便宜的一道锁。
+
+实现上是 runc 的活：`pivot_root` 到容器 rootfs 后执行一次 `mount -o remount,ro /`，对应 OCI spec 的 `root.readonly: true`。所以它不是 k8s 发明的策略，而是内核挂载属性，`/proc/mounts` 里 rootfs 那一项的 `ro` 就是它。
+
+**可写边界必须记清**（只读只针对「根挂载点」，不影响其他挂载点）：
+
+| 路径 | 可写 | 说明 |
+| --- | --- | --- |
+| `/`（镜像层 + UpperDir） | ❌ | `/usr`、`/bin`、`/etc`、应用二进制与配置全部只读，写操作 EROFS |
+| 挂载的卷（emptyDir / PVC / configMap / secret） | ✅ | 独立挂载点，各自按自己的挂载属性，只读与否互不影响 |
+| `/proc`、`/sys`、`/dev` | ✅ | 伪文件系统，不受 rootfs 只读约束；`/proc/sys` 的写入仍受 capability 管 |
+| tmpfs（`emptyDir.medium: Memory` 或 `--tmpfs`） | ✅ | 内存盘，容器重启即清空 |
+
+**为什么k8s并没有将其选择为默认打开**：
+- 第一，大部分研发人员在日常工作中对于readOnlyRootFilesystem都并不太会去考虑，并且以往有大部分老业务都没有开启这个功能，如果默认开启，而大部分业务pod又没有对于需要进行写的文件进行对应挂载，则会出现大规模报错。
+- 还有，对于临时构建镜像的容器，他们是需要对rootfs进行写操作的，比如需要将构建过程中改变的文件写到upperdir，后续与lowerdir进行diff.
+
+**从根上解决**：根只读会逼你把「状态」从镜像里挤出去——日志走 stdout、临时文件走 tmpfs、数据走 PVC。这正是容器化该有的姿势，也是它值得打开的原因。
+
+### 加固口径速查
+
+| 开关 | 业务 Pod | 构建 Pod（rootless BuildKit） | 说明 |
+| --- | --- | --- | --- |
+| `runAsNonRoot: true` | 必开 | 用 `runAsUser: 1000` 代替 | 前者是断言，后者是赋值 |
+| `capabilities.drop: [ALL]` | 必开 | 必开 | rootless 下本来也没有 cap |
+| `allowPrivilegeEscalation: false` | 必开 | 必开 | 置 `no_new_privs`，无副作用 |
+| `readOnlyRootFilesystem: true` | 建议开 | **不开** | 构建要写 rootfs / state |
+| `seccompProfile` | `RuntimeDefault` | `Unconfined` | rootless 需要 `unshare` |
+| `privileged: true` | 永不 | 仅 DinD 需要，不推荐 | 等价于交出节点 root |
+
+业务 Pod 上线前照这张表逐项对一遍，比事后做一次渗透测试便宜得多。
 
 ### 非 root 会影响使用吗
 

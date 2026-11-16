@@ -67,7 +67,7 @@ spec:
 
 ### Task：一次具体工作
 
-Task 由多个有序的 Step 组成，Step 按**定义顺序串行执行**（本质是一个 Pod 里的多个容器，共享工作空间）。Step 有两种写法——直接写命令，或引用 StepAction：
+Task 由多个有序的 Step 组成，Step 按**定义顺序串行执行**（运行模型见下一节）。Step 有两种写法——直接写命令，或引用 StepAction：
 
 ```yaml
 apiVersion: tekton.dev/v1
@@ -96,6 +96,19 @@ spec:
 
 - **严格串行的步骤 → 合在一个 Task**：同一 Task 里的 Step 跑在同一个 Pod 内、共享文件系统，中间产物天然传递，不用为跨 Pod 传产物折腾 workspace——如"初始化 → 编译 → 制镜像"这类共享同一份源码的步骤；
 - **需要并行或跨流水线复用的环节 → 拆成独立 Task**：每个 Task 独立成 Pod，状态、日志、重试、资源配额都按 Task 粒度可见，还能被多条流水线引用——如"构建""代码扫描""镜像推送"各一个 Task，Pipeline 层再编排它们的并行与依赖。
+
+### 执行模型：Step、容器与 Pod 的关系
+
+上面反复说"一个 Task 就是一个 Pod"，这里把它拆开讲透——这是理解"Step 间为什么能直接传文件"和"Pod 挂了为什么还能看日志"的地基。Tekton 里一个 Task 的每一个 step，都对应 Pod 内部的**一个独立容器**，临时、串行执行，整个 Pod 的生命周期和 TaskRun 绑定。
+
+核心机制四条：
+
+1. **1 个 TaskRun = 1 个 Pod**：Tekton 不会为每个 step 单独创建 Pod，所有 step 都运行在同一个 Pod 内。
+2. **1 个 step = 1 个容器**：Pod 中会为每个 step 生成一个名为 `step-<step名称>` 的容器（如 `step-git-clone`），按 Task 定义的顺序**串行执行**——上一个 step 容器执行完毕并退出后，下一个 step 容器才会启动，而非同时运行。所以 `kubectl logs <pod> -c step-build` 能单独拿到某一步的输出。
+3. **临时性**：每个 step 容器只在自身执行阶段存活，命令执行完成就立刻退出。整个 Task 跑完后 Pod 标记为 Completed——注意 **Tekton 默认保留这个 Pod**，就是为了让你事后翻最后失败那步的日志（下文 kubectl logs 的排障用法正依赖这一点）；清理是显式动作：删 TaskRun 时靠 ownerReference 级联删 Pod。
+4. **资源共享**：所有 step 容器共享同一个 Pod 的网络命名空间、IPC，以及通过 workspace 挂载的存储卷——前一个 step 写进卷的文件，后一个 step 从同一路径直接读取。
+
+这四条直接解释了两个高频疑问：为什么"串行共享的步骤要合在一个 Task"（第 1、4 条：同 Pod 共享卷，中间产物免传递），以及为什么 Pod 是排障的最小单位（第 2、3 条：日志按容器切分、Pod Completed 后仍可回看）。
 
 ### Pipeline：流水线框架
 
@@ -234,14 +247,31 @@ spec:
         resources: { requests: { storage: 5Gi } }
 ```
 
-每个 TaskRun 对应一个真实 Pod，执行状态直接用 K8s 的方式查：
+**一次 TaskRun 的底层全过程**：把 `kubectl create taskrun` 之后、看到 Pod Running 之前发生的事拆开，全链路是这样的：
 
-```bash
-kubectl get pipelinerun order-service-run-42
-kubectl get taskrun -l tekton.dev/pipeline=build-deploy-pipeline   # 看流水线下每个 Task 的执行状态
-kubectl get pods | grep order-service-run-42          # 先拿到真实 Pod 名（末尾带随机后缀）
-kubectl logs -f order-service-run-42-build-image-xxxxx   # 某个步骤的构建日志
-```
+```text
+① kubectl ──HTTP──> apiserver
+                      ├─ 准入校验：CRD schema 合法吗、参数/必需 workspace 给了吗
+                      └─ 写入 etcd（Run 的唯一持久化，此后一切状态都从这里长出来）
+
+② TaskRun controller（watch/informer，常驻 Pod：tekton-pipelines-controller）
+                      ├─ 监听到新 TaskRun → 读它引用的 Task 定义
+                      ├─ reconcile：注入 params、解析 StepAction 引用
+                      └─ 绑定 workspace：volumeClaimTemplate 先经 apiserver 建出 PVC
+                                            ↓ 再请求 apiserver
+③                    创建 1 个 Pod（step 容器按 Task 定义生成）
+                                            ↓
+④ scheduler          评估资源/亲和 → 绑定节点（写回 apiserver）
+                                            ↓
+⑤ kubelet（选中节点） watch 到 Pod → 拉镜像 → CRI/containerd 起容器
+                      init 容器 → step-X 容器①②③…串行执行
+                                            ↓ 容器状态实时
+⑥                    kubelet ──status 子资源──> apiserver ──> controller 观察到
+                      controller 把结果 patch 回 TaskRun.status（conditions、results）
+                                            ↓ 若是 PipelineRun 发起的
+⑦                    PipelineRun controller watch 到该 TaskRun Completed
+                      → 按依赖图启动下一个 TaskRun（回到②）
+``` 
 
 ### Triggers：事件驱动的扩展组件
 
@@ -300,224 +330,6 @@ Git push ──Webhook──→ EventListener（收到事件）
 ```
 
 设计哲学一句话：**"模板 + 参数注入"实现流程复用**——Pipeline 是稳定的模板，PipelineRun 是一次性的注入。这个模式正是为多语言、多版本的 CI/CD 场景而生：流程收敛为一处维护，差异全部参数化，规模越大复用收益越明显。
-
-
-## 自动化构建go服务
-
-### 流程总览
-
-一条 Task 四步串行，代码从 GitLab 进、镜像从 Harbor 出：
-
-```text
-GitLab（私有代码仓库）                     Harbor（私有镜像仓库）
-        │                                         ▲
-        ▼ git clone                               │ docker push
-┌──────────────────────────────────────────────────────┐
-│ Task: go-build-push（一个 Pod 内四步串行）              │
-│   ① git-clone  拉取源码（凭证来自 git-auth secret）     │
-│   ② init       初始化构建环境（GOPROXY 来自 configmap） │
-│   ③ build      go build（缓存落在共享 PVC）             │
-│   ④ buildkit   依据 Dockerfile 制镜像并推送（凭证来自    │
-│                 dockerconfig secret，无 docker daemon）│
-└──────────────────────────────────────────────────────┘
-```
-
-四步合进一个 Task，正是前文 Task 粒度取舍的落地：四步共享同一份源码和构建环境，中间产物（编译好的二进制）在一个 Pod 内天然传递，无需并行、也无需跨流水线复用。
-
-### workspace绑定：易失的源码，复用的缓存
-
-概念层面 workspace 的五种载体见前文。这条流水线的五个插槽照此选型：**source** 用 `emptyDir` 装易失的源码和编译产物（跑完即删，无脏代码残留）；**cache** 用共享 PVC 装 GOMODCACHE / GOCACHE（跨 Run 复用，二次构建快数倍）；**git-auth / dockerconfig**（secret）和 **build-config**（configmap）只读挂载。先建凭证和配置：
-
-```bash
-# GitLab SSH 凭证：deploy key（只读权限）+ known_hosts（预置指纹，防交互式确认卡死）
-# 本地生成 deploy key 加入 GitLab 仓库后，用 keyscan 生成 known_hosts，一并打进 secret
-ssh-keyscan gitlab.example.com > known_hosts
-kubectl create secret generic gitlab-auth -n ci \
-  --from-file=ssh-key=id_ed25519 \
-  --from-file=known_hosts=known_hosts
-
-# Harbor 凭证：镜像仓库没有 SSH 一说——Registry API 走 HTTPS，认证就用 dockerconfigjson
-# （docker-registry 是 secret 的子类型，buildkit 从 $DOCKER_CONFIG/config.json 读凭证）
-kubectl create secret docker-registry harbor-auth -n ci \
-  --docker-server=harbor.example.com \
-  --docker-username=ci-bot \
-  --docker-password=<harbor-robot-token>
-
-# 构建配置：代理地址易变，放 configmap 而不是写死在 Task 里
-kubectl create configmap build-config -n ci \
-  --from-literal=goproxy=https://goproxy.cn,direct
-
-# 缓存 PVC：Go 依赖 + 编译缓存的家
-kubectl create -n ci -f - <<'EOF'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: go-cache-pvc
-spec:
-  accessModes: [ReadWriteOnce]
-  resources: { requests: { storage: 20Gi } }
-EOF
-```
-
-### Task定义：四步串行
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: go-build-push
-spec:
-  params:
-  - name: git-repo          # 如 gitlab.example.com/team/go-demo.git
-  - name: git-ref
-    default: main
-  - name: image-name        # 如 harbor.example.com/dev/go-demo
-  - name: image-tag
-  results:                  # 对外输出：镜像 digest（不可变），下游部署 Task 消费它而非 tag
-  - name: image-digest
-  workspaces:
-  - name: source
-  - name: cache
-  - name: git-auth
-    mountPath: /git-auth                      # SSH 凭证挂载点：deploy key + known_hosts
-  - name: dockerconfig
-    mountPath: /dockerconfig                  # 配合 DOCKER_CONFIG 环境变量，供 buildkit 推送认证
-  - name: build-config
-    mountPath: /build-config
-  steps:
-  - name: git-clone                           # ① 拉代码
-    image: alpine/git:2.45
-    resources:                                # 每个 step 都设资源限额，防止吃满 CI 节点
-      requests: { cpu: 200m, memory: 128Mi }
-      limits: { cpu: 500m, memory: 256Mi }
-    script: |
-      #!/bin/sh
-      set -e
-      # SSH 方式：deploy key + known_hosts 从 secret 落到 ~/.ssh，clone 走 git@ 协议
-      mkdir -p $HOME/.ssh
-      cp /git-auth/ssh-key $HOME/.ssh/id_ed25519
-      cp /git-auth/known_hosts $HOME/.ssh/known_hosts
-      chmod 600 $HOME/.ssh/id_ed25519        # 私钥权限必须是 600，ssh 会拒绝宽松权限
-      git clone --depth 1 --branch $(params.git-ref) \
-        git@$(params.git-repo) \
-        $(workspaces.source.path)/src
-
-  - name: init                                # ② 初始化
-    image: golang:1.22
-    workingDir: $(workspaces.source.path)/src
-    resources:
-      requests: { cpu: 200m, memory: 256Mi }
-      limits: { cpu: "1", memory: 512Mi }
-    script: |
-      #!/bin/sh
-      set -e
-      go env -w GOPROXY=$(cat /build-config/goproxy)   # 配置来自 configmap，换代理只改 CM
-      go env GOPROXY
-
-  - name: build                               # ③ 构建（资源大户，限额要给足）
-    image: golang:1.22
-    workingDir: $(workspaces.source.path)/src
-    resources:
-      requests: { cpu: "1", memory: 1Gi }
-      limits: { cpu: "2", memory: 2Gi }
-    env:
-    - name: GOMODCACHE
-      value: $(workspaces.cache.path)/gomod   # 依赖缓存落共享 PVC
-    - name: GOCACHE
-      value: $(workspaces.cache.path)/gocache # 编译缓存同理，二次构建提速数倍
-    script: |
-      #!/bin/sh
-      set -e
-      go mod download                          # 首次慢（写缓存），此后秒级（命中缓存）
-      go build -o $(workspaces.source.path)/artifacts/app ./...
-
-  - name: build-image                         # ④ 制镜像并推送（Pod 内起 rootless buildkitd）
-    image: moby/buildkit:v0.15.2-rootless
-    securityContext:                          # rootless 必需：非 root 用户 + 放开 seccomp
-      runAsUser: 1000
-      runAsGroup: 1000
-      seccompProfile: { type: Unconfined }
-    resources:
-      requests: { cpu: 500m, memory: 512Mi }
-      limits: { cpu: "2", memory: 2Gi }
-    env:
-    - name: DOCKER_CONFIG
-      value: /dockerconfig                    # buildkit 从这里读 Harbor 的推送凭证
-    script: |
-      #!/bin/sh
-      set -e
-      # 容器内起守护进程，无需宿主机 docker daemon；no-process-sandbox 是 rootless 的必需开关
-      buildkitd --addr unix:///tmp/buildkitd.sock --oci-worker-no-process-sandbox &
-      # 等 socket 就绪再连（有超时上限，daemon 起不来就快速失败而不是死等）
-      timeout 15 sh -c 'until [ -S /tmp/buildkitd.sock ]; do sleep 0.2; done'
-      buildctl --addr unix:///tmp/buildkitd.sock build \
-        --frontend=dockerfile.v0 \
-        --local=context=$(workspaces.source.path) \
-        --local=dockerfile=$(workspaces.source.path)/src \
-        --opt=filename=Dockerfile \
-        --output=type=image,name=$(params.image-name):$(params.image-tag),push=true \
-        --export-cache=type=registry,ref=$(params.image-name):buildcache,mode=max \
-        --import-cache=type=registry,ref=$(params.image-name):buildcache \
-        --metadata-file=/tmp/meta.json
-      # metadata-file 是 JSON，把不可变 digest 摘出来写进 results，供下游引用
-      grep -o '"containerimage.digest":"[^"]*"' /tmp/meta.json | cut -d'"' -f4 \
-        > $(results.image-digest.path)
-```
-
-三个参数解释一下：`--export-cache/--import-cache` 是 BuildKit 的缓存方案——把层缓存推回 Harbor 的 `<镜像名>:buildcache` 标签下，下次构建先拉它命中；`mode=max` 表示连中间层一起缓存（默认 `min` 只缓存最终层，多阶段构建时命中率差一截）。`--output ...push=true` 让 buildkitd 直接推送，不需要在 Task 里再排一个 push 步骤。
-
-配套的 Dockerfile 极简（放在仓库根目录）：
-
-```dockerfile
-FROM alpine:3.20
-COPY artifacts/app /app/app
-ENTRYPOINT ["/app/app"]
-```
-
-**关键认知：编译为什么放在 Dockerfile 外面做？** 多阶段构建也能编译，但那时代码在 buildkitd 的构建容器里跑，GOMODCACHE 无法指向我们的 cache workspace——**缓存红利全部丢失**。用 Dockerfile 的 `RUN --mount=type=cache` 也不解决：那份 cache 只存在构建 worker 的本地目录，Pod 一销毁就没了，跨 Run 复用还得靠推拉 registry cache，成本远高于直接挂 PVC。先在 build 步编译、产物经 workspace 传给 buildkit 只做 COPY，缓存才能稳稳落在 PVC 上。这是 Tekton 构建与 Dockerfile 多阶段构建的本质取舍。
-
-下游 Task（扫描/部署）在 Pipeline 里编排为 `runAfter: [go-build-push]`，引用镜像时传 **digest 而非 tag**（`$(params.image-name)@$(tasks.go-build-push.results.image-digest)`）——tag 可被覆盖，digest 不可变，确保扫的严格就是刚构建的那个镜像。Pipeline 本体就是前文的透传套路，不再重复。
-
-### PipelineRun：workspace绑定与节点固定
-
-**模板与存储的解耦发生在 PipelineRun 的 workspace 绑定层**：
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata:
-  generateName: go-demo-dev-          # generateName 自动生成唯一后缀，适合批量触发
-spec:
-  pipelineRef: { name: go-build-pipeline }   # 引用 Task 组成的 Pipeline（写法同前文，不再重复）
-  params:
-  - name: git-repo
-    value: gitlab.example.com/team/go-demo.git
-  - name: git-ref
-    value: main
-  - name: image-name
-    value: harbor.example.com/dev/go-demo
-  - name: image-tag
-    value: a1b2c3d                      # git commit SHA（Trigger 从 webhook 注入），禁用 latest——tag 可被覆盖，digest 才不可变
-  workspaces:
-  - name: source
-    emptyDir: {}                      # 源码+产物：Pod 一死即删
-  - name: cache
-    persistentVolumeClaim:
-      claimName: go-cache-pvc         # 缓存：跨 Run 复用
-  - name: git-auth
-    secret: { secretName: gitlab-auth }
-    readOnly: true                    # SSH 凭证（deploy key + known_hosts）一律只读，防止脚本误写
-  - name: dockerconfig
-    secret: { secretName: harbor-auth }
-    readOnly: true
-  - name: build-config
-    configMap: { name: build-config }
-    readOnly: true
-  taskRunTemplate:
-    podTemplate:
-      nodeSelector:
-        tekton-ci: "builder"          # 所有构建 Pod 固定到同一节点——RWO PVC 的前提，见下文
-```
 
 ## 补充
 

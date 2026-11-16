@@ -102,89 +102,30 @@ Dockerfile → frontend(dockerfile.v0) → LLB DAG → solver → worker(runc) �
 
 ## 五、镜像到底在哪里构建
 
-到这一步才真正进入生产环境的坑区。要在容器里构建镜像，历史上只有两条路（DinD、DooD），现在多了第三条（daemonless）。三条路的差别不在你敲什么命令，而在**谁真正执行构建**——把这一点想清楚，后面的取舍都是推论。
+### 5.1 Docker-out-of-Docker（DooD）
 
-### 5.1 Docker-in-Docker（DinD）
-
-在容器里跑一个完整的 dockerd。
-
-```bash
-docker run --privileged -d --name dind \
-  -e DOCKER_TLS_CERTDIR=/certs \
-  -v dind-certs:/certs/client \
-  docker:dind
-```
-
-- **为什么必须 `--privileged`**：容器里的 dockerd 还要 mount overlayfs、写 iptables、建 cgroup、管设备节点。这些操作对普通容器是被内核挡住的。
-- **代价**：嵌套 overlay 通常不可用，退回 `vfs`（每层全量复制，又慢又占盘）或 `fuse-overlayfs`。镜像缓存层也在这个临时 daemon 里，容器一删全部归零。
-- **好处**：每个 Job 一个干净的 daemon，镜像、容器、网络全隔离，不会互相踩。
-
-### 5.2 Docker-out-of-Docker（DooD）
-
-容器里只装 CLI，把宿主机的 socket 挂进去。
+容器里只装 CLI，把宿主机的 socket 挂进去。它是**宿主机 Docker 的 Unix 域套接字**，它是 Docker daemon 的入口；你把它挂载进容器，**容器里的 docker CLI 不是在调用容器内部的 docker，而是直接调用宿主机节点上的 dockerd（root 进程）**
 
 ```bash
 docker run -v /var/run/docker.sock:/var/run/docker.sock docker:cli docker ps
 ```
-
-这里起出来的容器是**宿主的兄弟**，不是子容器——这就是"sibling containers"的由来。
 
 **为什么这是安全隐患，拿 Jenkins 举例：**
 
 一个挂载了 `docker.sock` 的 Jenkins Agent，实际上是把这个节点的全部控制权暴露给了流水线脚本。而流水线脚本（Jenkinsfile）是由开发者提交到仓库里的：
 
 ```groovy
-// 一个"正常"的 Jenkinsfile，或者一个恶意 PR 里的 Jenkinsfile
-sh 'docker run --rm -v /:/host --privileged alpine chroot /host cat /root/.ssh/id_rsa'
+// 一个"正常"的 Jenkinsfile，或者一个恶意 PR 里的 Jenkinsfile，将启动容器的CLI命令直接发给宿主机的dockerd（具有root权限），将根目录挂载到容器，等于给容器敞开宿主机全部文件；只要能读就能偷凭证，只要能写就能留后门，拿下节点控制权。
 sh 'docker run --rm -v /:/host alpine chroot /host cat /var/lib/kubelet/kubeconfig'
 ```
+**补充**：与DOOD相对的是DinD策略，它是在容器内部再创建一个dockerd，自己管理镜像、容器、网桥、网络，而启动这个容器需要```--privileged```获取特权，例如：
+1. 创建 cgroup、设置资源限制  
+2. 创建 network namespace、网桥、iptables  
+劣势：  
+- 一旦发生容器逃逸，由于具有特权，攻击者可以直接控制宿主机
+- 多跑一个 dockerd 进程，额外占用 CPU、内存
 
-注意，这条命令**不需要 `--privileged` 就能执行**，因为在宿主机上 docker 是以 root 起容器的，你请求的 `/` 会被老老实实挂到容器里。拿到节点 root 之后：
-
-- 读走 SSH 私钥、kubelet kubeconfig、云厂商 metadata 里的临时凭证
-- 写 `/etc/cron.d/` 或者 systemd unit 做持久化
-- 从节点横向打内网、打镜像仓库，甚至推到生产集群
-
-**这不是理论风险**：任何能提 MR 的人、任何能改 `Jenkinsfile` 的人、任何能改构建脚本依赖的人，都自动获得了节点 root。挂了 socket 就等于把 root 权限授给了所有代码提交者。
-
-除了安全，还有运维代价：
-
-- 并发构建互相踩：`docker tag` 冲突、有人跑 `docker system prune -af` 把别人刚推的镜像删了
-- 构建产物持续堆在宿主机，磁盘打满没人认领
-- 节点上的 Docker 版本被一个团队的构建需求绑架
-
-那为什么还在用？因为**快**：不用起新 daemon，基础镜像的层可以跨构建复用。很多老 Jenkins 就是这么长出来的。
-
-### 5.3 特权容器到底给了什么
-
-```bash
-docker run --privileged ...
-```
-
-| 维度 | 默认 | `--privileged` |
-| --- | --- | --- |
-| Capabilities | 有限集合（`CAP_NET_BIND_SERVICE` 等十几个） | 全部 capability |
-| seccomp | 默认 profile 是黑名单，显式拒绝约 44 个 syscall，其余放行 | unconfined |
-| AppArmor / SELinux | 默认策略 | unconfined |
-| 设备访问 | 只映射少量 `/dev` 节点 | 全部宿主设备 |
-| `/proc`、`/sys` | 大部分只读或已屏蔽 | 可写 |
-| cgroup | 只读 | 可写 |
-
-结论：`--privileged` 不是"多给一点权限"，而是**把所有边界一次性拆掉**。所以"为了跑 DinD 加个 `--privileged`"，本质是把宿主机 root 交给了这层容器。CI 里这么写，等于把节点 root 交给了每一个能改 Dockerfile 的人。
-
-### 5.4 为什么 Jenkins 要 socket，Tekton 不要
-
-这是整篇文章里最容易被误读成"平台差异"的一点。真正的分界线不是 CI 系统，而是**谁在执行构建**。
-
-socket 是"客户端找 daemon"的产物。`docker` CLI 自己不会构建，它只是 API 客户端，必须找一个 daemon 替它干活。所以要不要 socket，取决于你敲的是哪条命令：
-
-| 命令 | 谁在执行构建 | 需要 docker.sock |
-| --- | --- | --- |
-| `docker build` | 宿主 dockerd 内嵌的 BuildKit | 要 |
-| `docker buildx build`（docker driver） | 同上 | 要 |
-| `docker buildx build`（docker-container driver） | buildx 先通过 dockerd 起一个 buildkitd 容器 | 要（起容器那一步） |
-| `docker buildx build --driver remote` | 远端 buildkitd | 不要 |
-| `buildctl` / `buildctl-daemonless.sh` | buildkitd 自己 | 不要 |
+### 5.2 构建镜像的权限安全
 
 Jenkins Agent 挂 socket 的原因不是"它是 Jenkins"，而是**流水线里写的是 `docker build`**：容器里的 CLI 找不到 dockerd，只能借宿主机的 socket。
 
@@ -193,84 +134,91 @@ Jenkins Agent 挂 socket 的原因不是"它是 Jenkins"，而是**流水线里�
 **Tekton + BuildKit 为什么不需要**：因为 buildkitd 自己就是那个干活的 daemon。
 
 ```text
-buildctl / buildx ──gRPC──> buildkitd ──> runc ──> 构建用临时容器
+buildctl(BuildKit 原生客户端) / buildx(Docker 封装的上层插件，包装了 buildctl 的能力) ──gRPC──> buildkitd(构建服务) ──> runc ──> 构建用临时容器
                                 ├──> snapshotter（落层）
                                 └──> content store / exporter
 ```
 
-它直接调 runc 起构建容器、用 snapshotter 记录层、把结果交给 exporter，全程不经过 dockerd，也就不存在"socket 入口"这回事。
+它直接调 runc 起构建容器、用 snapshotter 记录层、把结果交给 exporter，全程不经过 dockerd，也就不存在"socket 入口"这回事。。
 
-Tekton 只是提供了跑它的地方：每个 TaskRun 是一个 Pod，`buildctl-daemonless.sh` 在 Pod 里 fork 一个 buildkitd，buildctl 通过 buildkitd 自己的 unix socket 连它，构建完进程退出、Pod 销毁。
+**不需要 socket ≠ 不需要权限**。socket 交出去的是 daemon API，等价于节点 root；rootless buildkitd 交出去的是 Pod 内的 user namespace、`/dev/fuse`、unshare()，逃逸边界是 Pod 里的 uid 1000。
 
-**不需要 socket ≠ 不需要权限**。socket 交出去的是 daemon API，等价于节点 root；rootless buildkitd 交出去的是 Pod 内的 user namespace、`/dev/fuse`、unshare，逃逸边界是 Pod 里的 uid 1000。
+最容易被忽略的是第三种情况：**非 rootless 的 buildkitd 依然是特权容器**，和 DinD 一个量级，只是换了个进程名字。所以 daemonless 不是安全标签，**rootless 才是**。
 
-最容易被忽略的是第三种情况：**非 rootless 的 buildkitd 依然是特权容器**，和 DinD 一个量级，只是换了个进程名字。所以 daemonless 不是安全标签，**rootless 才是**。完整对照见 5.6。
+| 项目 | privileged DinD | rootless buildkitd |
+| --- | --- | --- |
+| 运行身份 | Pod 内真实 root | Pod 内 uid=1000，user ns 内映射为 root |
+| overlay 实现 | 内核原生 overlayfs | 内核原生 overlay（kernel ≥ 5.11）或 fuse-overlayfs 兜底 |
+| 需要 CAP_SYS_ADMIN | 需要 | 不需要 |
+| 逃逸上限 | 宿主机节点 root | 最多 Pod 权限，无法直接节点逃逸 |
+| 性能 | 快 | 略慢，fuse-overlayfs 下更明显 |
 
-还有一条对称风险：`buildx --driver kubernetes` 也不需要 socket，但需要 **kubeconfig**——那是集群 API 凭证，能用 RBAC 收窄，但绝不是"无凭证"。判断安全边界看的是**凭证能干什么**，不是它长什么样。
+### 5.3 tekton task中的镜像构建部分
+#### 回顾pod
+首先回顾一下一个pod中的容器有哪些是资源是共用的：  
+- **Network namespace**：网卡、Pod IP、端口、路由、iptables、socket。step1 监听端口，同 Pod 别的 step 可以通过 `localhost` 访问。
+- **IPC namespace**：共享内存、消息队列、信号量
+- **pause 容器**：上面两个 namespace 由 pause 持有，所有 step 容器加入 pause 的这两个 ns。
+- **存储卷（Volume）**：`emptyDir`、PVC、ConfigMap、Secret、Tekton Workspace。  ⚠️ 注意：卷是**分别挂载到每个容器各自独立的 mount namespace 里**，不是共享 mount ns；只是后端存储介质是同一份。   
 
-### 5.5 Rootless：daemonless 为什么安全
+哪些是每个容器独有的呢：  
+- **PID namespace**: 不同 PID ns 里看到的 PID 编号是独立的；一个 ns 里看不到另一个 ns 的进程列表。宿主机上一个真实进程 PID=12345，放到新 PID ns 里面可以变成 PID=1。(`unshare(CLONE_NEWPID)` / `clone(CLONE_NEWPID)` 创建新 PID namespace。)  
+- **Mount namespace**:  `unshare(CLONE_NEWNS)` 创建新 mount namespace。每个 mount ns 拥有一套独立的 `/` 根文件系统视图、独立的挂载点列表。
+- **User namespace**: 隔离用户 ID、组 ID 映射,典型 rootless buildkit：宿主机侧 uid=1000 → 在 user ns 里面映射成 uid=0（虚拟 root）。`unshare(CLONE_NEWUSER)` 创建 user namespace。然后向 `/proc/<pid>/uid_map`、`/proc/<pid>/gid_map` 写入映射规则。内核转换权限校验：  
+- 在 ns 内写文件、检查权限，用 ns 内的 uid；
+- 落到宿主机磁盘上，转换成外部真实 uid。
+>Tekton step 容器默认各自独立 user ns；buildkitd 还会在 step 容器内部再开一层 user ns，用来做 fuse-overlay。
 
-Daemonless 之所以安全，核心在于 rootless 本身。原理是一条命名空间链：
+#### Buildkit构建镜像
+```text
+kubelet 起 step-build 容器（runAsUser=1000 / seccomp=Unconfined / 挂 /dev/fuse）
+  └─ entrypoint: buildctl-daemonless.sh build --frontend dockerfile.v0 ...
+       ├─① 后台拉起 buildkitd（此时只是一个 uid=1000 的普通进程）
+       │    └─ rootless 初始化：进新 user ns（1000 → ns 内 0）→ 进新 mount ns
+       │       → 初始化 snapshotter → 监听 unix socket
+       ├─② 轮询 socket 就绪 → buildctl 走 gRPC 连上
+       ├─③ buildctl 发出 Dockerfile + context（--local .）→ frontend 编译成 LLB
+       ├─④ solver：拉基础镜像 → 解压进 snapshotter → 查 cache index 决定跳不跳
+       ├─⑤ 逐条执行 RUN（fork + chroot，不建 runc 沙箱）
+       │    └─ 每条结束：diff upper → 打 tar → 算 sha256 → 落 content store
+       ├─⑥ exporter：拼 manifest/config → 直连 Harbor 推 blob
+       └─⑦ 退出码返回脚本 → 杀掉 buildkitd → step 容器退出 → Tekton 收尾
+```
+
+**① buildkitd 以非 root 身份起来**。`buildctl-daemonless.sh` 是镜像里的包装脚本，职责就三件：起 `buildkitd`、等它的 socket、构建完杀掉它。关键是 `buildkitd` 以 uid 1000 启动时拿不到 `CAP_SYS_ADMIN`，**必须先把自己关进一个 user namespace**（镜像里的 `rootlesskit` 或内建 re-exec 负责这一步，`uid 1000` 在 ns 内映射为 `uid 0`），否则后面任何 `mount` 都会 `EACCES`。这一步成功与否，就是 5.5 里那些前置条件（userns 是否被禁、AppArmor 是否放行、seccomp 是否拦了 `unshare`）的落点。
+
+**② socket 就绪与客户端连接**。rootless 下 socket 在 `$XDG_RUNTIME_DIR/buildkit/buildkitd.sock`（通常是 `/run/user/1000/buildkit/buildkitd.sock`），不是 rootful 的 `/run/buildkit/buildkitd.sock`——手工调试时 `--addr` 连错是最常见的"连不上"。脚本会轮询到这个文件出现再执行 `buildctl`，所以 `failed to dial` 一般发生在"buildkitd 起来了但立刻退出"，去翻 daemonless 脚本转发的 daemon 日志。
+
+**③ frontend 解析**。`buildctl` 通过 gRPC 把 Dockerfile 与 `--local context=.` 指定的上下文一并交给 buildkitd；`dockerfile.v0` frontend 把它翻译成 LLB DAG。注意上下文是**由客户端读取并流式上传**的，`.dockerignore` 在客户端侧生效，因此大量无用文件会直接拖慢这一跳。
+
+**④ solver 求值与镜像拉取**。这一阶段全部发生在 buildkitd 进程内：
+- 拉基础镜像走**容器自己的网络命名空间**，即 Pod IP，不经过任何 daemon；私有 Harbor 的凭证读 `~/.docker/config.json`（rootless 下是 `/home/user/.docker/config.json`，不继承宿主 `docker login`）；
+- 拉下来的 layer 先解压成 snapshot：kernel ≥ 5.11 用 userns 内的内核 overlay，否则退回 fuse-overlayfs（这就是 `/dev/fuse` 的用途）；
+- 每个节点算 cache key 查 cache index，命中直接复用已有 snapshot，**命中时连进程都不会起**。
+
+**⑤ 执行一条 RUN（rootless 与 rootful 的最大差异）**。rootful 走 runc：新建 pid/mount ns、建 cgroup、起一个独立容器。rootless 下这条路代价太高（相当于把 5.3 讨论的创建容器特权又搬回来一层），所以官方写法是 `--oci-worker-no-process-sandbox`：
 
 ```text
-你的用户 (uid=1000)
-  └─ rootlesskit  →  新建 user namespace，ns 内 uid=0 映射到宿主的 uid=1000
-       └─ buildkitd  （ns 内是 root，宿主视角只是一个普通用户）
-            └─ runc  →  构建用的临时容器
+rootful：   buildkitd → runc → 新 pid+mount ns → chroot → exec 命令
+rootless：  buildkitd → fork（沿用 buildkitd 的 ns）→ chroot 到 merged → exec 命令
 ```
 
-所以构建容器里 `id` 显示 `uid=0(root)`，但在宿主机上它只是 uid 1000，**拿不到宿主 root**。真被逃逸，也只能动这个普通用户能碰的东西。
+执行体感上等价，隔离强度差一档：**RUN 之间不再有 pid/mount ns 边界**，上一条命令残留的进程、挂进来的 secret，下一条都看得见（5.5 已列为代价）。具体每条的流程仍是第四章那五步：叠 lowerdir → 空 upperdir → COW 写入 → diff 打包成 blob → 销毁可写层。cache mount 则挂在 snapshotter 管理的独立目录上，**不参与上层 diff**，所以永远进不了 content store。
 
-代价和前置条件必须说清楚：
+**⑥ exporter 推送**。`--output type=image,push=true` 时，buildkitd 在进程内组装 config / manifest list，然后**直接用 HTTP 把 blob 推到 Harbor**——同样不经过 dockerd。`--export-cache type=registry,mode=max` 是第二条独立的推送通道：把每一层（含中间层）的缓存元数据打成另一个镜像 tag 推上去，两者别混。
 
-- **存储**：普通用户不能在 user namespace 里 mount 内核 overlayfs，所以要用 `fuse-overlayfs` 或 native snapshotter，**必须有 `/dev/fuse`**。
-- **网络**：走 slirp4netns 之类的用户态转发，带宽和延迟都比 host 网络差，大依赖下载会明显变慢。
-- **关键 flag**：`--oci-worker-no-process-sandbox`。rootless 下再套一层 runc 的 process sandbox 需要额外权限，这个 flag 把它关掉——构建容器和 buildkitd 共享命名空间，隔离度降低，但**仍然不是 root**。
-- **内核开关**：`kernel.unprivileged_userns_clone=1`（Debian 系）、`user.max_user_namespaces > 0`。Ubuntu 24.04 起还有 AppArmor 对 unprivileged userns 的限制（`kernel.apparmor_restrict_unprivileged_userns`），这是最容易漏的一个坑。
+**⑦ 收尾**。`buildctl` 打印退出码 → daemonless 脚本杀掉 buildkitd → step 容器的 entrypoint 把退出码经由 Tekton 的 termination message 交回 kubelet → Pod 内下一个 step 启动或整个 TaskRun 判失败。**state 目录（`~/.local/share/buildkit`）随容器一起消失**，所以下一节说的 registry cache 不是优化项。
 
-`buildkitd.toml` 对应写法：
+三个由 rootless 派生的实操限制：
 
-```toml
-[worker.oci]
-  noProcessSandbox = true
-```
+| 你会想做的事 | rootless 下的结果 | 正确做法 |
+| --- | --- | --- |
+| `--output type=docker` / `--load` 导入本地镜像库 | 没有本地镜像库可导（那是 dockerd 的东西） | `push=true`，或 `type=oci` / `type=local` 落文件 |
+| 用 `docker images` 看构建结果 | step 里根本没装 docker CLI | `crane/regctl` 查远端 tag，或看 tracker 记录的 digest |
+| 构建中途 `docker exec` 进构建容器排查 | 构建容器不存在（没有 runc 容器，只有一个 fork 出来的进程） | `--progress=plain` 看日志，必要时临时去掉 `no-process-sandbox`（会失去 rootless 主体收益） |
 
-GitLab CI 里最省事的写法是用 `buildctl-daemonless.sh`，它会 fork 一个 buildkitd、构建完就退出：
 
-```yaml
-build-rootless:
-  image:
-    name: moby/buildkit:rootless
-    entrypoint: [""]          # 必须覆盖，否则 job 会跑成常驻 daemon 直到超时
-  variables:
-    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
-  script:
-    - buildctl-daemonless.sh build \
-        --frontend dockerfile.v0 \
-        --local context=. --local dockerfile=. \
-        --output type=image,name=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,push=true
-```
-
-注意：rootless 用的是容器内的 home 目录，**不继承宿主机的 `docker login`**，registry 认证要自己写 `~/.docker/config.json`。
-
-### 5.6 三种形态怎么选
-
-| 形态 | 谁在执行 | 拿到什么权限 | 逃逸边界 | 缓存 / 首次构建 | 典型场景 |
-| --- | --- | --- | --- | --- | --- |
-| DooD | 宿主 dockerd | daemon API（socket） | **节点 root** | 快，宿主层天然复用 | 单机开发、老 Jenkins |
-| DinD | 容器内的 dockerd | 全部 capability + 全部设备（`--privileged`） | **节点 root** | 慢（vfs、缓存随容器销毁） | GitLab Runner `dind` service |
-| Daemonless（rootless） | 独立 buildkitd | Pod 内 userns、`/dev/fuse` | Pod 内 uid 1000 | 快，但要自己配 cache mount / registry cache | 生产 K8s、多租户 CI |
-| Daemonless（非 rootless） | 独立 buildkitd | 全部 capability + 设备 | **节点 root** | 快 | 不建议，等价 DinD |
-
-表里看不出来的三件事：
-
-- **改造成本**：DooD 挂个 volume 就完事；daemonless 要准备镜像、securityContext、state 目录。
-- **并发与多租户**：DooD 的 tag 冲突、`prune` 互删、磁盘无人认领；daemonless 是进程级隔离，配合 NetworkPolicy 可以放进多租户集群。
-- **排障难度**：DooD 老工具链全兼容；daemonless 最常见的是卡在 rootless 前置条件（userns、`/dev/fuse`、AppArmor）。
-
-一句话选型：**新部署直接选 daemonless + rootless；DooD 只留给内网单机和搬不动的老流水线。**
-
-## 六、生产环境的五个高频场景
+## 六、生产环境种其余五个高频场景
 
 ### 6.1 CI/CD 远程缓存共享
 
