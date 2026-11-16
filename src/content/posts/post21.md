@@ -10,6 +10,7 @@ lang: '中文'
 ---
 
 
+
 ## cgroup
 ### 定义
 cgroup（Control Groups，控制组）是 Linux 内核提供的一种**对进程组进行资源限制、统计和控制**的机制。
@@ -22,43 +23,63 @@ cgroup（Control Groups，控制组）是 Linux 内核提供的一种**对进程
 3. **资源统计（accounting）**：记录进程组实际用了多少资源，用于监控和计费
 4. **资源隔离（isolation）**：把一组进程与其他组隔开，防止互相干扰
 
-### 子系统（控制器）v1 叫 subsystem，v2 叫 controller）
-cgroup 按资源类型分成多个子系统：
-| 子系统 | 管什么 |
-| --- | --- |
-| cpu | CPU 时间配额与权重（CFS 调度） |
-| memory | 内存使用上限、回收、统计 |
-| cpuset | 把进程绑定到特定的 CPU 核心 / NUMA 节点 |
-| blkio | 块设备（磁盘）IO 带宽限制 |
-| pids | 限制组内能创建的进程/线程总数 |
-| devices | 控制能否访问设备文件 |
-| freezer | 挂起 / 恢复一组进程 |
-| net_cls / net_prio | 给网络包打标签，配合 tc 做流量控制 |
+### 控制器（v1 叫 subsystem，v2 叫 controller）
 
-### cgroup v1 与 v2
-- **v1**（内核 2.6.24 ~ 4.x）：每个子系统各挂一棵独立的层级树（`/sys/fs/cgroup/cpu`、`/sys/fs/cgroup/memory`...），一个进程可以同时属于多棵树的节点。管理混乱，尤其 memory 和 blkio 耦合时容易出问题
-- **v2**（内核 4.15 开始）：所有控制器统一挂载到**一棵树**（`/sys/fs/cgroup`），进程只属于一个 cgroup，通过 `cgroup.subtree_control` 在子节点逐个启用控制器，结构清晰。**Docker 20.10+、containerd 1.5+、systemd 247+ 默认走 v2**
+cgroup v2 支持的控制器（`cat /sys/fs/cgroup/cgroup.controllers` 看当前内核实际支持哪些）：
+
+| 控制器 | 管什么 |
+| --- | --- |
+| cpu | CPU 时间配额（`cpu.max`）与权重（`cpu.weight`） |
+| cpuset | 把进程绑定到特定 CPU 核心 / NUMA 节点 |
+| memory | 内存上限、回收、统计 |
+| io | 块设备 IO 带宽 / IOPS 限制（v1 的 blkio 改名而来） |
+| pids | 限制组内能创建的进程/线程总数 |
+| hugetlb | 大页内存用量 |
+| rdma | RDMA 资源用量 |
+| misc | 其他杂项资源（如 `misc.max`） |
+
+**两个 v1 有、v2 没有的坑**：`devices`（设备访问控制）在 v2 里改由 **eBPF 程序**实现，运行时加 `--device` 时通过 BPF 挂过滤器，所以 v2 机器上根本没有 `/sys/fs/cgroup/.../devices.allow`；`net_cls` / `net_prio` 已被移除，给网络包打标签改用 **tc + eBPF**。
+
+### v2 的结构：一棵树 + 三条规则
+
+- **单层级树**：所有控制器统一挂在 `/sys/fs/cgroup`（unified hierarchy），一个进程**只属于一个 cgroup 节点**，不再像 v1 那样分散在多棵树里
+- **控制器逐层分发**：父节点通过 `cgroup.subtree_control` 决定往下开放哪些控制器，子节点才会出现 `cpu.max`、`memory.max`——"子组里没有 memory.max"就是这里没开
+- **no internal process**：一个 cgroup **要么放进程，要么当中间层**，自己直接持有进程就不能再往下分发控制器。所以真实层级总是长这样：
+
+```text
+/sys/fs/cgroup
+└── system.slice              ← 中间层：只开 subtree_control，不放进程
+    └── docker-<id>.scope     ← 叶子层：进程在这儿，限制也写在这儿
+```
+
+> 版本说明：v2 从内核 4.15 起提供，宿主机是否走 unified 由发行版 / systemd（247+ 默认 unified）决定；Docker 20.10+、containerd 1.5+ 只是**支持** v2，实际用哪套跟着宿主机走，不是 Docker 选的。
 
 ### 怎么用（实践，v2）
-cgroup 的接口就是一组虚拟文件系统：
+cgroup 的接口就是一组虚拟文件系统，**顺序不能反：先给父组开控制器，再建子组**：
 ```bash
-# 1. 创建一个 cgroup 目录
-sudo mkdir /sys/fs/cgroup/demo
+# 1. 看内核支持哪些控制器，以及根组已经往下分发了哪些
+cat /sys/fs/cgroup/cgroup.controllers
+cat /sys/fs/cgroup/cgroup.subtree_control   # systemd 机器上通常已启用 cpu/memory
 
-# 2. 给根组启用 cpu、memory 控制器（子组才有这些文件可用）
+# 2. 给根组启用 cpu、memory（先开，再建子目录）
 sudo bash -c 'echo "+cpu +memory" > /sys/fs/cgroup/cgroup.subtree_control'
 
-# 3. 限制 CPU：每 100ms 周期最多用 50ms → 半核
+# 3. 建子组：此时它下面才会出现 cpu.max、memory.max 等文件
+sudo mkdir /sys/fs/cgroup/demo
+
+# 4. 限制 CPU：每 100ms 周期最多用 50ms → 半核
 sudo bash -c 'echo "50000 100000" > /sys/fs/cgroup/demo/cpu.max'
 
-# 4. 限制内存最多 100MB
+# 5. 限制内存最多 100MB
 sudo bash -c 'echo 104857600 > /sys/fs/cgroup/demo/memory.max'
 
-# 5. 把当前 shell 移进这个 cgroup（它创建的子进程全部受控）
+# 6. 把当前 shell 移进这个 cgroup（它创建的子进程全部受控）
 echo $$ | sudo tee /sys/fs/cgroup/demo/cgroup.procs
 ```
 
 之后在这个 shell 里跑 `stress --vm 1 --vm-bytes 200M`，超过 100MB 的部分会被内核直接 OOM 杀掉（对应 docker 里看到的 OOMKilled）。
+
+注意 `demo` 里已经放了进程，**它就不能再当下层组的父节点**（no internal process）。要在它下面继续分层，得再插一层：进程放 `demo/leaf`，`demo` 只负责开 `subtree_control`。
 
 验证限制是否生效，直接读回文件：
 
@@ -86,11 +107,14 @@ cat /sys/fs/cgroup/system.slice/docker-<容器ID>.scope/cpu.max
 
 
 ## OCI
-OCI全称 Open Container Initiative/开放容器协议，隶属于linux基金会，主要目的是制定容器技术的通用标准。  
-OCI对容器runtime的标准主要是指定容器运行状态和runtime需要提供的命令  
+OCI 全称 Open Container Initiative（开放容器协议），目的是把容器技术里各家各实现的部分沉淀成通用标准，目前有三份规范：**runtime-spec**（怎么跑容器）、**image-spec**（镜像长什么样）、**distribution-spec**（镜像怎么分发）。
+
+**runtime-spec 只规定两件事**：
+1. **文件系统包（bundle）**：一个目录，里面必须有 `config.json`（容器怎么跑）和 `rootfs/`（容器根文件系统）——runc 的输入就是这个目录
+2. **生命周期操作**：`create` / `start` / `state` / `kill` / `delete`。任何 runtime 只要实现这几个命令，就能被 containerd、podman 等上层无差别调用，这正是"运行时可插拔"的基础
+
 下面是容器状态转换图：
 ![容器状态转换图](./images/p1.avif)  
-
 
 ## docker容器结构剖析
 `docker inspect` 揭示了容器在宿主机上的真实结构：容器本质上既是宿主机上的一个进程，也是宿主机上的一组目录挂载。以下从守护进程的职责、containerd 与 containerd-shim 的分工、以及 Overlay2 存储驱动三个层面进行剖析。  
@@ -111,7 +135,7 @@ Docker Daemon (dockerd) → containerd → containerd-shim → runC → 容器�
 ### 二、containerd 与 containerd-shim
 - **containerd 的定位**：作为守护进程与运行时之间的中间层，containerd 负责镜像管理、容器生命周期编排，并通过拉起 `containerd-shim` 来实际创建容器。
 - **containerd-shim 的作用**：containerd 启动 shim 进程，由 shim 调用 runC（OCI 运行时）创建容器并初始化命名空间；runC 完成创建后即退出，容器的后续生命周期改由 shim 维持。这样即便 containerd 重启，已运行的容器也不受影响。
-- **shim 父进程为 1 的原因**：shim 通过类似 `setsid` 的机制脱离原父进程，直接被宿主机 init（PID 1）收养。目的是利用 init 回收僵尸进程的特性——shim 产生的僵尸由 init 统一回收，从而**解放 containerd**，避免其频繁调用 `waitpid`。
+- **shim 为什么会被 PID 1 收养**：containerd 拉起 shim 后，shim 通过类似 `setsid` 的机制脱离原父进程，被宿主机 init 收养。**主因是让容器生命周期与 containerd 解耦**（即上一条：containerd 重启不杀容器）；僵尸回收是附带收益——shim 产生的僵尸由 init 统一收掉，containerd 不必频繁 `waitpid`。两层收益都有，但别把主次记反。
 
 ### 三、Overlay2 存储驱动与文件系统原理
 
@@ -131,7 +155,6 @@ Docker Daemon (dockerd) → containerd → containerd-shim → runC → 容器�
 **补充要点**：
 - `LowerDir` 是多容器共享的：同一镜像启动多个容器，只读层共用，只有 `UpperDir` 各自独立，这正是 Docker 镜像"分层复用、写时复制（CoW）"节省磁盘的原理。
 - 删除容器只会清掉其 `UpperDir` 与 `MergedDir`，`LowerDir`（镜像层）不受影响，除非显式删除镜像。
-
 
 ## 容器运行时
 用于管理容器运行时的诸多软件都可以称作容器运行时，事实上，dockerd,containerd,runc都是容器运行时。但是为了区分，所以这样叫了。前二者也可以称作high-level的容器运行时，而runc是low-level的容器运行时。  
@@ -218,85 +241,18 @@ kubelet → containerd（CRI）→ shim → runc → 容器
 | 场景 | 以前（docker 时代） | 现在（containerd 时代） |
 | --- | --- | --- |
 | 看容器列表 | `docker ps` | `crictl ps` / `nerdctl ps` |
-| 看镜像 | `docker images` | `crictl images` / `ctr images` |
+| 看镜像 | `docker images` | `crictl images` / `ctr -n k8s.io images` |
 | 拉镜像 | `docker pull` | `crictl pull` |
 | 进容器 | `docker exec -it` | `crictl exec -it` / `crictl attach` |
 | 看日志 | `docker logs` | `crictl logs` |
 | 兼容 docker CLI | — | `nerdctl`（命令几乎 1:1） |
 
-**5. 构建镜像不再依赖 docker daemon**：CI/CD 里从 `docker build` 转向 BuildKit、`nerdctl build` 等，集群节点也不再需要挂载 `docker.sock`（以前的 dind 方案逐步淘汰）。、
+**两个必踩的坑**：
+- `ctr` 默认连的是 `default` namespace，而 k8s 的镜像在 `k8s.io` 里——不加 `-n k8s.io` 会"什么都看不到"，第一次排查极易误判成镜像丢了：`ctr -n k8s.io images ls`
+- 迁移后 docker 与 containerd 的镜像/容器存储**互不共享**：节点上 `docker images` 里有，不代表 k8s 能直接调度，反向也一样。别再靠 docker 命令"预热镜像"，用 `crictl pull` 或镜像仓库直拉
+
+**5. 构建镜像不再依赖 docker daemon**：CI/CD 里从 `docker build` 转向 BuildKit、`nerdctl build` 等，集群节点也不再需要挂载 `docker.sock`（以前的 dind 方案逐步淘汰）。
 **6. 对应用层几乎零感知**：业务照常打包成镜像、照常跑容器，`kubectl` 命令完全不变。变的只是底层运行时和运维排查手段。
-
-
-## 如何查看容器内cpu使用率
-![top命令输出](./images/p3.avif)  
-us:用户态占用CPU百分比
-sy:内核态占用CPU百分比
-ni:改过优先级的用户进程
-id:空闲CPU百分比
-wa:IO等待占用CPU百分比
-hi:硬中断占用CPU百分比
-si:软中断占用CPU百分比  
-- load average: 1分钟、5分钟、15分钟的平均负载(在某段时间平均活跃的进程数，包含系统处于可运行状态以及不可中断状态的平均进程数)  
-- cpu利用率：用户进程占用cpu时间（包括us和sy）/cpu经历的这段时间总和。进程对cpu利用率100%代表用满一颗cpu，200%则用满2颗
-**top命令为什么在容器内无法查看容器cpu使用情况**： 
-top的cpu数据是从 /proc/stat 读的，而 /proc/stat 记录的是整个宿主机的全局累计值，PID namespace 隔离不了它。  
-```bash
-# CPU% 那一列就是容器整体使用率,数据源来自cgroup
-docker stats --no-stream <容器名>
-#输出内容很多，包括进程pid,名字，运行状态，优先级等等。utime代表用户态部分在linux调度中获取cpu的ticks,stime则是内核态。
-#ticks是linux系统中的时间单位，表示一次中断的周期，所消耗时间由HZ决定，默认100，即100分之1秒
-#t秒为时间间隔，则某个进程cpu使用比=((u2-u1)+(s2-s1))/(HZ*t)
-cat /proc/19838/stat
-```
-### 补充
-#### 常见进程的运行状态
-进程状态由内核记录，可通过 `ps -o stat,pid,cmd` 或 `/proc/<pid>/stat` 第 3 个字段查看：
-| 状态 | 含义 | 能否被打断 | 典型场景 |
-| --- | --- | --- | --- |
-| R（Running） | 正在运行或在运行队列中等待 CPU | — | 正常计算任务 |
-| S（Sleeping） | 可中断睡眠，等待某事件 | ✅ 可被信号唤醒 | 等 IO、等锁、sleep |
-| D（Uninterruptible） | 不可中断睡眠，等 IO 完成 | ❌ kill -9 也没用 | 磁盘/NFS 读写卡住 |
-| T（Stopped） | 停止 | 可继续 | Ctrl+Z（SIGTSTP） |
-| Z（Zombie） | 僵尸：已退出但父进程没 wait 收尸 | — | 父进程没处理 SIGCHLD |
-| I（Idle） | 内核空闲线程 | — | 不算入负载 |
-**STAT 列是"主状态 + 修饰符"的复合**：`ps` 里的 STAT 用大写字母表示主状态（上表），后面可跟小写修饰符：
-| 修饰符 | 含义 |
-| --- | --- |
-| s | 会话首领（由 `setsid()` 创建，脱离原会话） |
-| l | 多线程 |
-| + | 前台进程 |
-| < | 高优先级（nice < 0） |
-| N | 低优先级（nice > 0） |
-所以 `Ss` = S（睡眠）+ s（会话首领）。**容器里的 PID 1 进程在宿主机 `ps` 里通常就是 `Ss`**——runc/shim 用类似 `setsid` 的机制让容器 init 成为会话首领，正好呼应前面 OCI 部分"会话由首领经 setsid 创建"的内容。
-#### 平均负载和 CPU 利用率相关问题
-
-**平均负载（load average）**：1/5/15 分钟"活跃任务数"的平均（R + D），Linux 特地把不可中断状态也算进去（为了暴露 IO 阻塞）。
-**CPU 利用率**：CPU 在统计周期内真正干活的时间占比（us+sy 等），0~100%（N 核上限 100%×N）。
-两者不是一回事，最直观的区别：
-
-| 对比维度 | 平均负载 | CPU 利用率 |
-| --- | --- | --- |
-| 统计对象 | 任务数（排队的有几个） | CPU 忙不忙（时间占比） |
-| 单位 | 个数（可以是小数/几十） | 百分比 |
-| 数据源 | 运行队列长度 + D 状态数 | /proc/stat 的累计时间差值 |
-| 类比 | 餐厅排队人数 | 厨房开火率 |
-
-**经典判断组合**：
-
-| 现象 | 结论 |
-| --- | --- |
-| load 高 + CPU 忙（us/sy 高） | CPU 瓶颈，扩容/优化 |
-| load 高 + CPU 闲（id 高）+ wa 高 | 磁盘 IO 瓶颈（D 状态在等真实 IO，iowait 能看到） |
-| load 高 + CPU 闲（id 高）+ wa 低 | 卡在不可中断状态（NFS 失联/内核锁），最麻烦 |
-| load 低 + CPU 高 | 任务少但都在跑，正常 |
-
-**load 和核数的关系**：
-
-- 经验上：load ≈ 核数 表示"刚好用满"（8 核 load 8），大于核数说明有排队
-- 但要小心：D 状态进程会让 load 虚高——8 核机器 load 20 但 CPU 全闲，很可能是 IO 卡死而不是真忙
-- 判断负载健康要用 `top`/`uptime` 结合 CPU%、D 进程数一起看，单看 load 会误判
-
 
 ## 容器安全
 
@@ -324,7 +280,7 @@ cat /proc/19838/stat
 （但只对 ns 内的对象生效，出了 ns 一点权力都没有）
 ```
 
-映射规则写在 `/proc/<pid>/uid_map`（格式：`ns内ID 宿主ID 长度`）。rootless 容器、rootless BuildKit 全靠它——ns 内是 root，逃逸上限被钉死在宿主那个普通 uid 上。代价是功能缺口（不能监听1–1023这些"特权端口"、部分内核文件系统挂不上、chown 受限），所以 **Docker 默认不开**，**K8s 也要显式开**（k8s 1.30 起 默认开启，是否生效取决于运行时和内核）
+映射规则写在 `/proc/<pid>/uid_map`（格式：`ns内ID 宿主ID 长度`）。rootless 容器、rootless BuildKit 全靠它——ns 内是 root，逃逸上限被钉死在宿主那个普通 uid 上。代价是功能缺口（不能监听1–1023这些"特权端口"、部分内核文件系统挂不上、chown 受限），所以 **Docker 默认不开**，**k8s 也要显式开**：`UserNamespacesSupport` 在 1.30 已 GA，但 Pod 默认仍是 `hostUsers: true`，必须写 `hostUsers: false`，且内核与运行时都支持才真正生效
 
 ### 能力模型：容器里的 root 不是宿主机的 root
 
@@ -487,6 +443,39 @@ capability 按**操作能力**授权（mount、chown、改内核参数），secc
 | `/proc`、`/sys`、`/dev` | ✅ | 伪文件系统，不受 rootfs 只读约束；`/proc/sys` 的写入仍受 capability 管 |
 | tmpfs（`emptyDir.medium: Memory` 或 `--tmpfs`） | ✅ | 内存盘，容器重启即清空 |
 
+**打开前，先查应用往哪写**（下面几类是最常见的翻车点）：
+
+| 写入位置 | 典型软件 | 处理方式 |
+| --- | --- | --- |
+| `/tmp` | JVM（`java.io.tmpdir`）、Python 临时文件、解压器 | 挂 emptyDir / tmpfs |
+| `/var/cache`、`/run` | nginx（`/var/cache/nginx`、`nginx.pid`）、PHP-FPM、老 Tomcat | 挂 emptyDir |
+| `/var/log` | 应用内部写文件日志 | 改 stdout（12-factor），或挂 emptyDir |
+| `$HOME` | 非 root 下工具写的 `~/.cache`、`~/.config` | 设 `HOME=/tmp` |
+
+标准形态是「根只读 + 按需开洞」：
+
+```yaml
+securityContext:
+  readOnlyRootFilesystem: true
+volumeMounts:
+  - { name: tmp,   mountPath: /tmp }
+  - { name: cache, mountPath: /var/cache/nginx }
+volumes:
+  - { name: tmp,   emptyDir: {} }
+  - { name: cache, emptyDir: {} }
+```
+
+验证只需一行：
+
+```bash
+kubectl exec -it <pod> -- sh -c 'touch /t && echo writable || echo readonly'
+# touch: /t: Read-only file system
+```
+
+**它挡什么、不挡什么**：能拦住写木马、改 `/bin/sh`、覆盖 `ld.so.preload`、改 `/etc/passwd`；拦不住往可写卷里落 webshell，也拦不住动 `/proc/sys`——后者归 capability 管。所以它和 `runAsNonRoot`、`drop: ALL`、`seccomp` 是**并联**的四道锁，互不替代。
+
+**不适用的场景**：构建类 Pod（rootless BuildKit / Kaniko 要写 rootfs 与 state）、启动时往 rootfs 写 pid 文件或 `sed -i` 改配置的老应用、需要原地自更新二进制的 agent。
+
 **为什么k8s并没有将其选择为默认打开**：
 - 第一，大部分研发人员在日常工作中对于readOnlyRootFilesystem都并不太会去考虑，并且以往有大部分老业务都没有开启这个功能，如果默认开启，而大部分业务pod又没有对于需要进行写的文件进行对应挂载，则会出现大规模报错。
 - 还有，对于临时构建镜像的容器，他们是需要对rootfs进行写操作的，比如需要将构建过程中改变的文件写到upperdir，后续与lowerdir进行diff.
@@ -500,7 +489,7 @@ capability 按**操作能力**授权（mount、chown、改内核参数），secc
 | `runAsNonRoot: true` | 必开 | 用 `runAsUser: 1000` 代替 | 前者是断言，后者是赋值 |
 | `capabilities.drop: [ALL]` | 必开 | 必开 | rootless 下本来也没有 cap |
 | `allowPrivilegeEscalation: false` | 必开 | 必开 | 置 `no_new_privs`，无副作用 |
-| `readOnlyRootFilesystem: true` | 建议开 | **不开** | 构建要写 rootfs / state |
+| `readOnlyRootFilesystem: true` | 推荐开（默认开） | **不开** | 构建要写 rootfs / state |
 | `seccompProfile` | `RuntimeDefault` | `Unconfined` | rootless 需要 `unshare` |
 | `privileged: true` | 永不 | 仅 DinD 需要，不推荐 | 等价于交出节点 root |
 
