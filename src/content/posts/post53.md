@@ -172,7 +172,7 @@ buildctl(BuildKit 原生客户端) / buildx(Docker 封装的上层插件，包�
 #### Buildkit构建镜像
 ```text
 kubelet 起 step-build 容器（runAsUser=1000 / seccomp=Unconfined / 挂 /dev/fuse）
-  └─ entrypoint: buildctl-daemonless.sh build --frontend dockerfile.v0 ...
+  └─ entrypoint（容器启动时，最先执行的主程序）: buildctl-daemonless.sh build --frontend dockerfile.v0 ...
        ├─① 后台拉起 buildkitd（此时只是一个 uid=1000 的普通进程）
        │    └─ rootless 初始化：进新 user ns（1000 → ns 内 0）→ 进新 mount ns
        │       → 初始化 snapshotter → 监听 unix socket
@@ -185,7 +185,7 @@ kubelet 起 step-build 容器（runAsUser=1000 / seccomp=Unconfined / 挂 /dev/f
        └─⑦ 退出码返回脚本 → 杀掉 buildkitd → step 容器退出 → Tekton 收尾
 ```
 
-**① buildkitd 以非 root 身份起来**。`buildctl-daemonless.sh` 是镜像里的包装脚本，职责就三件：起 `buildkitd`、等它的 socket、构建完杀掉它。关键是 `buildkitd` 以 uid 1000 启动时拿不到 `CAP_SYS_ADMIN`，**必须先把自己关进一个 user namespace**（镜像里的 `rootlesskit` 或内建 re-exec 负责这一步，`uid 1000` 在 ns 内映射为 `uid 0`），否则后面任何 `mount` 都会 `EACCES`。这一步成功与否，就是 5.5 里那些前置条件（userns 是否被禁、AppArmor 是否放行、seccomp 是否拦了 `unshare`）的落点。
+**① buildkitd 以非 root 身份起来**。`buildctl-daemonless.sh` 是镜像里的包装脚本，职责就三件：起 `buildkitd`、等它的 socket、构建完杀掉它。关键是 `buildkitd` 以 uid 1000 启动时拿不到 `CAP_SYS_ADMIN`，**必须先把自己关进一个 user namespace**（`uid 1000` 在 ns 内映射为 `uid 0`），这一步成功与否的前置条件（userns 是否被禁、AppArmor 是否放行、seccomp 是否拦了 `unshare`）的落点。
 
 **② socket 就绪与客户端连接**。rootless 下 socket 在 `$XDG_RUNTIME_DIR/buildkit/buildkitd.sock`（通常是 `/run/user/1000/buildkit/buildkitd.sock`），不是 rootful 的 `/run/buildkit/buildkitd.sock`——手工调试时 `--addr` 连错是最常见的"连不上"。脚本会轮询到这个文件出现再执行 `buildctl`，所以 `failed to dial` 一般发生在"buildkitd 起来了但立刻退出"，去翻 daemonless 脚本转发的 daemon 日志。
 

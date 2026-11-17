@@ -23,7 +23,7 @@ cgroup（Control Groups，控制组）是 Linux 内核提供的一种**对进程
 3. **资源统计（accounting）**：记录进程组实际用了多少资源，用于监控和计费
 4. **资源隔离（isolation）**：把一组进程与其他组隔开，防止互相干扰
 
-### 控制器（v1 叫 subsystem，v2 叫 controller）
+### 控制器
 
 cgroup v2 支持的控制器（`cat /sys/fs/cgroup/cgroup.controllers` 看当前内核实际支持哪些）：
 
@@ -306,6 +306,39 @@ docker container run -it --rm --cap-add NET_ADMIN --name test test_cap:v1.0 sh
 
 非 root 砍掉的是身份；`drop: ["ALL"]` 砍掉的是权力。业务容器两者都砍；特殊情况只保留身份。
 
+### root 的权限到底从哪来，边界在哪
+
+内核做权限判定时**从不看"你叫什么程序"，只看进程凭据**。每次系统调用进来，内核拿三样东西做判定：
+
+```text
+cred（uid/gid + capability 位图）
+  × LSM 标签（AppArmor profile / SELinux type）—— 允许碰哪些对象
+  × seccomp 规则 —— 允许进哪些系统调用入口
+```
+
+**root 权限的三个来源**，本质都是"改进程凭据"这一个动作：
+
+1. **内核启动时直接赋**：PID 1（init/systemd）的进程凭据由内核创建时写死 uid=0 + 全部 cap，系统上所有进程都是从它 fork 继承来的——这就是开机即 root 的链条；
+2. **SUID/SGID**：exec 一个属主为 root 的 SUID 文件（如 `/usr/bin/passwd`），——这是普通用户借道 root 的合法入口；
+3. **显式调用**：`setuid(2)`、`capset(2)`、写 `/proc/self/uid_map`——但前提是当前进程凭据有相应权限，**权限不能无中生有，只能被转移或缩小**。
+
+capability——**"root"不再是一个开关，而是"恰好持有全部 cap 的进程"**。所以 `bounding set` 降到空之后，uid 还是 0 却连读别人文件都不行（缺 `DAC_OVERRIDE`）：身份还在，权力没了。
+
+**权限边界：root 也越不过的四道墙**
+
+| 边界 | 管什么 | 容器 root 的实际表现 |
+| --- | --- | --- |
+| namespace | 能看见什么 | 没共享 host net ns 就动不了宿主 iptables，出了 mnt ns 挂载不生效 |
+| capability bounding set | 能做什么动作 | 缺 `CAP_SYS_ADMIN` 连 `mount` 都发起不了 |
+| LSM（AppArmor/SELinux） | 能碰哪些对象 | profile 写死 `/etc/shadow` 不可读，uid=0 照样被拒 |
+| seccomp | 能进哪些 syscall | 白名单外的入口直接 EPERM，跟你有没有 cap 无关 |
+
+所以容器 root 的真实权限是一个**交集**：
+
+```text
+实际权限 = uid 0 ∩ bounding set ∩ seccomp 白名单 ∩ LSM 策略 ∩ namespace 可见范围
+```
+
 ### 怎么选：哪些用非 root，哪些用 root
 
 判断口诀：**先问「这个进程要操作谁的文件」**。只碰自己的 → 非 root；必须碰节点上别人的 → 才考虑 root。
@@ -425,6 +458,32 @@ capability 按**操作能力**授权（mount、chown、改内核参数），secc
 | `Unconfined` | 完全不过滤 | 只给构建类 Pod（rootless BuildKit 必须，见后文） |
 | `RuntimeDefault` | seccomp默认值，docker / containerd 自带白名单，放行常用 syscall | **业务 Pod 的基线，且要显式写出来** |
 | `Localhost` | 自写 JSON 白名单 | 只对高敏感负载（跑不可信代码的沙箱）值得投入 |
+
+### AppArmor：管「能碰哪些对象」
+
+capability 和 seccomp 都是围绕**进程**做文章（能做什么动作、能进哪个内核入口），但没人管"这个进程允许读哪些文件、连哪些端口"——这是 LSM（Linux Security Modules）的活。内核在每次文件/网络操作前回调 LSM，由加载的策略判定放行与否，**uid=0 也照样被拦**。Ubuntu/Debian 系默认启用的实现就是 AppArmor。
+
+**核心模型：按路径给二进制画圈**。一个 profile 就是挂到某个可执行文件上的白名单，描述它能碰哪些路径、开哪些网络、用哪些 capability：
+
+```text
+#include <tunables/global>
+/profile-name flags=(attach_disconnected, mode=enforce) {
+  #include <abstractions/base>
+  /etc/nginx/nginx.conf   r,          # 只读这个配置
+  /var/log/nginx/*        rw,         # 日志可读写
+  /var/cache/nginx/**     rw,         # 缓存目录
+  /etc/shadow             r,          # ← 没这行，就算 uid=0 也读不了
+  network inet stream,                # 只允许 TCP 连接
+}
+```
+
+三种模式：`enforce` 拦截并审计、`complain` 只记日志不拦（写 profile 时先跑这个收集真实访问）、`unconfined` 不受管。
+
+**生产上你其实一直在用它**——containerd（现在 K8s 主流运行时）：自带的默认 profile 名叫 `containerd-default`，作用思路和当年 `docker-default` 几乎一样：禁止一批危险操作（如挂载宿主设备、改 AppArmor 自身状态）。
+
+选型一句话：**容器场景 AppArmor 是性价比之选**（一条路径 profile 就挡住敏感路径和非白名单端口）；它与 capability/seccomp **并联不重叠**——capability 管动作、seccomp 管入口、LSM 管对象。
+
+**简单说下 SELinux**：另一大 LSM 实现，RHEL/CentOS 系默认启用。区别在策略模型——AppArmor 按**路径**画圈，SELinux 按**标签**做类型强制（进程是 `httpd_t`、文件是 `httpd_sys_content_t`，策略只写"谁能碰谁"，不管具体路径），粒度更细（能管端口、IPC、协议），代价是要给全系统文件打标、调错就全线拒绝，上手成本高得多。容器生态里它是 OpenShift/CRI-O 的默认路径。要满足合规/等保或跑多租户不可信代码才值得上；一般业务容器上AppArmor 
 
 ### readOnlyRootFilesystem
 
