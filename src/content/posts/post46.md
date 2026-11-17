@@ -290,12 +290,6 @@ Git push ──Webhook──→ EventListener（收到事件）
                      自动创建 PipelineRun ──→ 流水线开跑
 ```
 
-### CLI与Dashboard
-
-**tkn** 是 Tekton 官方 CLI，覆盖创建/管理 Task、触发 Pipeline、跟踪日志、与集群内 Tekton 交互等日常操作。但生产建议是：**优先用 kubectl 管理 Tekton 资源**——因为 Task/Pipeline 本质就是 CRD，统一走 kubectl 意味着资源配置管理、跨环境迁移、声明式维护与业务资源同一套范式；tkn 的价值在交互式场景（`tkn pipelinerun logs -f` 跟日志确实比 kubectl 顺手），两者不冲突。
-
-**Tekton Dashboard** 提供图形化界面：可视化查看 Task/Pipeline 配置、实时监控构建状态。对刚接触 Tekton 的团队，Dashboard 能显著降低学习曲线——排障时在页面上点开每个 Task 的状态和日志，比命令行翻 CR 直观得多；但它同样是可选组件，不影响核心链路。
-
 ## Tekton工作模式
 
 资源分工和编排语义都清楚了，这一节看 Tekton 最值得记住的设计哲学——**为什么它是"模板 + 参数注入"而不是"每个项目一条流水线"**。
