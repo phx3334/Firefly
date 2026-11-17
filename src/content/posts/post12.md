@@ -173,7 +173,7 @@ int main()
 
 ### overlayfs 与 fuse-overlayfs 的区别
 
-**两者是同一套模型的两种实现**，不是两种模型：lower / upper / work / merged 四要素、CoW、白障全都一样，唯一区别是**「合并」这个动作在内核态还是用户态执行**。
+**两者是同一套模型的两种实现**，不是两种模型：lower / upper / work / merged 四要素、CoW、白障全都一样，唯一区别是「合并」这个动作在内核态还是用户态执行。
 
 | 对比维度 | overlayfs（内核） | fuse-overlayfs（用户态） |
 | --- | --- | --- |
