@@ -9,6 +9,8 @@ draft: false
 lang: '中文'
 ---
 
+
+
 ## 前置
 ### 名称空间
 内核级资源视图隔离机制，让一组进程「看到」不同的全局资源。类型：`mnt` `net` `pid` `uts` `ipc` `user` `cgroup` `time`。通过 `unshare()` / 容器运行时创建，用 `lsns` 或 `/proc/<pid>/ns/` 查看，以 inode 编号标识，**编号相同即同一命名空间**。决定「进程能看到什么资源」。
@@ -264,11 +266,6 @@ docker load -i <文件名.tar>
 ```bash
 #采取交互式模式进入容器并运行sh进程
 docker exec -it test sh
-
-#当容器内部缺失特定命令且无法安装（如无网络、追求极致精简）时。
-#利用宿主机已有的命令，在容器的命名空间中执行。
-#nsenter 借助宿主机的命令二进制文件，切换到目标容器的命名空间（Namespace）中执行。
-#无需在容器文件系统内存在该命令文件。
 
 #获取容器主进程PID
 docker inspect --format '{{.State.Pid}}' <container_name>

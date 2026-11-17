@@ -84,35 +84,6 @@ usr 的 inode 的数据块
 ### 为什么能"虚拟"：VFS 只要求接口，不要求磁盘
 VFS 注册一个文件系统时，只要求实现几组回调（`lookup`、`read`/`write`、`readdir`、`stat`），**从不检查数据是不是来自磁盘**。所以内核可以注册一个"假"文件系统：inode 在内存里现造，`read()` 时不发块设备请求，而是**直接调用一段内核函数，把内核结构体里的字段拼成字符串返回**。
 判断标准一句话：**内容不是"存"出来的，是"算"出来的**。`cat /proc/meminfo` 每次读都是内核现场统计，磁盘上没有任何一个块存着这个文件。
-```text
-用户态  cat /proc/meminfo
-          ↓ read() 系统调用
-VFS 层（统一的 inode / dentry / file 接口）
-   ├── ext4 / xfs              → 查 extent / B+ 树，向块设备发读请求
-   ├── proc / sysfs / cgroup2  → 不发 IO，直接读内核结构体现算
-   └── fuse.sshfs 等           → 打包成 FUSE 请求丢给 /dev/fuse，由用户态进程处理
-```
-一眼认出来的办法：
-```bash
-findmnt -t proc,sysfs,devtmpfs,tmpfs,cgroup2,fuse   # 列出所有虚拟文件系统
-df -h /proc /sys                                    # Size 为 0（tmpfs 则是内存大小）
-stat -f /proc                                       # Type: procfs
-lsblk                                               # 永远找不到 /proc 对应的"盘"
-```
-### 常见的虚拟文件系统
-| 挂载点 | 类型 | 谁生成 | 实际是什么 |
-| --- | --- | --- | --- |
-| `/proc` | procfs | 内核 | 进程与内核运行状态的视图 |
-| `/proc/sys` | procfs | 内核 | sysctl 参数，**可写**（写 = 改内核行为） |
-| `/sys` | sysfs | 内核 | 设备 / 驱动 / 内核对象（kobject）的结构化模型 |
-| `/sys/fs/cgroup` | cgroup2 | 内核 | cgroup v2 的控制接口（`memory.max` 就是一个普通属性文件） |
-| `/dev` | devtmpfs | 内核 | 设备节点目录，设备注册时自动生成 |
-| `/dev/fuse` | 字符设备 `10:229` | FUSE 内核模块 | **不是文件系统**，是内核与用户态文件系统进程之间的请求队列 |
-| `/dev/shm`、`/run` | tmpfs | 内核 | 有真实 inode 的文件系统，只是数据只落在内存 / swap |
-| `/sys/kernel/debug` | debugfs | 内核 | 内核调试接口 |
-| `/sys/kernel/tracing` | tracefs | 内核 | ftrace 的开关与 trace 输出 |
-| `/sys/kernel/security` | securityfs | 内核 | LSM 接口（AppArmor / SELinux） |
-| `/sys/fs/bpf` | bpf | 内核 | pinned eBPF 对象 |
 #### /proc：进程和内核状态的窗口
 ```bash
 ls /proc/<pid>/           # 一个进程一个目录，内容来自 task_struct、mm_struct
@@ -126,14 +97,13 @@ ls /proc/<pid>/ns         # 该进程所属的各命名空间
 - 可写的那部分就是 sysctl：`echo 1 > /proc/sys/net/ipv4/ip_forward` 等价 `sysctl -w net.ipv4.ip_forward=1`；容器里改的是自己 net ns 的副本，宿主机不受影响。
 - 生产坑：`/proc/cpuinfo`、`/proc/stat`、`/proc/meminfo` **不跟随 PID / CPU namespace**，容器里 `top` 看到的是宿主机 CPU——这就是容器 CPU 使用率要单独算的原因。
 #### /sys：设备与内核对象的结构化模型
-sysfs 把内核内部的对象树（kobject）直接导出成目录，**一个属性文件对应一个内核变量**：读 = 调驱动的 `show()`，写 = 调 `store()`。
+sysfs 把内核内部的对象直接导出成目录，**一个属性文件对应一个内核变量**：读 = 调驱动的 `show()`，写 = 调 `store()`。
 ```bash
 cat /sys/class/net/eth0/address         # MAC 地址
 cat /sys/block/sda/queue/scheduler      # IO 调度器，可写切换
 echo 1 > /sys/block/sdb/device/delete   # 热拔盘（生产换盘的标准动作）
 cat /sys/fs/cgroup/memory.max           # cgroup 的限制，本质也是 sysfs 属性
 ```
-- 和 proc 的分工：proc 是"进程 + 历史杂项"，sysfs 是"设备 / 驱动的结构化模型"，路径稳定、按 class / bus / device 组织；新接口现在基本都往 sysfs（或 `/sys/fs/` 下的专用文件系统）放。
 #### /dev/fuse：一个字符设备，不是文件系统
 `/dev` 目录本身是 devtmpfs（设备注册时内核自动建节点），但**里面的节点是设备，不是文件**。`ls -l /dev/fuse` 看到 `c 10, 229`：主 / 次设备号是驱动注册表里的索引，`open/read/write` 它等于调 FUSE 内核模块的回调，而不是读磁盘。
 它干的事是把"实现一个文件系统"从内核搬到用户态：
@@ -147,44 +117,66 @@ tmpfs 有真正的 inode 和数据页，只是页只存在内存（可换出到 
 - 生产坑：容器 `/dev/shm` 默认只有 64MB，Chromium、Python 多进程共享内存之类的程序会莫名崩溃，需要 `--shm-size` 调大。
 
 ## 生产运维：扩容、缩容与常见故障
-### 扩容与缩容：xfs 只能扩，ext4 可扩可缩
-云盘扩容后必须**先扩分区、再扩文件系统**，两步缺一不可：
-```bash
-lsblk                          # 先看清分区和文件系统现状
-growpart /dev/vda 1            # 1. 扩分区（云主机标准做法，不用 fdisk 重排）
-# 2. 扩文件系统，按类型二选一：
-xfs_growfs /data               # xfs：挂载状态下直接扩，只能扩、不能缩
-resize2fs /dev/vda1            # ext4：可在线扩；缩容必须先 umount + e2fsck
+### LVM：多盘池化与在线伸缩
+整个分层过程就是一层层把裸盘"包装"成逻辑设备：
+```text
+裸盘 /dev/sdb          pvcreate    PV（物理卷）
+PV                    vgcreate    VG（卷组，把多块盘拼成一个资源池）
+VG                    lvcreate    LV（逻辑卷，从池里切一块）
+LV                    mkfs + mount 文件系统 + 挂载点，用户真正看到的目录
 ```
-- `df -h` 没变化时先回头查第 1 步：分区没扩，文件系统再扩也白搭。
-- LVM 场景多两步：`pvresize /dev/vda1` → `lvextend -l +100%FREE /dev/vg/lv`，最后才扩文件系统。
-- xfs 没有 `xfs_shrink`，不支持缩容是硬限制——选型时要想清楚"以后要不要缩"。
+- 扩容时 `lvextend` 把 LV 撑大（池里还有空间就行），再 `xfs_growfs`/`resize2fs` 扩文件系统，全程在线；
+- 换盘时 `pvmove /dev/sdb` 把数据从旧盘搬到新盘，`vgreduce` 摘掉旧盘，业务不中断——这是 LVM 最大的价值。
+- 代价是 `df` 与磁盘之间多了一层映射，排障要按 `pvs → vgs → lvs` 逐层查。
 
-### 磁盘满了，du 加起来却对不上 df
-生产最经典的一类工单，两个原因覆盖 90% 场景。
-**原因 1：inode 耗尽**（ext4 预分配用完，磁盘还有空间但建不了文件）
-```bash
-df -i /data                            # IUse% 100% 就是它
-find /data -xdev -type f | wc -l       # 定位哪个目录文件数爆炸（小文件、会话、缓存）
-```
-**原因 2：文件已删除，但进程还开着 fd**
-`rm` 只删目录项，进程持有 fd 时数据块不会释放：`du` 看不见（已经没目录项），`df` 却仍算被占用。
+**为什么不用它做备份**：LVM 快照是 CoW（写时复制）的——快照建立后，源卷**每写一个块**，旧内容先复制进快照空间，原块才被改写。所以快照不是"独立副本"，而是挂在源卷上的差量：
+1. **源卷写入越多，快照空间消耗越快**，打满后快照直接失效，数据保护随之消失——日志盘上挂快照，几个小时就可能写满；
+2. **拖垮性能**：每次源卷写入都多一次复制 IO，写入越密集越明显，等于给业务加了个隐形负担；
+3. 源卷损坏时，快照只有旧数据+差量，**恢复点不可控**。
+一句话：快照解决的是"几分钟前的状态回滚"，不是备份——备份要有**独立于源卷的完整副本**（云快照/存储层复制/备份软件，且异步落别处）。
+
+**云原生场景基本不用 LVM 了**：容器平台的存储诉求是"动态供给 + 跨节点共享 + 随 pod 漂移"，LVM 是单机本地块设备池化，做不到网络共享，也不便与 CSI 对接。现在主流做法是云盘直接挂载（`local-path`/`hostPath` 类 CSI 驱动）或对接分布式存储（Ceph/Rook、NFS、云厂商块存储），扩容走 CSI `VolumeExpansion`，快照走存储侧 `VolumeSnapshot`——LVM 只在传统物理机本地盘管理里还有一席之地。
+
+### 文件系统选型：默认就好，别瞎改
+- **发行版默认 ext4，就别改成 xfs**：默认配置是发行版社区和内核团队验证过的最稳组合，fsck 工具链、内核参数、故障案例全按它适配；换个文件系统等于主动引入未知变量。
+- **根盘 IO 压力本来就低**：系统盘只跑内核、systemd、少量服务和日志，读写量远小于业务盘，ext4 的全局协调瓶颈根本碰不到，稳和兼容才是它的主场。
+- **业务数据卷一般都用 xfs**：数据盘才是高并发、大文件、海量小文件的主战场，xfs 的分配组并行架构吃满多核，动态 inode 也不会"空间还在却建不了文件"。
+- **业务一般不缩容，顶多迁移数据**：缩容 = 停机搬数据 + 文件系统风险，生产里几乎清一色"涨了就扩、或者整卷迁到新盘"，没人反着做——所以 xfs 不支持缩容压根不是短板
+
+### 大部分场景直接用裸盘，只有系统盘才分区
+云盘、数据盘基本都是**一块盘 = 一个分区**（甚至不分区直接 `mkfs`），只有系统盘会切成 `/boot`、`/`（+ swap/EFI）。原因：
+- **分区的价值在"一盘多用"**：早年一块大盘要塞系统 + 数据 + swap，才需要切区做隔离；现在云盘按需购买，系统盘、数据盘、日志盘各自独立下单，一块盘只干一件事，再分区纯属多余。
+- **分区反而添乱**：分区表是固定边界，扩容时还得动它，多一层出错点；不分区直接格式化，`lsblk` 与 `df` 一一对应，排障干净利落。
+- **系统盘必须分区**是启动的硬性要求：`/boot` 要独立放内核、initramfs、GRUB，避免根分区写满导致系统起不来；EFI/swap 也需要独立的分区类型标识，引导固件才认。
+
+### 磁盘满了，du 加起来对不上df
+现象：`df -h` 显示 100%，把目录下所有文件 `du -sh *` 加一遍却少好几个 G——空间到底被谁吃了？
+**原因 1：文件已删除，但进程还开着 fd**
+`rm` 只删目录项（"文件名 → inode"映射），不等于释放数据块：只要还有进程握着这个文件的 fd，内核就继续算它占着空间。这时 `du` 没法看见它（已经没有目录项可遍历），`df` 却照算不误——差值就是这些"幽灵文件"。生产最典型的就是日志：logrotate 切完日志，应用还握着旧文件句柄没 reopen，`rm` 掉的 GB 级日志一直不释放，磁盘越跑越满。
 ```bash
 lsof +L1                               # 找 link count 为 0 的已删除文件
-lsof | grep deleted                    # 同上，直接看文件名和 PID
-# 处理：重启或 reload 对应进程；能截断的大日志可用 : > /proc/<pid>/fd/<fd>
 ```
-- 容器场景补充：容器里 `df -h /` 看到的是**宿主机底层文件系统**的容量（overlay 报的是底层盘的数），所以 `/var/lib/docker` 被写满时，容器内会表现为"什么都没写却 100%"。
+**原因 2：容器里 du 和 df 本身就对不上**
+容器内 `df -h /` 看到的是**宿主机底层文件系统**的容量（overlayfs 直接上报 upper 所在盘的总数），而 `du` 统计的只是本容器 upper 目录的可见文件——别的容器、镜像层、宿主机自身写入都算在 `df` 里却不进你的 `du`。所以容器里永远"du 加不满 df"，排查 `/var/lib/docker` 写满要**在宿主机上查**
+
+### 磁盘还有空间但是无法创建文件
+现象：`df -h` 还有富余，但无法创建文件，**耗尽的不是空间，是 inode**。
+根因在前文 inode 机制：ext4 格式化时按分区大小**预分配固定数量的 inode 表**，每个文件（哪怕 0 字节）都要占一个 inode。海量小文件场景（把 inode 抽干后，磁盘块再空也建不了新文件——这是 ext4 的结构性隐患，xfs 动态分配 inode 则几乎不会遇到。
+```bash
+df -i /data                            # IUse% 100% 就是它；File 一列是 inode 总数
+find /data -xdev -type f | wc -l       # 定位哪个目录文件数爆炸
+# 处理：清理小文件目录；建文件系统时调大 inode 比例（-i 选项）；长期海量小文件直接换 xfs
+```
 
 ### 文件系统变成只读
-现象：`touch` 报 `Read-only file system`，业务全部写失败。这不是权限问题，是**文件系统自己切了只读保护数据**。
+现象：`touch` 报 `Read-only file system`，业务全部写失败。如果不是权限问题，就是**文件系统自己切了只读保护数据**。
 ```bash
+#打印内核环形缓冲区（kernel ring buffer）里的日志
 dmesg -T | grep -iE 'ext4|xfs|I/O error|remount'   # 找第一现场：IO 错误或元数据损坏
-mount | grep ' /data '                             # 看是否挂成了 ro
 ```
-- ext4 默认 `errors=remount-ro`：检测到元数据错误或底层 IO 失败就自动转只读；xfs 更激进，可能直接 shutdown（`dmesg` 里 `XFS (vdb): Filesystem has been shut down`）。
-- 根因通常在下面：云盘抖动/掉盘、宿主机内核问题、RAID/存储链路故障。**先查 `dmesg` 和云厂商事件，别急着 `mount -o remount,rw`**——带着故障强行读写会让损坏扩大。
-- 修复姿势：umount → `fsck -y /dev/vdb1`（ext4）/ `xfs_repair /dev/vdb1`（xfs；必要时 `xfs_repair -L` 清日志，会丢未落盘数据）→ 重新挂载；生产上先打快照再修。
+- **触发机制**：ext4 默认 `errors=remount-ro`——检测到元数据错误或底层 IO 失败，立刻把挂载切成只读，宁可停写也不让损坏扩大；xfs 更激进，可能直接 shutdown，之后连挂载都不可用。
+- **根因大多是底层存储链路问题，不是文件系统**：云盘抖动/掉盘、宿主机内核 bug、RAID/存储链路故障、云厂商维护事件——文件系统只是"报警器"。**先查 `dmesg` 和云厂商事件日志**：底层故障没排除就强行恢复读写，会让损坏扩大。
+- **修复姿势总结**：排查优先看 dmesg 和云厂商事件，修复前务必快照，禁止直接强行 remount,rw。
 
 ## 补充
 ### 数据恢复原理
