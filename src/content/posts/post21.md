@@ -265,9 +265,9 @@ kubelet → containerd（CRI）→ shim → runc → 容器
 | **Network**（net） | 网卡、Pod IP、端口空间、路由、iptables | 共享 `hostNetwork` 等于让容器改节点 iptables、抓节点流量 |
 | **IPC** | 共享内存、消息队列、信号量 | 共享 host IPC 时可读写别的进程的 shm 段（SysV 共享内存是重灾区） |
 | **UTS** | hostname / domainname | 危害最小，但容器 hostname 常被当成情报收集入口（能推断节点名/集群名） |
-| **User** | UID/GID 映射与权限判定 | 唯一**改变权限语义**的 namespace，下一段单独讲 |
+| **User** | UID/GID 映射与capability权限判定(特权只在该ns生效) | 唯一**改变权限语义**的 namespace，下一段单独讲 |
 
-"共享宿主的某个 ns"在实现上就是**不新建、直接沿用**（`-v` 挂宿主目录 = 不新建 mount ns 的对应挂载点；`hostNetwork: true` = 不新建 net ns）。这也解释了一个日常现象：同一个 Pod 里 A 容器监听端口，B 容器用 `localhost` 能连（共享 net ns），换成另一个 Pod 就连不上。
+默认情况下，Docker、K8s 都不开启 user namespace 隔离（容器和宿主机共用顶层根 user ns），UID/GID 直通。
 
 **User namespace：容器 root ≠ 宿主机 root 的根基**。其余五个 ns 只改变"看得见什么"，只有 user ns 改变"内核认你是谁"：
 
@@ -278,7 +278,7 @@ kubelet → containerd（CRI）→ shim → runc → 容器
 （但只对 ns 内的对象生效，出了 ns 一点权力都没有）
 ```
 
-映射规则写在 `/proc/<pid>/uid_map`（格式：`ns内ID 宿主ID 长度`）。rootless 容器、rootless BuildKit 全靠它——ns 内是 root，逃逸上限被钉死在宿主那个普通 uid 上。代价是功能缺口（不能监听1–1023这些"特权端口"、部分内核文件系统挂不上、chown 受限），所以 **Docker 默认不开**，**k8s 也要显式开**：`UserNamespacesSupport` 在 1.30 已 GA，但 Pod 默认仍是 `hostUsers: true`，必须写 `hostUsers: false`，且内核与运行时都支持才真正生效
+映射规则写在 `/proc/<pid>/uid_map`（格式：`ns内ID 宿主ID 长度`）。rootless 容器、rootless BuildKit 全靠它——ns 内是 root，逃逸上限被钉死在宿主那个普通 uid 上。代价是功能缺口（不能监听1–1023这些"特权端口"、部分内核文件系统挂不上、chown 受限）。
 
 ### 能力模型：容器里的 root 不是宿主机的 root
 

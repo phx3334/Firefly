@@ -185,46 +185,33 @@ kubelet 起 step-build 容器（runAsUser=1000 / seccomp=Unconfined / 挂 /dev/f
        └─⑦ 退出码返回脚本 → 杀掉 buildkitd → step 容器退出 → Tekton 收尾
 ```
 
-**① buildkitd 以非 root 身份起来**。`buildctl-daemonless.sh` 是镜像里的包装脚本，职责就三件：起 `buildkitd`、等它的 socket、构建完杀掉它。关键是 `buildkitd` 以 uid 1000 启动时拿不到 `CAP_SYS_ADMIN`，**必须先把自己关进一个 user namespace**（`uid 1000` 在 ns 内映射为 `uid 0`），这一步成功与否的前置条件（userns 是否被禁、AppArmor 是否放行、seccomp 是否拦了 `unshare`）的落点。
+**① buildkitd 以非 root 身份起来**。`buildctl-daemonless.sh` 是镜像里的包装脚本，职责就三件：起 `buildkitd`、等它的 socket、构建完杀掉它。关键是 `buildkitd` 以 uid 1000 启动时拿不到 `CAP_SYS_ADMIN`，自己调用 `unshare(CLONE_NEWUSER)`，**新建了一个独立的 user namespace**（`uid 1000`在 user ns 内映射为 `uid 0`），这一步成功与否的前置条件（userns 是否被禁、AppArmor 是否放行、seccomp 是否拦了 `unshare`）的落点。
 
 **② socket 就绪与客户端连接**。rootless 下 socket 在 `$XDG_RUNTIME_DIR/buildkit/buildkitd.sock`（通常是 `/run/user/1000/buildkit/buildkitd.sock`），不是 rootful 的 `/run/buildkit/buildkitd.sock`——手工调试时 `--addr` 连错是最常见的"连不上"。脚本会轮询到这个文件出现再执行 `buildctl`，所以 `failed to dial` 一般发生在"buildkitd 起来了但立刻退出"，去翻 daemonless 脚本转发的 daemon 日志。
 
-**③ frontend 解析**。`buildctl` 通过 gRPC 把 Dockerfile 与 `--local context=.` 指定的上下文一并交给 buildkitd；`dockerfile.v0` frontend 把它翻译成 LLB DAG。注意上下文是**由客户端读取并流式上传**的，`.dockerignore` 在客户端侧生效，因此大量无用文件会直接拖慢这一跳。
+**③ frontend 解析**。`buildctl` 通过 gRPC 把 Dockerfile 与 `--local context=.` 指定的上下文一并交给 buildkitd；`dockerfile.v0` frontend 把它翻译成 LLB DAG。注意上下文是由客户端读取并流式上传的，`.dockerignore` 在客户端侧生效，因此大量无用文件会直接拖慢这一跳。
 
 **④ solver 求值与镜像拉取**。这一阶段全部发生在 buildkitd 进程内：
 - 拉基础镜像走**容器自己的网络命名空间**，即 Pod IP，不经过任何 daemon；私有 Harbor 的凭证读 `~/.docker/config.json`（rootless 下是 `/home/user/.docker/config.json`，不继承宿主 `docker login`）；
-- 拉下来的 layer 先解压成 snapshot：kernel ≥ 5.11 用 userns 内的内核 overlay，否则退回 fuse-overlayfs（这就是 `/dev/fuse` 的用途）；
-- 每个节点算 cache key 查 cache index，命中直接复用已有 snapshot，**命中时连进程都不会起**。
+- 拉下来的 layer 先解压成 snapshot：**kernel ≥ 5.11 用 userns 内的内核 overlay，否则退回 fuse-overlayfs（这就是 `/dev/fuse` 的用途）**；
+- 需要执行一段外部程序（copy操作不算）， `buildkitd`进程会fork出一个子进程进行执行（前提是缓存未命中）。
 
-**⑤ 执行一条 RUN（rootless 与 rootful 的最大差异）**。rootful 走 runc：新建 pid/mount ns、建 cgroup、起一个独立容器。rootless 下这条路代价太高（相当于把 5.3 讨论的创建容器特权又搬回来一层），所以官方写法是 `--oci-worker-no-process-sandbox`：
+**⑤ 执行一段外部程序（rootless 与 rootful 的最大差异）**。rootful 走 runc：新建 pid/mount ns、建 cgroup、起一个独立容器。rootless 下这条路代价太高，所以官方写法是 `--oci-worker-no-process-sandbox`：
 
 ```text
 rootful：   buildkitd → runc → 新 pid+mount ns → chroot → exec 命令
 rootless：  buildkitd → fork（沿用 buildkitd 的 ns）→ chroot 到 merged → exec 命令
 ```
 
-执行体感上等价，隔离强度差一档：**RUN 之间不再有 pid/mount ns 边界**，上一条命令残留的进程、挂进来的 secret，下一条都看得见（5.5 已列为代价）。具体每条的流程仍是第四章那五步：叠 lowerdir → 空 upperdir → COW 写入 → diff 打包成 blob → 销毁可写层。cache mount 则挂在 snapshotter 管理的独立目录上，**不参与上层 diff**，所以永远进不了 content store。
+执行体感上等价，隔离强度差一档：**RUN 之间不再有 pid/mount ns 边界**，上一条命令残留的进程、挂进来的 secret，下一条都看得见。具体每条的流程仍是叠 lowerdir → 空 upperdir → COW 写入 → diff 打包成 blob → 销毁可写层。cache mount 则挂在 snapshotter 管理的独立目录上，**不参与上层 diff**，所以永远进不了 content store。
 
-**⑥ exporter 推送**。`--output type=image,push=true` 时，buildkitd 在进程内组装 config / manifest list，然后**直接用 HTTP 把 blob 推到 Harbor**——同样不经过 dockerd。`--export-cache type=registry,mode=max` 是第二条独立的推送通道：把每一层（含中间层）的缓存元数据打成另一个镜像 tag 推上去，两者别混。
+**⑥ exporter 推送**。`--output type=image,push=true` 时，buildkitd 在进程内组装 config / manifest list，然后**直接用 HTTP 把 blob 推到 Harbor**，`--export-cache type=registry,mode=max` 是第二条独立的推送通道：把所有DAG节点产生的数据打成另一个镜像 tag 推上去，两者别混。
 
-**⑦ 收尾**。`buildctl` 打印退出码 → daemonless 脚本杀掉 buildkitd → step 容器的 entrypoint 把退出码经由 Tekton 的 termination message 交回 kubelet → Pod 内下一个 step 启动或整个 TaskRun 判失败。**state 目录（`~/.local/share/buildkit`）随容器一起消失**，所以下一节说的 registry cache 不是优化项。
-
-三个由 rootless 派生的实操限制：
-
-| 你会想做的事 | rootless 下的结果 | 正确做法 |
-| --- | --- | --- |
-| `--output type=docker` / `--load` 导入本地镜像库 | 没有本地镜像库可导（那是 dockerd 的东西） | `push=true`，或 `type=oci` / `type=local` 落文件 |
-| 用 `docker images` 看构建结果 | step 里根本没装 docker CLI | `crane/regctl` 查远端 tag，或看 tracker 记录的 digest |
-| 构建中途 `docker exec` 进构建容器排查 | 构建容器不存在（没有 runc 容器，只有一个 fork 出来的进程） | `--progress=plain` 看日志，必要时临时去掉 `no-process-sandbox`（会失去 rootless 主体收益） |
-
-
-## 六、生产环境种其余五个高频场景
-
+**⑦ 收尾**。`buildctl` 打印退出码 → daemonless 脚本杀掉 buildkitd → step 容器的 entrypoint 把退出码经由 Tekton 的 termination message 交回 kubelet → Pod 内下一个 step 启动或整个 TaskRun 判失败。**state 目录（`~/.local/share/buildkit`）随容器一起消失**，
+## buildkit常见使用场景
 ### 6.1 CI/CD 远程缓存共享
 
 CI 构建节点（GitLab Runner、GitHub Actions、Jenkins Agent、Tekton TaskRun）都是临时的、无状态的，`/var/lib/buildkit` 每次归零。BuildKit 的解法是把缓存**导出到镜像仓库**，下次构建再导回来。
-
-先分清两条缓存通道，否则 Dockerfile 一定写错：
 
 | 通道 | 存在哪 | 能否跨节点 | 进镜像 |
 | --- | --- | --- | --- |
@@ -233,69 +220,16 @@ CI 构建节点（GitLab Runner、GitHub Actions、Jenkins Agent、Tekton TaskRu
 
 结论只有一句：**要跨节点复用的东西必须落进层，只想省编译时间的才用 cache mount。**
 
-Tekton Task 里跑 rootless BuildKit + registry cache：
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: build-image
-spec:
-  params:
-    - name: image
-    - name: cacheRef
-  workspaces:
-    - name: source
-  steps:
-    - name: build
-      image: moby/buildkit:rootless
-      workingDir: $(workspaces.source.path)
-      env:
-        - name: BUILDKITD_FLAGS
-          value: --oci-worker-no-process-sandbox
-      securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
-        seccompProfile: { type: Unconfined }
-      script: |
-        #!/usr/bin/env sh
-        set -eu
-        buildctl-daemonless.sh build \
-          --frontend dockerfile.v0 \
-          --local context=. --local dockerfile=. \
-          --import-cache type=registry,ref=$(params.cacheRef) \
-          --export-cache type=registry,ref=$(params.cacheRef),mode=max \
-          --output type=image,name=$(params.image),push=true
-```
-
-每个 TaskRun 是一个新 Pod，`buildctl-daemonless.sh` 每次 fork 一个全新 buildkitd，state 目录从零开始，只有 registry cache 能跨 Pod 存活。所以 `--import-cache` 不是优化项，是必填项。
-
-对应的 Dockerfile 长这样：
-
-```dockerfile
-# syntax=docker/dockerfile:1
-FROM --platform=$BUILDPLATFORM golang:1.23 AS builder
-WORKDIR /src
-
-COPY go.mod go.sum ./
-# 不要加 --mount=type=cache：依赖必须落进这一层，
-# registry cache（mode=max）才能把它导出到 Harbor，换节点、换流水线时直接复用。
-RUN go mod download
-
-COPY . .
-# 只保留 go-build 的 cache mount：编译中间产物不落进镜像层，
-# 避免 registry cache 被 Go build cache 撑大。
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    go build -o /out/app ./cmd/app
-```
+每个 TaskRun 是一个新 Pod，`buildctl-daemonless.sh` 每次 fork 一个全新 buildkitd，state 目录从零开始，只有 registry cache 能跨 Pod 存活。所以用`--import-cache`命中harbor中的缓存是必须的
 
 剩下的实践：
+- **CI 里写`mode=max`**：除非确认构建是单阶段且不装依赖，否则默认的 `min`只导出最终镜像用到的层的缓存（也就是只有 -o那部分数据）。
+- **cache镜像用独立 tag**：如 `app:buildcache`，这个镜像tag一般不变化，只覆盖，避免`import`不到最新缓存。
+- **认证要给到 buildkitd**：`--import-cache` / `--export-cache` 同样要登录仓库，rootless 不继承step容器内的 `docker login`，把 `config.json` 挂到 `/home/user/.docker/`。
+- 业务镜像的tag一般后缀是commit id,这样不会重复，也就不会覆盖历史业务镜像，使得具备一定时间范围内的业务回滚能力。
+- 需要制定Harbor 生命周期策略（Retention），比如保留30填以内的业务镜像或者每个服务只保留最近20个版本。
 
-- **CI 里 `mode=max` 直接写死**：除非确认构建是单阶段且不装依赖，否则默认的 `min` 就是让 builder 白干。
-- **cache 用独立 tag**（如 `app:buildcache`），别混在业务 tag 上；Harbor 侧配保留策略，`mode=max` 会持续吃容量。
-- **认证要给到 buildkitd**：`--import-cache` / `--export-cache` 同样要登录仓库，rootless 不继承宿主 `docker login`，把 `config.json` 挂到 `/home/user/.docker/`。
-
-**生产上怎么定策略**：先看构建节点有没有持久盘，再决定主力和兜底。
+**本地cache和harbor cache选择**：
 
 | 构建节点 | 主力手段 | registry cache 的角色 |
 | --- | --- | --- |
@@ -305,18 +239,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 不管哪种形态，Dockerfile 都按「同一路径二选一」来写：
 
-- **依赖路径**（`/go/pkg/mod`、`~/.m2`、`node_modules`）：要么落层，要么挂 mount，不要两个都想要。cache mount 是**空目录覆盖挂载**，会把镜像里同路径已有的内容全遮掉——依赖装在前一层、这一层又挂了 mount，构建会突然报"找不到包"；同时这一段产生的层差异也是空的，registry cache 永远命不中。
-- **编译缓存路径**（`/root/.cache/go-build`、`target/`）：只挂 mount，永不进层。它的体量和碎片化程度不配占用 Harbor 的容量。
+- **依赖路径**（`/go/pkg/mod`、`~/.m2`、`node_modules`）：要么落层，要么挂 mount，不要两个都想要。
+- **编译缓存路径**（`/root/.cache/go-build`、`target/`）：只挂 mount，临时构建容器退出后直接销毁。因为它并不能作为缓存，作为缓存镜像进入harbor浪费存储空间
 
-运营上还有三件事：
-
-- **cache tag 按分支隔离 + fallback**：`app:cache-<branch>`，拉不到再回退 `app:cache-main`。共用一个 tag 会互相覆盖，命中率断崖。
-- **定时预热**：用 `--output type=cacheonly` 只跑缓存不推镜像，让主干分支的 cache 始终新鲜，避免第一个合并的人承担全量构建。
-- **量化命中率**：`--progress=plain` 里每条 `CACHED` 就是命中。命中率低于 70% 就别再调参数了，去查层序和 `COPY` 范围。
-
-### 6.2 
-
-### 6.3 安全注入敏感凭证
+### 6.2安全注入敏感凭证
 
 私有 npm、Maven 源、私有 git 仓库，传统做法是 `ARG NPM_TOKEN` 或 `COPY .npmrc`——结果密码明晃晃躺在镜像 config 的 history 里，`docker history --no-trunc` 一眼看穿。
 
@@ -343,11 +269,7 @@ docker buildx build \
   - **忘了 `# syntax=docker/dockerfile:1`**，老 frontend 不认 `--mount`，报 `unknown flag: mount`。
 - `--ssh` 依赖 ssh-agent 转发，CI 里就是 `eval $(ssh-agent) && ssh-add`；能换成 deploy token + secret 的场景就别用 SSH。
 
-### 6.4 持久化缓存挂载加速编译
-
-
-
-### 6.5 多架构构建
+### 6.3 多架构构建
 
 只有两条路，选错了就会在"为什么构建要 20 分钟"上白烧一周：
 
