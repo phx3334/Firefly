@@ -698,299 +698,302 @@ kubectl -n observability get prometheusrule    # 3 个对象
 
 ### ISTIO_META_DNS_CAPTURE="true"：DNS 劫持开关
 
-打开后 sidecar 会在本地起一个 **Envoy DNS 代理**，把业务容器发出的 DNS 查询劫持到 Envoy 解析，而不是直连节点的 CoreDNS。
-
 #### 作用
 
-默认行为下，应用 `getaddrinfo("api.example.com")` 直接走 `/etc/resolv.conf` → CoreDNS，拿到的是**真实 IP**，应用拿着真实 IP 去连 → iptables 按目的 IP 分流时，Envoy 看到一个不认识的外网 IP，**没法把它和 ServiceEntry 的域名规则对上**，于是"按域名做出口路由/策略"全部失效。
+给网格内所有 Pod 的 sidecar 打开 **DNS 代理**：Pod 的域名解析请求不再一路走到集群 DNS（CoreDNS），而是在 sidecar 里就被接住、就地应答。一句话——**让服务发现不出本节点**。
 
-开启 DNS capture 后：应用的 DNS 查询被 Envoy 拦截 → Envoy 查到 `api.example.com` 匹配某条 ServiceEntry → 返回一个 **Envoy 分配的虚拟 IP（240.0.0.0/4 段）** → 应用拿虚拟 IP 建连 → iptables 把这条连接捕获进 Envoy → Envoy 按虚拟 IP 反查回域名，命中 ServiceEntry 规则。收益场景：
+#### 原理
 
-- **出站流量按域名管控**：把 `*.thirdparty.com` 的调用经 egress gateway、加 mTLS/重试/观测，对那些只认域名不认 IP 的调用方是唯一解法；
-- 应用代码零改动——不需要改成写 IP，也不需要知道网格的存在。
-
-生产经验：**这是一个"为少数出站流量管理需求，改变全部 Pod DNS 路径"的开关。**
-
-#### 坏处
-
-1. **DNS 解析从"节点级共享组件"变成"每个 Pod 私有 sidecar 的职责"。** CoreDNS 挂了是全集群统一故障、排障路径清晰；Envoy DNS 代理挂了/OOM/正在推配置，是**这一个 Pod 的所有域名解析全断**——业务连 mysql.middleware、连 K8s API 全都解析失败，而且故障现象是"个别 Pod 神秘网络异常"，比 CoreDNS 故障难排查得多。爆炸半径从"横向一刀切"变成了"纵向打进每个 Pod"。
-2. **解析行为和系统 stub resolver 有差异。** Envoy 用 c-ares 异步解析，对 ndots/search domain 的拼接顺序、负缓存 TTL、CNAME 链、超时重试的细节和 glibc nss 不完全一致。某些依赖精确解析行为的应用（老 gRPC 客户端、有 DNS 缓存假设的 SDK）会出诡异的解析失败——这类问题在测试环境不复现，只在生产特定查询路径上出现。
-3. **多一跳故障面 + 性能开销。** 每条 DNS 查询先进 Envoy 转一手，Envoy 配置热更新（xDS push 期间）查询延迟会抖；大流量下 DNS 查询本身也有 QPS 开销。
-4. **排障动作变了。** 以前 `tcpdump`/`nslookup` 直接看节点 DNS，开启后抓到的是发往 sidecar 的查询，排查链路多一层认知成本。
-
-#### 为什么大集群一般不考虑开
-
-核心逻辑：**收益是局部的，成本是全局的。**
-
-- 它唯一的刚需场景是"大量出站域名需要按 hostname 做网格管控"。绝大多数集群（包括本项目）出站调用极少、或者对方就固定几个 IP/域名，用静态 ServiceEntry + 显式路由就能覆盖，犯不上开这个开关。
-- 大集群里 Pod 数以千计，开了之后**每个 Pod 的 DNS 路径都换了一遍**——把一个稳定十几年的系统组件（/etc/resolv.conf → CoreDNS）替换成一个和 Envoy 生命周期强绑定的新解析器，为的只是服务列表里可能一条都没有的出站规则。生产系统的改法应该是：**默认不开，哪个工作负载真有出站域名管控需求，就用 Pod 注解 `proxy.istio.io/config` 对它单独开**，按需开、按需关、爆炸半径锁在单个 Pod 上。
-- 出站管控还有不碰 DNS 的替代路径：egress gateway + 显式 VIP、或约定应用直接调集群内出口代理，都能拿到大部分收益而不引入全局 DNS 行为变更。
-
-一句话：**DNS capture 是给"出站域名流量管理"这个窄场景准备的工具，不是网格默认配置；大集群的惯例是按 Pod 注解按需开，绝不 mesh 全局开。**
-
-
-### tekton构建代码的脚本
-```bash
-        #!/bin/sh
-        set -eu
-
-        # 处理多阶段target参数：为空时不传递参数，防止buildctl接收空串报错
-        target_opt=""
-        if [ -n "$(params.target)" ]; then
-          target_opt="--opt target=$(params.target)"
-        fi
-
-        # 远程缓存配置：对接Harbor缓存镜像
-        # mode=max：缓存所有构建阶段，Go mod等中间层可以复用，加速构建
-        # ignore-error=true：缓存拉取/推送失败仅降级为无缓存构建，不阻断CI流水线
-        cache_flags=""
-        if [ -n "$(params.cache-ref)" ]; then
-          cache_flags="--import-cache type=registry,ref=$(params.cache-ref) --export-cache type=registry,ref=$(params.cache-ref),mode=max,ignore-error=true"
-        fi
-
-
-        registry_host=$(printf '%s' "$(params.image)" | cut -d/ -f1)
-        cat > /tmp/buildkitd.toml <<EOF
-        [registry."${registry_host}"]
-          ca = ["/certs/ca.crt"]
-        EOF
-        export BUILDKITD_FLAGS="--oci-worker-no-process-sandbox --config /tmp/buildkitd.toml"
-
-        # 拆分Dockerfile路径：buildctl需要分开指定dockerfile目录和文件名
-        dockerfile_dir=$(dirname "$(params.dockerfile)")
-        dockerfile_name=$(basename "$(params.dockerfile)")
-
-        # buildctl-daemonless.sh：单进程模式，自动拉起buildkitd，流水线无需单独部署buildkit服务
-        # --output type=docker,dest=xxx：输出docker标准tar包，契约不变，下游scan、push完全不用改动
-        buildctl-daemonless.sh build \
-          --frontend dockerfile.v0 \
-          --local context="$(workspaces.source.path)/$(params.context)" \
-          --local dockerfile="$(workspaces.source.path)/${dockerfile_dir}" \
-          --opt filename="${dockerfile_name}" \
-          ${target_opt} \
-          ${cache_flags} \
-          --output type=docker,dest="$(workspaces.image.path)/image.tar",name="$(params.image)" \
-          --progress plain
-```
-
-#### 这段脚本在流水线里的位置
-
-脚本只做一件事：**产出 `image.tar`，不推 Harbor**。整条数据流：
+`ISTIO_META_` 前缀的环境变量会成为代理的启动元数据（mesh 级配置 `meshConfig.proxyMetadata`，对全网格 sidecar 生效，改完要重启 Pod 才进 bootstrap）。打开后的数据路径：
 
 ```
-source/ + Dockerfile
-   └─ buildctl ──▶ /workspace/image/image.tar
-                        ├─ trivy --input image.tar   （扫不过就退出，不推）
-                        └─ skopeo copy docker-archive → Harbor
+Pod 里程序查 mysql.middleware.svc.cluster.local
+  ↓ 53/udp
+Pod 网络命名空间内的 iptables 把 DNS 查询重定向到 sidecar 的 :15053
+  ↓
+sidecar 内置 DNS proxy 分流：
+  ├─ *.cluster.local 等集群名 → 从 xDS 下发的注册表里（istiod自动维护）本地应答，返回ip
+  │   不出节点、不依赖 CoreDNS 可用性
+  └─ 其它域名(公网域名、自定义内部域名等) → 转发给CoreDNS解析
 ```
 
-#### 逐段解释
+附带的第二个能力：**按域名做出口策略**。当 egress 策略是 `REGISTRY_ONLY`（只允许访问注册过的地址）时，外部域名必须在ServiceEntry里面注册过了，内部服务才能访问它，否则DNS解析这一步被劫持到sidecar之后，解析会直接失败，内部服务就访问不了了。如果egress策略是`ALLOW_ANY`，则没有这个限制。
 
-**① `set -eu`**
+#### 为什么大集群的收益更高
 
-- `-e`：任何命令失败立即退出。不加的话 buildctl 失败后脚本还会继续往下执行，最后报一个和根因无关的错；
-- `-u`：引用未定义变量直接报错，防止变量名拼错后静默变成空串。
-
-**② target 条件参数**
-
-```sh
-target_opt=""
-if [ -n "$(params.target)" ]; then
-  target_opt="--opt target=$(params.target)"
-fi
-```
-
-根 Dockerfile 有 `user/video/interaction/worker` 四个命名 stage；web 的 Dockerfile 没有命名 stage。有 target 就拼参数，没有就**完全不能传**——BuildKit 收到空 target 会报错。
-
-**③ 跨流水线缓存**
-
-```sh
-cache_flags="--import-cache type=registry,ref=$(params.cache-ref) \
-             --export-cache type=registry,ref=$(params.cache-ref),mode=max,ignore-error=true"
-```
-
-| 选项 | 作用 |
-|---|---|
-| `type=registry` | 缓存以 OCI 镜像形式存到 Harbor，而不是本地目录 |
-| `--import-cache` | 构建前先拉缓存，命中就跳过重复层 |
-| `--export-cache` | 构建后把新产生的层写回缓存 |
-| `mode=max` | 连中间 stage 一起缓存；Go 的 `go mod download` 层因此能被后面的镜像复用 |
-| `ignore-error=true` | 缓存推不上去只降级为“无缓存构建”，不把 CI 判失败——缓存是优化，不是正确性 |
-
-**为什么 Dockerfile 里不再用 `--mount=type=cache`**
-
-BuildKit 的两套缓存容易混：
-
-| | `RUN --mount=type=cache` | registry cache（`--export-cache`） |
+| 收益 | 大集群的痛点 | 小集群的情况 |
 |---|---|---|
-| 缓存内容 | 目录内容（Go module、build cache） | 构建图层 / 多阶段中间层 |
-| 存在哪 | buildkitd 本地状态目录 | Harbor 里的 OCI 缓存镜像 |
-| 跨节点/跨流水线 | ❌ 换 Pod 就没了 | ✅ 可移植 |
+| **CoreDNS 卸压** | 万级 Pod、短连接 RPC、分钟级滚动发布，服务发现 QPS 高且成簇出现；CoreDNS 是集群级共享组件，局部风暴拖垮全局 | 5 节点规模 CoreDNS 毫无压力 |
+| **消峰** | 一次全量发布数百 Pod 同时解析 mysql/kafka/minio，排队拉长启动时间、拖到探针超时 | 几个 Pod 同时启动没有排队问题 |
+| **故障域收窄** | CoreDNS 抖动 = 全集群服务发现瘫痪；有了本地应答，**已注册服务的解析不受影响** | CoreDNS不太可能有异常 |
+| **按域名 egress 治理** | 外部 API 多、按 hostname 放行/审计是刚需 | 外联少，收益不明显 |
+| **StatefulSet/headless、多集群** | 这些形态才用得到 DNS 代理的端点级解析 | 本项目用不到 |
 
-关键在于：**cache mount 的内容不会被 cache export 带走**。本项目的 `buildkit-state` 是每个 TaskRun 的 emptyDir，所以 cache mount 在跨流水线场景下几乎不生效。
+反面也要写清楚：DNS 代理多一层故障面——容器里 `nslookup`（DNS 查询工具） 的行为和宿主机不一致，排障时容易困惑；sidecar 的 DNS 逻辑出 bug 影响全网格。**所以默认不开，是"收益 < 复杂度"时的理性选择**：本项目保持默认关闭，
 
-因此 Dockerfile 改成生产默认的 B 方案：
+### Harbor CA 证书模式
 
-```dockerfile
-COPY server/go.mod server/go.sum ./
-# 不加 mount：模块落进这一层，registry cache 才能把它导出到 Harbor
-RUN go mod download
+目标：**全链路 TLS 校验**——自签证书的世界里，要么所有客户端都关校验，要么让所有客户端信任同一个内部 CA。
 
-COPY server ./
-# 只保留 go build 缓存目录：编译中间产物不落进镜像层
-# 不能再挂 /go/pkg/mod——cache mount 会遮住上一层已下载的模块
-RUN --mount=type=cache,target=/root/.cache/go-build go build ...
+#### 证书链
+
+```
+cert-manager（控制器：生成私钥、调 issuer 签名、写 Secret、到期续期）
+  ├─ selfsigned-bootstrap（SelfSigned ClusterIssuer，只签发 CA）
+  │    └─ fake-tiktok-ca          内部根 CA，10 年，CA 类型证书 —— 全集群唯一信任锚
+  │         └─ fake-tiktok-ca（ClusterIssuer，用根 CA 签业务证书）
+  │              ├─ harbor-tls    服务端证书，SAN = 节点 IP，1 年，提前 30 天自动续期
+  │              └─ istio-ca      Istio 中间 CA，1 年，装配成 istio-system/cacerts
+  │                   └─ 网格内 Pod 的 SVID（istiod 用中间 CA 签，链回同一个根）
 ```
 
-效果：
+#### 简述步骤
 
-- `go.mod/go.sum` 不变时，任意节点、任意流水线都能命中 `go mod download` 层，依赖不用重下；
-- `go build` 的编译中间产物留在 cache mount，不撑大 Harbor 里的缓存镜像；
-- 如果挂了 `/go/pkg/mod`，cache mount 会**遮住**上一层已下载的模块，`go build` 又去下载一遍，registry cache 的收益被抵消——这是最容易踩的反向优化。
+1. `helm install cert-manager`：只装控制器 + CRD，这一步一张证书都不签；
+2. `kubectl apply -k manifests`：声明 2 个 ClusterIssuer + 3 个 Certificate（`istio-system` 命名空间一起建）；
+3. 控制器异步 reconcile：`selfsigned-bootstrap` 签出根 CA → 根 CA 落成 Secret → CA Issuer 读 Secret 里的私钥 → 依次签出 `harbor-tls`、`istio-ca`；
+4. `kubectl wait --for=condition=Ready certificate/...`：Ready 才代表 Secret 里 `tls.crt / tls.key / ca.crt` 三样齐全；
+5. `istio-cacerts-sync` 把 `istio-ca` 转成 istiod 认的四件套；确认 `cacerts` 存在后，再装 Harbor 和 istiod；
+6. 客户端侧只做一件事：拿到根 CA 的 `ca.crt`（四个信任点 + 网格的 `cacerts`）。
 
-**④ 给 BuildKit 配 Harbor 的 CA**
+#### cert-manager 是控制器，不是 CA
 
-```sh
-registry_host=$(printf '%s' "$(params.image)" | cut -d/ -f1)
-```
+它本身不持有任何 CA 私钥，而是一条"声明式证书流水线"：
 
-从 `10.0.0.10:30003/fake-tiktok/xxx:sha` 里按 `/` 切第一段，得到 `10.0.0.10:30003`。
-
-```sh
-cat > /tmp/buildkitd.toml <<EOF
-[registry."${registry_host}"]
-  ca = ["/certs/ca.crt"]
-EOF
-export BUILDKITD_FLAGS="--oci-worker-no-process-sandbox --config /tmp/buildkitd.toml"
-```
-
-- BuildKit 默认用系统 CA 校验 HTTPS；Harbor 是内部 CA 签发，必须显式把 `/certs/ca.crt` 加进信任列表；
-- 这段 TOML 是 **buildkitd 的配置**，不是 buildctl 参数，所以通过 `--config` 传给 daemon；
-- `/certs/ca.crt` 来自 cert-manager 生成的 `harbor-tls` Secret，随证书自动续期；
-- `--oci-worker-no-process-sandbox` 是 rootless 模式在 K8s 里启动的前提。
-
-**⑤ 拆分 Dockerfile 路径**
-
-BuildKit 的 Dockerfile frontend 不接受“一个完整路径”，它要两个参数：
-
-```sh
-dockerfile_dir=$(dirname "$(params.dockerfile)")    # web
-dockerfile_name=$(basename "$(params.dockerfile)")  # Dockerfile
-```
-
-对应 `--local dockerfile=<目录>` + `--opt filename=<文件名>`。
-
-**⑥ buildctl 参数**
-
-| 参数 | 含义 |
+| 职责 | 具体动作 |
 |---|---|
-| `buildctl-daemonless.sh` | 在容器里临时拉起 buildkitd，构建完退出；不需要单独部署 BuildKit 服务，也不挂 docker.sock |
-| `--frontend dockerfile.v0` | 用 Dockerfile 前端解析 |
-| `--local context=...` | 构建上下文；Go 服务是仓库根，web 是 `web/` |
-| `--local dockerfile=...` | Dockerfile 所在目录 |
-| `--opt filename=...` | 目录下的 Dockerfile 文件名 |
-| `--opt target=...` | 多阶段构建的目标 stage |
-| `--output type=docker,dest=...` | 输出 docker-archive 格式 tar，**不 push** |
-| `name=$(params.image)` | 把完整镜像名写进 tar 的 manifest，Skopeo 后续按这个引用推 |
-| `--progress plain` | 按行输出日志，Tekton 日志里可读 |
+| 监听期望状态 | watch `Certificate` / `Issuer` / `ClusterIssuer`，以及每张证书的续期时间 |
+| 生成与轮换私钥 | 按 `privateKey` 段生成私钥；`rotationPolicy: Always` = 每次续期换新私钥 |
+| 组织签名请求 | 拼 CSR，按 `issuerRef` 找到 issuer，调它的签名实现 |
+| 落盘 | 把 `tls.crt / tls.key / ca.crt` 写进 `secretName` 指定的 Secret，并置 `Ready` |
+| 定时续期 | 到 `renewBefore` 就重跑一遍流程；`duration` 是单张证书寿命 |
 
-**为什么输出 tar 而不是 `type=image,push=true` 直接推**：下一步 Trivy 要扫这个 tar，扫过才允许推。先推再扫的话，高危镜像已经进 Harbor，所谓“阻断”只是不部署，镜像仍可被任何有 pull 权限的人使用。
+所以链路上真正"签"的动作发生在 issuer 里，cert-manager 只是把**声明、私钥、Secret、时间表**串起来。信任关系也不由它决定——客户端信谁，取决于你把根 CA 的 `ca.crt` 分发到了哪里。
 
-### Harbor 的认证体系
+私钥全程在集群内生成，唯一载体是 Secret；`cert-manager` 命名空间里那张根 CA 的 Secret 是整套体系里最高敏的对象。
 
-Harbor 不是“registry 加个密码”，而是 **core（认证/授权/签发 token）+ registry（只认 token）+ proxy** 的组合。认证和授权是分开的。
+#### selfsigned-bootstrap：只用来"点火"的 Issuer
 
-#### 请求路径
+一个 `ClusterIssuer`，内容只有三行：
 
-```
-docker / skopeo / buildkit / containerd
-        │  HTTPS :30003
-        ▼
-   Harbor proxy (nginx)
-        ├── /api/*、/service/token  → core（查身份、查权限、签 JWT）
-        └── /v2/*                   → registry（只验 token，不查数据库）
+```yaml
+spec:
+  selfSigned: {}
 ```
 
-#### Token 认证流程（Docker Registry v2 标准）
+签出来的证书 **issuer == subject**，没有上级——这正是根 CA 需要的形态（根没有别人能签它）。
 
-以 `skopeo copy` 推镜像为例：
+它的两个局限决定了"只签 CA、签完封存"：
 
-1. 第一次请求 `/v2/fake-tiktok/fake_tiktok-user/blobs/...`，不带凭证；
-2. registry 返回 `401`，响应头带：
-   ```
-   WWW-Authenticate: Bearer realm="https://<harbor>/service/token",
-                     service="harbor-registry",
-                     scope="repository:fake-tiktok/fake_tiktok-user:pull,push"
-   ```
-3. 客户端拿 Basic Auth（用户名/密码或 robot 凭据）去 `/service/token` 换 token；
-4. core 校验身份、查项目成员/robot 权限，签发一个 **JWT**，scope 限定在这个 repository 的 `pull,push`，默认 30 分钟有效；
-5. 客户端带 `Authorization: Bearer <token>` 重试，registry 用 core 的公钥验签并检查 scope，通过才允许推拉。
+- **签出的东西没有可验证的信任锚**：自签名只能带外信任（手动导入、Ansible 分发）。拿它直接签服务端证书，就退化成"每台客户端各自导入一次"，统一信任的问题一点没解决；
+- **没有吊销/轮换的抓手**：换证书只能靠人工重发，且客户端要跟着重导。
 
-三个关键推论：
+所以它的定位是 **bootstrap（点火）**：签一次根 CA，之后所有证书都走 CA Issuer。
 
-- **registry 自己不存用户、不查库**，只信任 core 签的 token；
-- 改密码/禁用 robot 后，已签发的 token 在过期前仍然有效（默认 30 分钟）；
-- 节点时钟不同步会导致 JWT 验签失败，NTP 必须正常。
+#### 还有哪些 Issuer，本项目为什么只留两个
 
-#### 身份来源
-
-| 模式 | 说明 |
-|---|---|
-| Database（默认） | Harbor 本地用户，密码 bcrypt 存储 |
-| LDAP / AD | 对接企业目录，用户不落 Harbor 库 |
-| OIDC | 对接 Keycloak/Okta 等；CLI 用 UI 生成的 CLI Secret 当密码 |
-
-Robot 账号是 Harbor **本地**身份，不随 LDAP/OIDC 变化，适合 CI。
-
-#### 角色与 robot
-
-| 层级 | 角色 |
-|---|---|
-| 系统级 | Administrator |
-| 项目级 | Project Admin / Maintainer / Developer / Guest / Limited Guest |
-| 机器身份 | Robot Account（项目级或系统级） |
-
-- 项目可以是公开（匿名可 pull）或私有；CI 用的项目必须私有；
-- Robot 只能做机器认证，不能登录 UI；
-- Robot 可限制权限（pull / push / delete / scan）和有效期；
-- 项目 robot 的完整用户名通常是 `robot$<项目名>+<机器人名>`，以 UI 创建后显示的为准。
-
-#### 本项目里的两个身份
-
-| Secret | 命名空间 | 使用者 | 权限 |
+| Issuer 类型 | 签名凭据来自 | 本项目 | 说明 |
 |---|---|---|---|
-| `harbor-push` | `platform-system` | Tekton 的 Skopeo / BuildKit 缓存 | 项目 `fake-tiktok` 的 push + pull |
-| `harbor-pull` | `fake-tiktok` | kubelet 拉业务镜像 | 项目 `fake-tiktok` 的 pull |
+| `SelfSigned` | 无（自签） | ✅ `selfsigned-bootstrap` | 只签根 CA |
+| `CA` | 存着 CA 私钥的 Secret | ✅ `fake-tiktok-ca` | 签所有业务证书；根私钥不出集群 |
+| `ACME` | Let's Encrypt 等公网 CA | ❌ | 要公网域名 + 80/443 可达（HTTP-01）或 DNS-01；实验环境两样都没有 |
+| `Vault` | Vault PKI 引擎 | ❌ | 多一个组件和一条运维路径，收益是动态短期证书，小集群用不上 |
+| `Venafi` 等 | 商业 CA 平台 | ❌ | 同上 |
 
-**为什么必须是两个**：最小权限 + 爆炸半径。构建机被攻破，攻击者只拿到 push 凭据；业务节点只拿 pull 凭据，泄露了也推不了镜像。永远不要用 admin 账号做 CI。
+还有个作用域区别：`Issuer` 是命名空间级，`ClusterIssuer` 是集群级。本项目要跨 `cert-manager` / `platform-system` / `istio-system` 三个命名空间签，所以统一用 `ClusterIssuer`。
 
-两个 Secret 都是 `kubernetes.io/dockerconfigjson` 类型：
+#### fake-tiktok-ca 的两个身份（最容易混的一处）
 
-```json
-{"auths":{"10.0.0.10:30003":{"username":"robot$ci","password":"..."}}}
+它同时是一个 Certificate 和一个 ClusterIssuer 的名字：
+
+| 对象 | 位置 | 是什么 |
+|---|---|---|
+| `Certificate fake-tiktok-ca` | `cert-manager` 命名空间 | 根证书本体：`isCA: true`、10 年、ECDSA P-256，产物是 Secret `fake-tiktok-ca` |
+| `ClusterIssuer fake-tiktok-ca` | 集群级 | 签发器：`spec.ca.secretName: fake-tiktok-ca` 只是**引用**上面的 Secret，读私钥去签别人 |
+
+同名不是笔误，但读的时候要分清：**Certificate 是"这张证书"，ClusterIssuer 是"用这张证书去签别的证书"的能力**，两者不是同一份数据。
+
+作用有两层：
+
+1. **信任锚**：`ca.crt` 被分发到四个信任点 + 网格的 `cacerts`；
+2. **签发者**：`harbor-tls`、`istio-ca`（进而全部 SVID）都由它签。
+
+风险也集中在这一个对象上：根私钥泄露 = 攻击者能签任意 SAN 的证书，所有内部 TLS 的"服务端身份鉴别"直接失效——所以它 10 年一换、只用于内部、绝不对外。
+
+#### harbor-tls 里有什么，谁在用
+
+`Certificate platform-system/harbor-tls` 签出的是 **leaf（服务端）证书**，SAN 类型是 `ipAddresses`，值为节点 IP：
+
+| Secret 里的 key | 内容 | 谁用 |
+|---|---|---|
+| `tls.crt` | 服务端证书（leaf），SAN = 节点 IP | Harbor chart（`expose.tls.certSource: secret`）起 30003 HTTPS |
+| `tls.key` | 服务端私钥 | 同上 |
+| `ca.crt` | 签发它的根 CA | Tekton（BuildKit/Skopeo）、containerd、浏览器 |
+
+一份 Secret 两种用途，靠 `items` 过滤各取所需：服务端要 `tls.crt/tls.key`，客户端只要 `ca.crt`。续期只换 leaf，`ca.crt` 不变，客户端配置一行都不用改。
+
+为什么 SAN 用 IP 而不是域名：实验环境没有内部 DNS，所有客户端都用 `IP:30003` 访问；证书里没有这个 IP，TLS 校验就过不去。**换域名时把 `ipAddresses` 改成 `dnsNames` 即可，其余不动。**
+
+#### BuildKit 怎么借证书推、拉 Harbor 缓存
+
+BuildKit 跟 Harbor 有两次交互，两次都要过完整 TLS 校验：
+
+**第一次：拉旧缓存（import）**
+
+```text
+buildctl build --import-cache type=registry,ref=<IP>:30003/fake-tiktok/buildcache-go:main
+  → 解析 ref，向 Harbor 要 manifest
+  → TLS 握手：服务端出示 harbor-tls 的 tls.crt
+  → BuildKit 用 /certs/ca.crt 验链，再校验 SAN 是否等于节点 IP
+  → 通过 → 拉 manifest/blobs → 恢复到本地 buildkit state
 ```
 
-kubelet、Skopeo、BuildKit 读的都是这套 docker config 格式。
+**第二次：推新缓存（export）+ 推产物**
 
-#### TLS 在认证里的位置
+```text
+buildctl ... --export-cache type=registry,ref=...,mode=max,ignore-error=true
+  → 同一个 TLS 通道 PUT manifest/blobs；凭据来自 harbor-push（robot 账号）
+  → 缓存失败不阻断构建
 
-Harbor 的 token 是 Bearer JWT；**如果跳过 TLS，token 和 Basic 凭据都可能被中间人截获**。所以认证体系的可信度依赖 TLS：
+产物不走 BuildKit：--output type=docker,dest=image.tar
+  → Skopeo 用 --dest-cert-dir=/certs 把 tar 推到 docker://<IP>:30003/...
+```
 
-- Harbor 证书由 cert-manager 内部 CA 签发；
-- Skopeo：`--dest-cert-dir=/certs`；
-- BuildKit：`buildkitd.toml` 的 `ca = [...]`；
-- containerd：`/etc/containerd/certs.d/<host>/ca.crt`；
-- 三处都**不再 skip-verify**。
+证书怎么进容器：
 
-#### 常见错误对照
+1. `volume harbor-ca` 指向 Secret `harbor-tls`，`items` 只取 `ca.crt`，挂到 `/certs`（build / push 两个 step 共用）；
+2. build step 运行时**动态生成** `buildkitd.toml`——registry host 来自参数（`params.image` 第一段），不能写死；且 BuildKit 只认配置文件，没有"传 CA 路径"的环境变量：
 
-| 报错 | 根因 |
+```toml
+[registry."<IP>:30003"]
+  ca = ["/certs/ca.crt"]
+```
+
+3. `BUILDKITD_FLAGS="--config /tmp/buildkitd.toml"` 生效后，BuildKit 对 `IP:30003` 的所有请求都按完整校验处理（对比老做法 `insecure = true`，那是关校验）。
+
+三个容易踩的点：
+
+- **ref 里的 host 必须与 SAN 逐字一致**：证书是 IP SAN，引用就只能写 `IP:30003`，写 `localhost` 或服务名会报 `x509: certificate is valid for ...`；
+- **`ca` 是 registry 级别的配置**，不是全局；换 Harbor 地址就要换这段（脚本按参数取 host，天然适配）；
+- **kubelet 拉镜像是另一条链**：containerd 的 `/etc/containerd/certs.d/<IP>:30003/{ca.crt,hosts.toml}`（Ansible 落地），跟 BuildKit 互不影响，但共用同一个 `ca.crt`。
+
+#### 全集群共用一个根 CA：istio 不再用自签根
+
+默认行为：`istio-system/cacerts` 不存在时，istiod 首启会**自签一套根 CA**（存进 `istio-ca-secret`），网格内所有 SVID 链到它。结果是集群里两套互不认的信任锚：Harbor 一套、网格一套——客户端要装两份，跨边界（网格 ↔ 非网格）也没法互相验证。
+
+大厂的做法是**一个根 + 若干中间 CA**：根只签中间 CA，各组件（网格、registry、内部服务）用各自的中间 CA 签工作负载证书，最终链回同一个根。
+
+本项目的落地：
+
+| 步骤 | 对象 | 结果 |
+|---|---|---|
+| 1 | `Certificate istio-system/istio-ca`（`isCA: true`，issuerRef = `fake-tiktok-ca`） | 中间 CA，Secret `istio-ca`：`tls.crt`=中间 CA、`tls.key`、`ca.crt`=根 |
+| 2 | CronJob `istio-cacerts-sync` | 装配 `istio-system/cacerts`：`ca-cert.pem`=tls.crt、`ca-key.pem`=tls.key、`root-cert.pem`=ca.crt、`cert-chain.pem`=tls.crt |
+| 3 | `helm install istiod` | 启动时发现 `cacerts` → 用它签 SVID，不再自签根 |
+
+**为什么不直接把根 CA 塞给 istiod**：
+
+- istiod 必须把 CA 私钥长期挂在控制面 Pod 里（Secret → 文件）；给根等于把唯一信任锚的私钥复制一份进 `istio-system`，泄露面翻倍；
+- 根 10 年一换，换的时候 Harbor、containerd、浏览器全都要重新分发 `ca.crt`；中间 CA 可以单独吊销/轮换，根私钥始终只留在 `cert-manager` 命名空间；
+- 中间 CA 签出的证书照样链回根，客户端只认根，验链结果不变——**收益是隔离，损失为零**。
+
+迁移注意：**已有集群**从自签根切过来时，旧 sidecar 证书链到旧根、新 sidecar 链到新根，互验不过，需要把所有注入 Pod 滚动重启一次（或等默认 24h 轮换到期）。全新安装没有这个问题。
+
+验证：`istioctl proxy-config secret <pod> -n fake-tiktok`，看 `ROOTCA` 是不是 `fake-tiktok-ca` 那张根证书。
+
+#### 四个信任点（谁拿 ca.crt）
+
+| 客户端 | 用法 |
 |---|---|
-| `401 Unauthorized` / `authentication required` | 没带凭据、robot 密码错、robot 过期/禁用 |
-| `403 denied: requested access to the resource is denied` | robot 没有该项目 push 权限，或仓库路径/项目名写错 |
-| `PROJECT_NOT_FOUND` | Harbor 里没建 `fake-tiktok` 项目 |
-| `x509: certificate signed by unknown authority` | 客户端没挂 CA（已用 cert-manager 解决） |
-| `no basic auth credentials` | `DOCKER_CONFIG` 路径不对，或 Secret 没挂进容器 |
-| `manifest unknown`（缓存 import 时） | 第一次构建还没有缓存，正常提示，不影响构建 |
+| BuildKit（缓存 import/export） | 运行时生成 `buildkitd.toml`：`[registry."<IP>:30003"] ca = ["/certs/ca.crt"]` |
+| Skopeo（push） | `--dest-cert-dir=/certs` |
+| containerd（kubelet 拉镜像） | `/etc/containerd/certs.d/<IP>:30003/ca.crt` + `hosts.toml`（Ansible 03 落地） |
+| 浏览器（Harbor UI / Grafana） | 系统导入根 CA，或内网访问时手动信任一次 |
+| Istio 网格（istiod 签 SVID） | `cacerts` 的 `root-cert.pem` = 同一个根，sidecar 之间自动互验，不用人工分发 |
 
-一句话：**Harbor 的认证 = Basic 换 JWT、registry 只认 token；授权 = 项目角色/robot 权限决定 token 的 scope。** `harbor-push` 负责“能推”、`harbor-pull` 负责“能拉”、CA 负责“推拉过程不可被篡改”，三者缺一不可。
+#### 部署顺序（错一步起不来）
+
+```
+cert-manager helm install
+  → kubectl apply -k manifests（先替换成真实 IP 的 SAN）
+    → wait certificate/fake-tiktok-ca / harbor-tls / istio-ca Ready
+      → istio-cacerts-sync 生成 istio-system/cacerts（CronJob，可手动触发一次）
+        → helm install istiod（看到 cacerts 才不自签根）
+          → helm install Harbor（certSource: secret）
+            → apply Tekton 流水线（Task 挂 ca.crt）
+```
+
+反过来会怎样：Harbor 缺 Secret 起不来（Pod 卡在挂载）；istiod 先起来会自签一套根，之后再塞 `cacerts` 就得额外做一次证书迁移（滚动重启所有注入 Pod）。
+
+#### 轮换与演进
+
+- **服务端证书自动续**（提前 30 天），CA 不变 → 客户端挂的 ca.crt 无感，客户端不用做任何事；Harbor 侧要重新读一次证书（Pod 滚动一次即可）；
+- **中间 CA（istio-ca）1 年、提前 30 天续**：CronJob 对账后重启 istiod，之后新签的 SVID 用新中间 CA，旧证书在有效期内仍然验得过（链回同一个根）；
+- 根 CA 10 年到期才需要重分发 ca.crt（Ansible 重跑一遍 certs.d 那步 + 重新装配 cacerts）；
+- 生产如果有了公网域名 + 出口，可把签发者换成 Let's Encrypt——**信任模型不变，只换签发者**，四个信任点的配置一行不用动。
+
+### 网格边界：谁进网格，谁走单向 TLS
+
+一条总原则：**进网格是为了拿 L7 能力（路由/重试/熔断/按身份授权）；只需要"链路加密 + 服务端身份"的组件，用单向 TLS 更划算。**
+
+| 组件 | 进网格 | 加密方式 | 依据 |
+|---|---|---|---|
+| fake-tiktok（业务三服务 + web + worker） | 是 | mTLS（自动） | 东西向调用最密集，重试/熔断/限流都靠 sidecar；身份即 ServiceAccount，可直接写 AuthorizationPolicy |
+| 可观测性（prometheus / otel-collector / tempo / loki / grafana） | 是 | mTLS（自动） | 全是网格内调用：业务 sidecar→collector:4317、collector→tempo、grafana→prometheus/loki。进网格后这些链路自动 mTLS，**不用再为指标端口开 PERMISSIVE 例外** |
+| mysql / redis / kafka | 否 | 服务端单向 TLS | 有状态第三方组件：注入 sidecar 会改端口与探针语义，主从切换时 sidecar 证书轮换是额外故障面；客户端身份本来就有账号密码/ACL 承担 |
+| MinIO | 否 | 服务端单向 TLS | 9000 端口同时是业务 API 和指标端点；Tempo（若在网格内）也要读它，出网格才不牵连业务端口 |
+| Harbor | 否 | 服务端单向 TLS（harbor-tls） | 不是 k8s 工作负载，被 kubelet / BuildKit / Skopeo / 浏览器多方访问，TLS 才是它能提供的全部 |
+
+三个结论式的理由：
+
+1. **可观测性进网格是对的**：它们都是无状态客户端/服务端，没有"端口语义被 sidecar 改写"的问题；粒度收益是抓取与写入两条链全都 mTLS，策略面收敛到一处。代价是 Prometheus 访问 K8s API 要多经过一跳 sidecar（mesh 出站默认 `ALLOW_ANY`，可通，但最好加 exclude 规则）、每个 Pod 多一个 sidecar 的资源与排障层。
+2. **中间件出网格是对的**：单向 TLS 已经把"链路加密 + 服务端身份"覆盖掉，客户端身份由它们自己的账号体系负责——这正是单向 TLS 的能力边界，多一个 sidecar 只是把边界外的东西硬塞进来。
+3. **单向 TLS 的缺口要写清楚**：它不鉴别客户端（谁都能连，只要知道账号）、没有 L7 策略（不能按 path/方法限流）、每套中间件要各配一份证书。前两条靠 Cilium NetworkPolicy 做 L3/L4 白名单补偿，第三条靠"都向 `fake-tiktok-ca` 申请证书"摊平成本。
+
+**与当前仓库的差异（这一版是目标设计，尚未全量落地）**：
+
+- 现状：[namespaces.yaml](file:///d:/study_project/fake_tiktok/project-infra/infra/base/namespaces.yaml) 里 `middleware` 是注入、`observability` 是不注入，正好相反；中间件也没开服务端 TLS（加密完全靠 mTLS）；
+- 要落地这一版，需要改四处：① 两个命名空间的注入 label 对调；② 删掉 [peer-authentication.yaml](file:///d:/study_project/fake_tiktok/project-infra/infra/base/istio/peer-authentication.yaml) 里的三个 `portLevelMtls` 例外（出网格后不存在 mTLS 例外）；③ mysql/redis/kafka/minio 各自开 TLS 并挂 cert-manager 证书（`require_secure_transport` / `tls-port` / SSL listener / `public.crt`+`private.key`）；④ 业务连接串与 Prometheus 抓取改 `https` + CA；
+- 本轮只落了证书侧（全集群单根 CA），网格范围与中间件 TLS 按上面清单推进。
+
+### Tekton 的 RBAC 怎么配的
+
+原则：**两个身份、职责分离、namespace 级最小授权**（[service-accounts.yaml](file:///d:/study_project/fake_tiktok/project-infra/cicd/tekton/rbac/service-accounts.yaml) + [roles.yaml](file:///d:/study_project/fake_tiktok/project-infra/cicd/tekton/rbac/roles.yaml)）：
+
+| ServiceAccount | 用在哪 | 权限 |
+|---|---|---|
+| `tekton-triggers-sa` | EventListener sink（TriggerTemplate 渲染 PipelineRun 时的身份） | 仅 `pipelineruns` 的 create/get/list/watch + `pipelines/tasks` 的 get/list/watch（渲染要读元信息） |
+| `tekton-build` | TaskRun Pod 跑流水线时的身份（TriggerTemplate 里 `taskRunTemplate.serviceAccountName`） | **不给任何 K8s 资源权限**；它需要的凭据全部来自挂载的 Secret（harbor-push、gitops-token） |
+
+三个刻意的"不给"：
+
+1. **Role 不用 ClusterRole**——作用域锁在 `platform-system`，被攻破也动不了别的命名空间；
+2. **triggers 身份不挂仓库凭据**——它只"能建一次流水线"，即使被滥用，本身拿不到 token；
+3. **build 身份不建资源**——跑任务的容器改不了集群对象。
+
+诚实的威胁模型边界：能创建任意 PipelineRun 的人，**间接触发 tekton-build 身份的任务**——所以 RBAC 不是第一道门，**HMAC 校验（webhook 入口）才是**；RBAC 是纵深防御的第二层，把"入口失守"从"集群沦降"压缩成"多跑几次流水线"。生产加固方向：admission policy 限制 `taskRunTemplate.serviceAccountName` 只能是白名单 SA。
+
+验证：
+
+```bash
+kubectl auth can-i create pipelineruns -n platform-system \
+  --as system:serviceaccount:platform-system:tekton-triggers-sa   # yes
+kubectl auth can-i list secrets -n platform-system \
+  --as system:serviceaccount:platform-system:tekton-triggers-sa    # no ← 对了
+```
+
+### Tekton 与 GitHub 之间的权限矩阵
+
+三个方向、**三把互不复用的钥匙**，每把最小 scope：
+
+| 方向 | 凭据 | scope / 机制 | 失守影响 |
+|---|---|---|---|
+| GitHub → Tekton（触发） | `github-webhook-secret` HMAC | 只校验 `X-Hub-Signature-256`，sha256 对 payload；事件只勾 push；生产加固：EventListener 限 GitHub meta IP 段 | 伪造触发（可被 IP 白名单 + 事件过滤兜住），拿不到任何仓库凭据 |
+| Tekton → 业务仓（读） | 默认**匿名**（公开仓）；私有仓用 `basic-auth` workspace + fine-grained PAT（只读、只此仓） | 官方 git-clone 退出时自动清理凭据文件；PAT 不写进 remote URL | 只读这一个仓 |
+| Tekton → infra 仓（写） | `gitops-token` PAT（或演进到 GitHub App installation token） | **只对 micro-bl--manifest 一个仓 contents:write**；提交带 `[skip ci]` 防止触发 infra 仓自己的 CI 造成回环 | 只能改这一个仓的清单文件 |
+
+设计要点三句话：
+
+1. **触发、读、写三个方向不共享凭据**——webhook 密钥泄漏不能推代码，写 token 泄漏不能伪造触发；
+2. **写权限给"产物通道"而不是"人"**——gitops-token 只用来 bump 一个 tag 字段，commit 作者是 `tekton-ci[bot]`，审计里一眼看出是机器；
+3. **个人 PAT 是过渡，GitHub App 是终态**——installation token 短时效、可吊销、审计归属应用而非个人账号，生产环境优先它。

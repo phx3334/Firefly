@@ -247,6 +247,11 @@ spec:
   secretName: blog-tls                  # 证书落地成这个 Secret
 ```
 
+**SAN（Subject Alternative Name，主题备用名称）——`dnsNames` 落到证书里的形态**：
+
+上面 `dnsNames: [a.com, www.a.com]` 签出来的证书里，这两个域名就写在 SAN 字段。它是浏览器握手时校验的核心：CA 签发证书 → 浏览器拿到证书后**只查 SAN**——访问的域名不在 SAN 里就报"证书名称不匹配"。
+**多域名和通配符都是 SAN 的写法**：一张证书可放多个 SAN（`a.com` + `www.a.com` 一张证搞定，即"SAN 证书"），`*.a.com` 通配符也是 SAN 里的一种模式。
+
 **调谐流程**（list-watch 监听 Certificate → 调谐，和 kube-controller-manager 同一套模型）：
 
 1. **apply 与校验**：`kubectl apply` 提交 Certificate 时，CR校验后 → 存 etcd → controller 通过 **list-watch 监听**到新建的 Certificate。
@@ -269,7 +274,7 @@ spec:
    | --- | --- | --- |
    | 典型场景 | 公网业务的具体域名：官网、博客、公网网关（`a.com`、`www.a.com`，一张证只护几个明确域名） | ① **通配符** `*.a.com`——内部服务一堆子域名（`api.`、`admin.`、`grafana.`），一张证全罩住，不用每个域名签一次；② **不暴露公网的服务**——内网 API、测试环境、只开 443 不开 80 的入口；③ 入口在云 LB/安全组后面，80 不方便对 CA 放行 |
    | 前提 | 域名解析指向集群入口，**80 端口公网可达** | 集群持有 **DNS 服务商 API 凭据**，能增删解析记录 |
-   | 不适合 | 通配符（机制上做不到）；80 打不通的内网服务 | 不愿交出 DNS 权限的高安全场景；DNS 商没有开放 API（国内小众后缀偶有） |
+   | 不适合 | 通配符（机制上做不到）；80 打不通的内网服务 | 不愿交出 DNS 权限的高安全场景；|
    | 选择倾向 | **默认选它**：零凭据、链路直观、故障一眼可见 | 只在有通配符/内网诉求时上，凭据按最小权限给、定期轮换 |
    
 6. **finalize 签发**：该 Order 下所有 Challenge 都 Valid → controller 向 CA 提交第 3 步的 CSR → CA 用自己的私钥签名，返回证书→ Order 变为 Valid。
