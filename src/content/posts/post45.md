@@ -548,7 +548,7 @@ spec:
 
 **摘除不健康实例的好处。** 没有 outlierDetection 时，Pod 没死就一直接流量，哪怕它已经连续 5xx：健康实例要替它背锅，上游还在把重试往它身上砸。摘除后：**故障被隔离在一个实例**，其余实例继续正常服务；上游的重试落到健康实例上、成功率恢复；到 `baseEjectionTime` 结束再试探性放回——恢复了就回归，没恢复就再摘，形成自愈闭环。`maxEjectionPercent: 50` 是最后的保险：极端情况下最多只摘一半，避免"全摘光 = 服务直接 0 可用"。
 
-关键认知：**业务代码一行熔断逻辑都不用写**。对比传统做法（Hystrix/Resilience4j 要每个调用点写注解、SDK 版本还要各语言对齐），Istio 把熔断下沉到了 Sidecar——配置在 DR 上，对业务完全透明。验证：`istioctl proxy-config cluster <pod>` 看 cluster 配置里的 outlierDetection 段，或故意 kill 掉一个副本观察 `istioctl proxy-config endpoint` 里它被摘出的过程。
+关键认知：**业务代码一行熔断逻辑都不用写**。对比传统做法，Istio 把熔断下沉到了 Sidecar——配置在 DR 上，对业务完全透明。验证：`istioctl proxy-config cluster <pod>` 看 cluster 配置里的 outlierDetection 段，或故意 kill 掉一个副本观察 `istioctl proxy-config endpoint` 里它被摘出的过程。
 
 ### 故障注入：主动制造故障测韧性
 
@@ -639,7 +639,7 @@ spec:
 
 ### Egressgateway：出向流量的门（与 ingress 对照）
 
-ServiceEntry 解决的是"网格认不认识外部服务"；如果还要**把出站流量强制收口到统一出口**（审计、固定出口 IP、出口限流），就部署 istio-egressgateway——它和 istio-ingressgateway 是同构的东西（无业务容器的 Envoy Deployment，label `istio: egressgateway`），只是站位在出口方向：
+ServiceEntry 解决的是"网格认不认识外部服务"；如果还要**把出站流量强制收口到统一出口**（审计、固定出口 IP、出口限流），就部署 istio-egressgateway——它和 istio-ingressgateway 是同构的东西，只是站位在出口方向：
 
 | | istio-ingressgateway | istio-egressgateway |
 | ---- | ---- | ---- |
@@ -647,7 +647,7 @@ ServiceEntry 解决的是"网格认不认识外部服务"；如果还要**把出
 | 方向 | 外 → 内 | 内 → 外 |
 | 大门 CR 的 selector | `istio: ingressgateway` | `istio: egressgateway` |
 
-egressgateway **默认不部署**（default profile 不含，demo profile 自带，见前文「安装与接入」），也可以用 IstioOperator 显式开启——开启后生成的 Deployment/Service 与 ingressgateway 完全同构：
+egressgateway **默认不部署**，也可以用 IstioOperator 显式开启——开启后生成的 Deployment/Service 与 ingressgateway 完全同构：
 
 ```yaml
 apiVersion: install.istio.io/v1alpha1

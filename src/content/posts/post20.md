@@ -74,7 +74,8 @@ POD即可。
 2、一个应用可能拆解成多个容器，想直接通过本地的IPC空间进行通信
 容器的设计思想-》一个容器只启动一个前台进程，只负责干一件事
 一个应用有很多事要做，那便需要创建多个容器，这多个容器不想通过网络进行通信，而是直接本地ipc通
-信，那就需要放在一起，pod这种可以把多个容器放在一起然后共享一个网络空间的机制便应运而生
+信，那就需要放在一起，pod这种可以把多个容器放在同一个Pod里、共享同一套命名空间（网络ns、IPC ns）
+的机制便应运而生
 ```
 ### 通信与资源共享
 Pod中的所有容器使用同一个网络namespace，即相同的IP地址和Port空间。它们可以直接用
@@ -118,8 +119,8 @@ kube-proxy自动维护------>负载均衡（service）--------同一个应用的
                                            |
                                            |-------同一个应用的POD副本3
 ```
-至于副本的故障检测、负载均衡代理目标端点的更新均有由k8s自动完成（kubelet检测pod状态汇报给
-apiserver组件，然后kube-proxy可以获取pod的状态变化，自动完成sevice代理目标端点的上下线）  
+至于副本的故障检测、负载均衡代理目标端点的更新均由k8s自动完成（kubelet检测pod状态汇报给
+apiserver组件，然后kube-proxy可以获取pod的状态变化，自动完成service代理目标端点的上下线）  
 **注意** ：kube-proxy为pod提供的是代理服务，而不是网络，pod的网络是kubelet调用网络插件实现的  
 #### ingress资源
 
@@ -158,7 +159,7 @@ ingress 就是为了解决"**外部用户如何通过域名/URL路径，访问�
 **第1步：DNS 解析**
 浏览器先查 DNS，把域名 `a.com` 解析成一个 IP。这个 IP 通常就是 ingress controller 对外暴露的地址：
 - 云上一般是 ingress controller 的 `LoadBalancer` 类型 service 分配到的外部 IP；
-- 自建集群可能是某个节点的 IP + `NodePort`，或 `hostNetwork` 直接用的节点 IP。
+- 自建集群可能是某个节点的 IP + `NodePort`，直接用的节点 IP。
 总之，这个 IP 指向的是 **ingress controller 所在的 Pod**，而不是你的应用 Pod。
 
 **第2步：建立 TCP 连接 + TLS 握手（HTTPS）**
@@ -213,7 +214,79 @@ kube-proxy 有两种工作模式，负载均衡的实现方式不一样：
 **第10步：响应原路返回**
 响应沿原路径回去：容器 →（CNI 网络）→ 节点 → kube-proxy 规则做反向 NAT 还原源地址 → ingress controller →（经 TLS 加密）→ 浏览器。浏览器收到 `{"status":"ok"}`，渲染或处理。
 
+#### cert-manager：自动化证书的第三方控制器
 
+第2步 TLS 握手里那张证书从哪来？手动流程是：`openssl` 生成私钥和 CSR → 提交给 CA（或 Let's Encrypt 网站）→ 拿到证书 → `kubectl create secret tls` 存成 Secret → ingress 的 `tls` 字段引用它。这套流程有两个必翻车的点：**证书会过期**（Let's Encrypt 只有 90 天），忘了续期业务直接 TLS 报错；**每加一个域名都要人肉走一遍**。cert-manager 就是把这件事变成"声明 + 调谐"的控制器。
+
+**核心 CRD 声明意图**（和 ingress 一样，自己不干活，只写 yaml）：
+
+```yaml
+# 1. Issuer：签发者（ns 内）；ClusterIssuer 跨 ns，一般用这个
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+#http01是ACME 的域名验证方式，Let’s Encrypt 用.letsencrypt.org是一个根CA，可以免费签发证书，时限90天
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ops@a.com
+    privateKeySecretRef: { name: letsencrypt-account-key }
+    solvers:                            # 域名验证方式，二选一
+      - http01:
+          ingress: { class: nginx }     # ACME 往 /.well-known/acme-challenge/ 放凭据
+---
+# 2. Certificate：要什么证书
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: blog-cert
+spec:
+  dnsNames: [a.com, www.a.com]   #证书对哪些域名有效
+  issuerRef: { name: letsencrypt-prod, kind: ClusterIssuer }
+  secretName: blog-tls                  # 证书落地成这个 Secret
+```
+
+**调谐流程**（list-watch 监听 Certificate → 调谐，和 kube-controller-manager 同一套模型）：
+
+1. **apply 与校验**：`kubectl apply` 提交 Certificate 时，CR校验后 → 存 etcd → controller 通过 **list-watch 监听**到新建的 Certificate。
+2. **对接签发账户**：controller 读 `issuerRef` 找到 ClusterIssuer，ACME account key 是和 Let’s Encrypt 通信的账号密钥
+3. **本地生成私钥与 CSR（证书签名请求）**：私钥在 cert-manager Pod 内存里现生成，**私钥本身从不发给 CA**——提交给 CA 的只有 CSR（含公钥和 `dnsNames` 列表）
+4. **落成内部资源 Order + Challenge**：
+   ```text
+   Certificate（你声明的）
+     └─ Order（每张证书一个，cert-manager 内部资源，状态机 Pending→Valid/Failed）
+          └─ Challenge（每个域名一个，域名验证过程，Pending→Valid）
+               └─ 全部 Valid → finalize → 写回 Secret
+   ```
+5. **执行域名验证（走哪条由 ClusterIssuer 的 solvers 决定，二选一）**：
+   - **HTTP-01**：ACME 返回一个 token，cert-manager 算出验证值，创建临时 Challenge Pod + 临时 Ingress，暴露路径：`http://域名/.well-known/acme-challenge/<token>`，CA服务器访问这个路径，拿到验证串，校验正确 → 域名验证通过；之后自动清理临时 Pod、Ingress。**限制**：80 端口、公网可访问、不支持通配符
+   - **DNS-01**：ACME 同样下发一个 token，但 cert-manager 不碰任何端口，而是**拿着配好的 DNS 服务商 API 凭据**（对应 ClusterIssuer 里的 dns01 provider 配置）往 `_acme-challenge.域名` 写一条 TXT 记录（内容为 token 校验值）→ 等记录传播到权威 DNS（几十秒到几分钟，Challenge 会卡在 pending 等待）→ CA 向权威 DNS 查询这条 TXT，对得上 → 验证通过 → cert-manager 再调 API 删掉记录。**特点**：不要 80 端口、不要公网可达（纯内网服务也能签）、CA 验证的是"整个域名区域归你管"，所以**通配符 `*.a.com` 只有这一条路**；
+
+   **两条分支的应用场景（怎么选）**：
+
+   | | **HTTP-01** | **DNS-01** |
+   | --- | --- | --- |
+   | 典型场景 | 公网业务的具体域名：官网、博客、公网网关（`a.com`、`www.a.com`，一张证只护几个明确域名） | ① **通配符** `*.a.com`——内部服务一堆子域名（`api.`、`admin.`、`grafana.`），一张证全罩住，不用每个域名签一次；② **不暴露公网的服务**——内网 API、测试环境、只开 443 不开 80 的入口；③ 入口在云 LB/安全组后面，80 不方便对 CA 放行 |
+   | 前提 | 域名解析指向集群入口，**80 端口公网可达** | 集群持有 **DNS 服务商 API 凭据**，能增删解析记录 |
+   | 不适合 | 通配符（机制上做不到）；80 打不通的内网服务 | 不愿交出 DNS 权限的高安全场景；DNS 商没有开放 API（国内小众后缀偶有） |
+   | 选择倾向 | **默认选它**：零凭据、链路直观、故障一眼可见 | 只在有通配符/内网诉求时上，凭据按最小权限给、定期轮换 |
+   
+6. **finalize 签发**：该 Order 下所有 Challenge 都 Valid → controller 向 CA 提交第 3 步的 CSR → CA 用自己的私钥签名，返回证书→ Order 变为 Valid。
+7. **写回 Secret 并生效**：controller 把证书写进 `tls.crt`、我们本地自己的私钥写进 `tls.key`，创建/更新成 `kubernetes.io/tls` 类型的 Secret `blog-tls`（就是 ingress `tls.secretName` 引用的那个）。ingress-nginx watch 到 Secret 变化 → 热 reload nginx 的 SSL 配置 → 443 端口换上新证书，浏览器刷新即可看到。
+8. **状态回填**：每一步 controller 都把进展写回 `Certificate.status`
+9. **持续续期（核心价值）**：controller 每天巡检所有 Certificate，当到达 `renewalTime`（默认约为有效期的 1/3 处，90 天证书即剩约 30 天）→ 自动重复第 3-7 步签一张新证书 → 覆盖同一个 Secret → nginx reload，业务全程无感。
+
+**排障按资源链逐层下钻**：
+
+```bash
+kubectl describe certificate blog-cert        # 看 Ready 条件、renewalTime，先确认卡在哪层
+kubectl get order                             # Order 层：卡 Pending 说明还没走完验证
+kubectl describe challenge -l cert-manager.io/certificate-name=blog-cert   # Challenge 层：90% 的故障在这
+kubectl get secret blog-tls                   # 最终产物在不在
+```
+
+Challenge 常见死因就：**HTTP-01**——安全组没有放行80端口。**DNS-01**——TXT 记录没传播完（`NXDOMAIN`，多等几十秒重试）；
 
 ### 主节点部署的组件
 #### etcd分布式数据库
@@ -229,7 +302,7 @@ ETCD核心使用了RAFT分布式一致性算法，因此通常部署奇数个
 为了以容错方式达成一致，我们肯定不可能要求所有服务器100%都达成一致状态，只要超过半数的大多数服务
 器达成一致就可以了，假设有N台服务器，N/2+1就超过半数，代表大多数了，这就是raft算法的核心原理
 ```
-**注意** ：：etcd数据库对数据量大小是有限制的，这会影响到集群规模的扩大，node节点增多，相应的master节点
+**注意**：etcd数据库对数据量大小是有限制的，这会影响到集群规模的扩大，node节点增多，相应的master节点
 也要增多，master节点上其他组件都不是限制集群规模
 的要素，etcd的性能决定了集群可以扩到多大
 #### apiserver
@@ -237,14 +310,14 @@ k8s所有的状态信息都存放在etcd集群中，而etcd只能被apiserver操
 只能去访问apiserver才能间接地访问到etcd数据库，因此apiserver是整个K8S集群入口、是k8s所有模
 块之间相互通信和数据交互的中心、相当于整个k8s的大脑/大总管/中央枢纽
 #### kube-scheduler
-实际环境中会有多台机器用于跑容器，如何从中选取最合适的那一台，这就用到了k8s的组件：kube-
-scheduler
-sheduler会经历预选（选择出符合条件的）与优先（选出资源最优的）两个阶段来选出合适的一个node
-节点，然后该node节点上的kubelet会收到请求来调用容器引擎创建pod
+实际环境中会有多台机器用于跑容器，如何从中选取最合适的那一台，这就用到了k8s的组件：kube-scheduler
+scheduler选节点分两个阶段：**Filter（过滤）**淘汰不满足条件的节点（资源不够、有污点等），**Score（打分）**
+给剩下的节点按规则打分、选最优的一个，然后把nodeName写回apiserver——该节点上的kubelet通过
+watch发现有Pod调度到本机，再调用容器引擎创建pod
 #### kube-controller-manager
 ##### 什么是控制器controller
 在K8S集群中，几乎每种特定资源都有特定的Controller控制器负责维护管理。
-我们以POD这种资源为例，POD启动后，k8s需要对齐进行自动化管理，例如故障监控与自愈，这都需
+我们以POD这种资源为例，POD启动后，k8s需要对其进行自动化管理，例如故障监控与自愈，这都需
 要有专门的程序负责维护，这个程序就是k8s的控制器，控制器有内置的、后续你也可以自定义，内置的
 控制器种类有deployment、statefulset，daemonset、cronjob等，不同的控制器的有不同的特性，这
 是我们后续介绍的一个重点。
@@ -261,7 +334,8 @@ controller-manager------>多种控制器（deployment、statefulset、cronjob等
 ```
 controller-manager负责监视着每一个控制器（控制器通过API Sever监控整个集群的状态），如果控制
 器不健康无法工作，那么controller-manager会及时发现并执行自动化修复流程来确保控制器的健康，
-使得集群处于预期的工作状态，由于Master有多个，所以controller-manager具有冗余性。  
+使得集群处于预期的工作状态。多台Master会部署多个controller-manager副本，但通过leader
+election（领导者选举）选出一个active实例真正干活，其余热备待命——避免多副本同时执行同一套调谐逻辑产生冲突。  
 ##### 常见控制器（了解）
 k8s中有几十种Controller，这里简单罗列一些Controller
 | 控制器                                                          | 作用                                                                                                                                                                                                                                                                         |
@@ -288,8 +362,7 @@ k8s中有几十种Controller，这里简单罗列一些Controller
 | ConfigMap/Secret | apiserver 存数据            | 没有控制器参与：kubelet 在 Pod 启动时把它挂载成文件或注入环境变量                                 |
 | Namespace       | apiserver 存对象             | NamespaceController 管生命周期（配额清理、删除回收）                                              |
 #### 客户端工具
-kubctl这个客户端程序的调用操作都是过kube-apiserver提供的HTTP Restful API接口进行。
-
+kubectl这个客户端程序的调用操作都是过kube-apiserver提供的HTTP Restful API接口进行。
 
 ## 一个 apply 的完整流程（以 Deployment 为例）
 ### 核心模型：apply 原生资源到底发生了什么
@@ -310,7 +383,7 @@ K8s 原生资源（`Deployment`/`Service`/`Pod`/`ConfigMap` 这类内置 kind）
 5. ReplicaSetController 监听到 RS 新增，发现当前 Pod 不够
    → 按 RS 里的 Pod 模板创建 **Pod** 对象，写入 etcd（此时 Pod 处于 Pending，还没选节点）
 6. **kube-scheduler** 调度器监听到未绑定节点的 Pod
-   看 Pod 的资源请求、亲和、污点，走预选+优选选一个合适节点，把 nodeName 写回 etcd
+   看 Pod 的资源请求、亲和、污点，走 Filter（过滤）+ Score（打分）选一个合适节点，把 nodeName 写回 etcd
 7. 目标节点上的 **kubelet** 一直 watch 分配给自己的 Pod
    kubelet 发现有新 Pod 调度到本机 → 调用 CRI（containerd 等）拉镜像、调 CNI 配网络、创建并启动容器
 8. 容器启动后，kubelet 持续上报 Pod 状态给 apiserver，更新 etcd 里 Pod 的 status
@@ -354,7 +427,7 @@ k8s中各组件间协同都采用list-watch机制进行通信。
 - 用户kubectl创建一个ReplicaSet请求调用Api-server，Api-server将创建replicaSet存储到etcd
 中,Api-server同时也获取到创建replicaset的created事件
 - controller-manager此刻watch到replicaset创建时间后通过pod模版进行pod创建并持久化到etcd中
-- scheduler watch到创建的pod创建事件通过预选和优选策略为pod选定运行的node，并更新pod的
+- scheduler watch到创建的pod创建事件通过Filter过滤和Score打分策略为pod选定运行的node，并更新pod的
 nodeName字段
 - 之后kubelet watch到在自己上需要运行pod，调用cri/cni/csi创建pod。
 ###  List-watch是如何实现的
@@ -386,13 +459,13 @@ eventHandler进行对应事件类型的业务逻辑处理
 用curl模拟watch:  
 ```bash
 #终端1，在本地机器起一个HTTP 代理，把你本机的请求自动带上集群认证信息，转发给 kube-apiserver，用自己处理认证和证书
-$kubectl proxy
-#终端2，list出defaullt名称空间下的pods
-$curl"127.0.0.1:8001/api/v1/namespaces/default/pods"
+$ kubectl proxy
+#终端2，list出default名称空间下的pods
+$ curl "127.0.0.1:8001/api/v1/namespaces/default/pods"
 #终端2：watch default 下的 Pod 变化
-$curl"127.0.0.1:8001/api/v1/namespaces/default/pods?watch=true"
+$ curl "127.0.0.1:8001/api/v1/namespaces/default/pods?watch=true"
 #终端3：创建
-$kubectlrunnginx--image=nginx
+$ kubectl run nginx --image=nginx
 ```
 
 ### List-watch设计理念
@@ -400,9 +473,9 @@ $kubectlrunnginx--image=nginx
 #### 消息可靠性
 首先消息必须是可靠的，list和watch一起保证了消息的可靠性,避免因消息丢失而造成状态不一致场景。
 具体而言，
-List API可以查询当前的资源及其对应的状态(即期望的状态)，客户端通过拿期望的状态和实际的状态进
-行对比，纠正状态不一致的资源。
-Watch API和apiserver保持-个长链接，接收资源的状态变更事件并做相应处理。
+List API可以一次性获取某类资源当前的全部对象，对象里既有spec（期望状态）也有控制器回填的status
+（实际状态），客户端拿期望与实际对比，纠正状态不一致的资源。
+Watch API和apiserver保持一个长链接，接收资源的状态变更事件并做相应处理。
 如果仅调用watch API,若某个时间点连接中断，就有可能导致消息丢失，所以需要通过list API解决消息
 丢失的问题。
 从另一个角度出发,我们可以认为list API获取全量数据，watch API获取增量数据。虽
@@ -452,7 +525,6 @@ kube-scheduler           → 调度（Schedule）：新 Pod 放哪个节点
 ```
 对应前面的 apply 完整流程：controller-manager 里的控制器生成"创建 Pod"的动作 → scheduler 选好节点 → 节点上的 kubelet 创建容器。两者分工不同、缺一不可。
 
-
 ## csi,cni,cri
 
 k8s 自己不干"搬砖"的活——它把容器怎么跑、网络怎么通、存储怎么挂这三件事**接口化**，交给真正的实现方。三个接口名字都是"Container + 领域 + Interface"：
@@ -492,4 +564,4 @@ kubelet（每节点代理，唯一的"总调用方"）
 
 一句话总结：**CRI 管容器生命周期、CNI 管 Pod 网络、CSI 管存储卷——三套 gRPC/二进制接口 + kubelet 这一个总调用方，把"编排逻辑"和"具体实现"解耦，k8s 的整个生态插件体系就建立在它们之上**。
 
-**更深层次剖析请看https://bbs.huaweicloud.com/blogs/334436**
+**更深层次剖析请看[这篇博客](https://bbs.huaweicloud.com/blogs/334436)**

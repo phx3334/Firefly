@@ -10,6 +10,7 @@ lang: '中文'
 ---
 
 
+
 kubeadm部署见https://egonlin.com/?p=10762（对于Ubuntu来说默认不用networkmanager和selinux，前端防火墙命令用ufw）
 
 ## 手动二进制包部署
@@ -199,7 +200,7 @@ vim /etc/kubernetes/manifests/kube-apiserver.yaml   # 保存后 kubelet 自动�
 小结：**静态 Pod = kubelet 根据 manifests 目录文件自动管理的 Pod**，不经过 API Server、删不掉、只能改文件控制，核心用途是自举控制面组件。
 
 ### Secret和配置管理
-secret在K8S中表示一个存储在etcd中的配置，通常用Base64编码，此配置可以通过挂载卷或者环境变量的方式供Pod访问，通常用来放各种凭证，例如数据库密码，TLS证书，镜像仓库拉取凭证。
+secret在K8S中表示一个存储在etcd中的配置，通常用Base64编码，此配置可以通过挂载卷或者环境变量的方式供Pod访问，通常用来放各种凭证，例如数据库密码，TLS证书，镜像仓库拉取凭证。注意手动创建的 TLS 证书 Secret 会过期（Let's Encrypt 只有 90 天），生产上这类证书由 cert-manager 控制器自动签发和续期，详见 post20。
 通过下面的secret.yaml声明创建一个Secret，名字和密码是base64编码后的
 ```yaml
 apiVersion: v1
