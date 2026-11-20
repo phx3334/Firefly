@@ -868,6 +868,46 @@ spec:
 | 目的地策略 | DestinationRule ×2 | 规则 → 下发给**发起调用一侧**的 Envoy | 到了目标怎么连（版本子集 / 负载均衡 / 熔断）？ |
 | 翻译工头 | istiod | 控制平面 | Watch CR → 翻译成 xDS → 下发，不碰流量 |
 
+### A/B 测试：灰度的姊妹场景
+
+实战里那个 95/5 是**灰度**；还有一类长得像、目的完全不同的切流——**A/B 测试**。两者用的机制一模一样（VirtualService 路由 + DestinationRule subsets），混用是常见误区：
+
+| | 灰度 / 金丝雀 | A/B 测试 |
+| --- | --- | --- |
+| 目的 | **技术验证**：新版本没坏（错误率、延迟） | **业务决策**：哪个方案转化好（点击率、下单率） |
+| 生命周期 | 过渡态，验完就全量、配置删掉 | 两个变体**长期并存**做实验 |
+| 切流方式 | 按**比例**（`weight: 95/5`），每请求随机 | 按**用户维度**（header/cookie/user-id）：同一用户必须恒定落在同一组 |
+| 判定依据 | Prometheus 技术指标 | 业务埋点指标 + 样本量、显著性检验 |
+
+**为什么 A/B 不能用 weight**：权重切流是每请求独立掷硬币——同一个用户第一眼看到 A、刷新变 B，实验数据直接被污染。所以 A/B 用 `match` 按分组标路由，把"用户 → 组"的映射固定下来：
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: www
+spec:
+  hosts: ["www.mall.com"]
+  gateways: ["www-gateway"]
+  http:
+  - match:
+    - headers:
+        x-ab-group: { exact: "b" }   # 分组标：实验平台按 user-id/cookie 哈希后写进 header
+    route:
+    - destination: { host: web, subset: v2, port: { number: 8080 } }   # B 组 → 新方案
+  - route:                          # 兜底：没带标的一律当 A 组
+    - destination: { host: web, subset: v1, port: { number: 8080 } }   # A 组 → 基线
+```
+
+DestinationRule 复用实战那份 `v1/v2` subsets 即可，唯一的变化就是 VS 里 **weight 换成了 match**——这正是前文"按内容分流"那句的正主。
+
+两个边界要记清：
+
+1. **分组标不是 Istio 打的**：A/B 的"分桶"发生在流量进网格**之前**——实验平台/边缘层按 user-id 或 cookie 哈希出组别、写进 header（或客户端自带 cookie），Istio 只负责"看标路由"。打标错了，网格路由得再对数据也是废的。
+2. **Istio 只管把流量分对**：埋点上报、指标统计、显著性检验是业务代码和实验平台的活，网格是执行层不是裁判。看板上盯的是转化率，不是错误率。
+
+一句话收口：**灰度用 weight（按比例、过渡态、看技术指标），A/B 用 match（按用户、并存态、看业务指标）——VS 只是路由器，分组靠上游打标，裁决靠实验平台。**
+
 ## 中大厂使用istio的策略
 
 大厂落地 Istio 的共性可以概括成一句话：**能力按需开、范围按批扩、配置当代码管**——网格从来不是"一刀切全量上"的工程，而是分阶段、可回滚的基础设施演进。拆开是六条实战策略：
