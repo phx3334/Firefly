@@ -256,7 +256,11 @@ spec:
 
 1. **apply 与校验**：`kubectl apply` 提交 Certificate 时，CR校验后 → 存 etcd → controller 通过 **list-watch 监听**到新建的 Certificate。
 2. **对接签发账户**：controller 读 `issuerRef` 找到 ClusterIssuer，ACME account key 是和 Let’s Encrypt 通信的账号密钥
-3. **本地生成私钥与 CSR（证书签名请求）**：私钥在 cert-manager Pod 内存里现生成，**私钥本身从不发给 CA**——提交给 CA 的只有 CSR（含公钥和 `dnsNames` 列表）
+3. **本地生成私钥与 CSR（证书签名请求）**：在 cert-manager Pod 内存里现生成一对密钥（私钥 + 公钥），然后用这把新私钥对请求内容做签名，拼出 CSR：
+   ```text
+   CSR= 公钥 + 申请的域名（SAN 扩展）+ 申请人信息 + 用自己私钥做的签名
+   ```
+   末尾那个签名的作用是**自证持有私钥**——CA 能用 CSR 里的公钥验签通过，就证明生成者手里确有对应私钥。这份 CSR 随后进第 4 步 Order 资源的 `csr` 字段，作为申请材料提交给 CA。
 4. **落成内部资源 Order + Challenge**：
    ```text
    Certificate（你声明的）
@@ -277,8 +281,11 @@ spec:
    | 不适合 | 通配符（机制上做不到）；80 打不通的内网服务 | 不愿交出 DNS 权限的高安全场景；|
    | 选择倾向 | **默认选它**：零凭据、链路直观、故障一眼可见 | 只在有通配符/内网诉求时上，凭据按最小权限给、定期轮换 |
    
-6. **finalize 签发**：该 Order 下所有 Challenge 都 Valid → controller 向 CA 提交第 3 步的 CSR → CA 用自己的私钥签名，返回证书→ Order 变为 Valid。
-7. **写回 Secret 并生效**：controller 把证书写进 `tls.crt`、我们本地自己的私钥写进 `tls.key`，创建/更新成 `kubernetes.io/tls` 类型的 Secret `blog-tls`（就是 ingress `tls.secretName` 引用的那个）。ingress-nginx watch 到 Secret 变化 → 热 reload nginx 的 SSL 配置 → 443 端口换上新证书，浏览器刷新即可看到。
+6. **finalize 签发（叶子证书此刻才诞生，中间证书本来就有）**：该 Order 下所有 Challenge 都 Valid → controller 把第 3 步的 CSR 提交给 CA 的签发服务器，CA 现场做两件事：
+   - **现签叶子证书**：从 CSR 里取出公钥和 dnsNames，配上有效期、序列号等字段拼成证书主体，用**中间 CA 的私钥**做数字签名——这张就是你的终端实体证书（叶子证书）；
+   - **附带中间证书**：它**不是为你现生成的**——CA 的中间签发者（如 Let's Encrypt 的 R11/E5/E6）早已由根 CA 预先签好，私钥常年锁在 CA 的 HSM 硬件安全模块里；签发 API 的响应里直接附上"叶子 + 中间"，让客户端能顺链找到根：
+   整条链回传 → Order 变为 Valid。
+7. **写回 Secret 并生效**：controller 把 CA 返回的证书链（**叶子在前、中间在后**拼成 PEM）写进 `tls.crt`、第 3 步本地生成的私钥写进 `tls.key`，创建/更新成 `kubernetes.io/tls` 类型的 Secret `blog-tls`（就是 ingress `tls.secretName` 引用的那个）。ingress-nginx watch 到 Secret 变化 → 热 reload nginx 的 SSL 配置 → 443 端口换上新证书，浏览器刷新即可看到。
 8. **状态回填**：每一步 controller 都把进展写回 `Certificate.status`
 9. **持续续期（核心价值）**：controller 每天巡检所有 Certificate，当到达 `renewalTime`（默认约为有效期的 1/3 处，90 天证书即剩约 30 天）→ 自动重复第 3-7 步签一张新证书 → 覆盖同一个 Secret → nginx reload，业务全程无感。
 
@@ -292,6 +299,15 @@ kubectl get secret blog-tls                   # 最终产物在不在
 ```
 
 Challenge 常见死因就：**HTTP-01**——安全组没有放行80端口。**DNS-01**——TXT 记录没传播完（`NXDOMAIN`，多等几十秒重试）；
+
+##### 补充：
+- `tls.crt` ：内容是"域名信息（SAN）+ 公钥 + CA 的数字签名"，通常还带中间 CA 链（叶子证书拼上中间证书）。握手时服务端把它明文发给客户端——它本来就是给人验证的，泄漏无所谓；
+- `tls.key` ：与叶子证书配对的私钥，在 TLS 握手中证明身份、完成密钥协商——业务流量本身用协商出的会话密钥加解密，不走这把钥匙。
+- 浏览器的校验链：拿到 `tls.crt` → 查 SAN（域名在不在列表里）→ 验 CA 签名（证书没被篡改、确实是 CA 签的）→ 顺证书链找到自己内置信任的根 CA → 握手放行，任一环不过就报证书错误。
+- **CA**：CA是一个概念，代表一个机构/角色。一般代指后面这2个文件：`ca.crt`别人拿到叶子证书 tls.crt，用 ca.crt 里的公钥校验签名，确认这个叶子证书是咱们这个 CA 签发。`ca.key`签名签发证书。只有持有 ca.key，才能签发新的叶子证书（tls.crt）或者中间证书。一旦泄露，攻击者可以伪造任意证书。
+- **叶子证书**：终端业务证书，绑定业务域名 SAN；`CA:FALSE`，不能签发别的证书，TLS 握手时发给对端。包括`.crt`和`.key`文件。
+- **中间证书**：根 CA 签发的二级 CA 证书；`CA:TRUE`，负责签发叶子证书；拼接在叶子后面补齐证书链。包括`.crt`和`.key`文件。
+- **静态加密**：K8s 特指 apiserver 在写入 etcd 前对 Secret、ConfigMap 等资源加密，落盘到 etcd 的是密文；防止 etcd 数据目录、快照备份被拖走后直接读取明文。
 
 ### 主节点部署的组件
 #### etcd分布式数据库
