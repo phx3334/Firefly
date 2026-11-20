@@ -132,7 +132,42 @@ rules:
 
 - apiGroups：API 组，`""` 是核心组；apps 组里是 Deployment、StatefulSet 这类
 - resources：资源名，可以写子资源（pods/log、pods/exec——后者对应 kubectl exec 进容器）
-- verbs：操作动词，常用的有 get/list/watch（读）、create/update/patch（写）、delete/deletecollection（删）
+
+**verbs 全表**——动词就是允许的操作，写 `"*"` 表示全部动词：
+
+| verb | HTTP 方法 | 作用 | 对应 kubectl 操作 |
+| --- | --- | --- | --- |
+| `get` | GET | 读**单个**资源 | `kubectl get pod xxx -o yaml` |
+| `list` | GET | 读资源**列表** | `kubectl get pods` |
+| `watch` | GET（长连接） | 持续监听资源变化——控制器、informer 全靠它 | `kubectl get pods -w` |
+| `create` | POST | 创建资源 | `kubectl create`、`kubectl apply`（新建时） |
+| `update` | PUT | **整体替换**，全量提交对象 | `kubectl replace`、`kubectl scale` |
+| `patch` | PATCH | **局部修改**，只提交改动的字段 | `kubectl patch`、`kubectl apply`（更新时）、`kubectl edit` |
+| `delete` | DELETE | 删除单个资源 | `kubectl delete pod xxx` |
+| `deletecollection` | DELETE | 批量删除 | `kubectl delete pods --all` |
+
+两个高频坑：
+
+1. **apply 更新走的是 patch 不是 update**——角色只给 `update` 不给 `patch`，`kubectl apply` 更新已有资源照样 403，`kubectl replace` 才吃 update；
+2. **子资源的动词别想当然**：`kubectl logs` = `get` + `pods/log`；`kubectl exec`（以及 `attach`、`port-forward`）= **`create` + 子资源**——`pods/exec` 写成 `get` 进容器直接 403：
+
+```yaml
+rules:
+- apiGroups: [""]
+  resources: ["pods/log"]     # 只给子资源就够看日志，pods 本身都不用给
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]           # exec 是 create 不是 get
+```
+
+另有三个特殊动词，和 RBAC 自身/身份冒充有关，了解即可：
+
+| verb | 作用 |
+| --- | --- |
+| `bind` | 允许把某个角色**绑定给他人，即使自己没有该角色的权限**——给"只管授权、不碰资源"的委派管理员用 |
+| `escalate` | 允许创建/修改出**包含自己没有的权限**的 Role——默认 K8s 拒绝你造出比自己更大的角色（防自提权），有此动词才放行 |
+| `impersonate` | 允许以他人身份发请求（`kubectl --as=alice`，前面排查用的 `--as` 就靠它）——拥有者等于能冒充任何人，慎授 |
 
 ClusterRole 结构和 Role 完全一样，区别是不属于任何 namespace，管的是集群级资源：
 
