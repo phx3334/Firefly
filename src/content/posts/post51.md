@@ -308,6 +308,103 @@ def visit_Attribute(self, node: ast.Attribute) -> None:
 
 6 条修完回头看,病根能归成一句话:**"有关"不等于"现场"**。清单、防御方、括号、缺失的检查点——都和漏洞有关,但都不是危害真正发生的那一行。而评测基准拿这些标注当标准答案,标签贴错一个,一个 AI 的正确答案就会被判错——这就是为什么"人工审计"这一步省不掉。
 
+## git的使用规范
+
+### 分支规范
+- **main 是保护分支**：禁止任何人直接 push，只能走 PR + review 合入。GitHub 用 Branch protection rules 强制（required reviews、status checks），GitLab 用 Protected Branches
+- **生命周期**：从 main 切出 → 开发 → 合回 main → 删除分支。分支不删，仓库三个月后就是一片分支坟场。
+- **命名约定**：
+| 前缀 | 用途 | 例子 |
+| --- | --- | --- |
+| `feature/` | 新功能 | `feature/add-entry-00176` |
+| `fix/` | 修 bug | `fix/critical-operation-line` |
+| `hotfix/` | 线上紧急修复 | `hotfix/csp-bypass-trim` |
+| `docs/` | 只改文档 | `docs/update-readme` |
+
+### 提交信息规范（Conventional Commits）
+格式：`<type>: <本次提交做了什么>`，第一行 ≤50 字符，正文换行后写"为什么这么改"。
+| type | 含义 |
+| --- | --- |
+| `feat` | 新功能 |
+| `fix` | 修 bug |
+| `docs` | 只改文档 |
+| `refactor` | 重构，行为不变 |
+| `test` | 补测试 |
+| `chore` | 杂活（依赖、CI 配置） |
+两个要点：
+- **一次提交只做一件事**：提交必须能独立 revert——"修了位置 + 顺手改了格式 + 更新 README"混在一个 commit 里，出问题想回滚只能整体回滚。拿这次 6 条样本举例，按"一条 entry 一个 commit"提交，reviewer 逐条对照，谁有问题点开谁。
+- **commit message 写"为什么"不写"改了什么"**：diff 里能看到改了什么，看不到动机。`fix: critical_operation 应指向执行点而非数据定义` 这种信息半年后才有价值。
+
+### 几条红线
+- **敏感信息永不入库**：密钥、token、`.env`、内网 IP 进了 git 历史就永远在了——`git filter-repo` 清历史 + 轮换密钥是大工程，从源头靠 `.gitignore` 挡住。
+- **已推送的历史永不改写**：`commit --amend`、`rebase`、`reset` 只在本地/未推送时用。别人 clone 了你的分支，你一改历史，他下次 pull 就是灾难。
+- **main 上永不 force push**：force push 是核弹，只允许对自己**未合并的私有分支**用，且用 `--force-with-lease`（别人刚好往你分支推了东西时它会拒绝，防止覆盖别人的提交）。
+- **push 前自查**：`git status` 看有没有误加的文件，`git diff --cached` 看暂存内容，别把 IDE 配置、调试日志一起交了。
+
+### rebase 还是 merge
+| 场景 | 用什么 | 原因 |
+| --- | --- | --- |
+| 本地提交还没推送 | `git rebase main` | 没人看过你的历史，改写无害，历史保持线性 |
+| 同步上游 main（更新 PR） | `git rebase upstream/main` | PR 里一串干净的线性提交，reviewer 看着舒服 |
+| 往 main 合功能分支 | `git merge`（或 PR 的 Merge 按钮） | merge 是"合流"，不改写任何历史 |
+| 分支已被多人使用 / 已 review | `git merge` | rebase 重写历史，协作者的本地副本全部错位 |
+一句话：**没推过的可以 rebase，推过的一律 merge**。
+
+### review 规范
+
+- 提 PR 前自己先 `git diff main...HEAD` 从头到尾看一遍——自己都看不下去的 PR 别指望别人看。
+- 不 approve 自己的 PR；指出问题要具体（"这行会空指针"，而不是"这里不对"）。
+- PR 粒度宁小勿大：一个 PR 一件事，改 6 个文件的 PR 没人愿意点开。
+
+### 和上游仓库代码冲突了怎么办
+开源 PR 的标准姿势是 fork → 在自己 fork 里开发 → 提 PR。你干活这几天上游 main 可能已经前进了——PR 页面提示 `This branch is out-of-date`，真改到同一处就是冲突。处理流程：
+
+**第一次先加 upstream（只需一次）**：
+
+```bash
+git remote add upstream https://github.com/原作者/仓库.git
+git fetch upstream
+```
+
+**之后每次同步**（在你的功能分支上，不是 main 上）：
+
+```bash
+git checkout feature/xxx
+git rebase upstream/main        # 把你的提交"摘下来"，重放到上游最新代码上
+```
+
+**遇到冲突**，rebase 会停下来，打开冲突文件能看到三段标记：
+
+```text
+<<<<<<< HEAD
+你的代码  
+=======
+上游的代码
+>>>>>>> upstream/main
+```
+
+人工判断留哪边（或两边都要），删掉标记后：
+
+```bash
+git add 冲突文件
+git rebase --continue           # 继续重放剩下的提交；解错了用 git rebase --abort 回到同步前
+```
+
+**全部解完再推**——历史变了，PR 又是提在自己分支上的，要强制推送：
+
+```bash
+git push --force-with-lease     # 只动你自己的分支，防覆盖别人刚推的提交
+```
+
+GitHub 自动用新代码刷新 PR，CI 重新跑一遍。
+
+三个原则：
+
+1. **只 force 自己的分支**：`--force-with-lease` 是底线，main 和别人的分支碰都不碰；
+2. **预防优于解决**：分支活得越久、上游跑得越远，冲突面越大——提 PR 后尽量当天同步，别攒一个月再解几十个冲突；
+3. **上游把你要改的文件删了/重构没了**：rebase 后发现自己的提交无处落地，别硬塞——先在 PR 里问一句"这段在新版本里已经不存在了"，多数情况直接关 PR 重来更省事。
+
+
 ## 这次开源经历对我的意义
 首先不得不说的是，提交这次pr，ai帮助了我很多东西，毕竟我做这个工作的时候，是在今年七月份，那时候我才刚结束我的大一生涯，由于对自己的未来充满迷茫，这一年我自己东学学，西学学，学了很多东西，但是都只是学了些皮毛。我一直找不到我未来的职业方向，游戏开发？前端开发？后端开发？测试？还是当下热门的agent开发？这里面每一个方向在网上都是被劝退的，由于高考的失利，我并没有成为一名名校计算机的学生，我对自己也越发不自信，我不知道我应该做什么，好像做什么都比不过别人，我害怕竞争......   
 这次开源经历不仅让我提升了我对于代码安全，规则审计的见解，更重要的是它让我重拾了信心，至少对于这个**中高难度issue**，我是做的最好的那位，并且参与这个issue的也不乏名校计算机相关专业的本科生和硕士生，我仅仅用的也只是当时codebuddy可以免费使用的混元四模型，其余大部分人用的都是当时最前沿的chatgpt和opus模型。   
