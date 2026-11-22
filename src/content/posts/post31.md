@@ -123,14 +123,20 @@ ansible/
 **第 1 步：ansible.cfg**
 ```ini
 [defaults]
-inventory = inventory/hosts.ini   # 默认清单，省去每次 -i
-roles_path = roles                # 角色搜索路径
-host_key_checking = False         # 云主机重建后 SSH 指纹必变，关掉免得交互卡住
-interpreter_python = auto_silent  # 自动选择远端 Python，不刷警告
-pipelining = True                 # SSH 连接上流水执行，省掉每个任务重新建连、启动 Python 的开销——批量执行提速明显
+# 默认清单，省去每次 -i
+inventory = inventory/hosts.ini
+# 角色搜索路径
+roles_path = roles
+# 云主机重建后 SSH 指纹必变，关掉免得交互卡住
+host_key_checking = False
+# 自动选择远端 Python，不刷警告
+interpreter_python = auto_silent
+# SSH 连接上流水执行，省掉每个任务重新建连、启动 Python 的开销——批量执行提速明显
+pipelining = True
 
 [privilege_escalation]
-become = True                     # 全局默认提权：装 K8s 组件处处要 root
+# 全局默认提权：装 K8s 组件处处要 root
+become = True
 become_method = sudo
 become_user = root
 ```
@@ -360,10 +366,11 @@ roles/common/
     join_ca_hash: "{{ join_ca_hash_raw.stdout | trim }}"
 
 # roles/kubeadm_worker/tasks/main.yml（在每台 worker 上执行）
+# hostvars：跨主机读第一台 master 生成的 join 参数
 - name: 加入集群
   command: >-
     kubeadm join {{ apiserver_endpoint }}
-    --token {{ hostvars[groups['masters'][0]].join_token }}    # 跨主机读第一台 master 的事实
+    --token {{ hostvars[groups['masters'][0]].join_token }}
     --discovery-token-ca-cert-hash sha256:{{ hostvars[groups['masters'][0]].join_ca_hash }}
     --cri-socket unix:///run/containerd/containerd.sock
   args:
