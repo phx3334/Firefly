@@ -133,18 +133,10 @@ spec:
 
 | 模式 | 语义 | 典型后端 | 适用场景 | 关键坑 |
 | --- | --- | --- | --- | --- |
-| `ReadWriteOnce`（RWO） | **单个节点**读写挂载 | 云盘 ESSD、Ceph RBD、local-path、本地 NVMe | 数据库、Kafka、etcd、单副本有状态应用 | 同一节点上的多个 Pod 可以同时写同一 PVC，应用层没有锁就会写坏 |
+| `ReadWriteOnce`（RWO） | **单个节点**读写挂载 | 云盘 ESSD、Ceph RBD、local-path、本地 NVMe | 数据库、Kafka、etcd 等有状态集群，每个副本独占一块盘 | 多个 Pod 挂同一 PVC（如 Deployment 多副本共用一个盘）就会同时写坏；集群模式要用 StatefulSet 每副本单独挂载一个PVC |
 | `ReadOnlyMany`（ROX） | **多个节点**只读挂载 | NFS、CephFS、云 NAS、对象存储文件网关 | 模型文件、静态资源、只读数据集 | 只读是存储层保证；块存储后端大多不支持真正的多节点只读 |
 | `ReadWriteMany`（RWX） | **多个节点**读写挂载 | NFS、CephFS、云 NAS、JuiceFS、SMB | 共享上传目录、CI 缓存、AI 训练数据、多 Pod 共享配置 | 存储支持并发写不等于应用支持并发写，仍需目录隔离或分布式锁 |
 | `ReadWriteOncePod`（RWOP） | **单个 Pod** 读写挂载 | 支持该模式的 CSI 驱动 | 需要严格单写者的有状态应用 | 依赖集群版本和 CSI 支持，使用前先确认 |
-
-### RWO 的真实含义
-
-RWO 的 "Once" 指的是**一个 Node**，不是"一个 Pod"。同一个节点上跑 3 个 Pod，挂同一个 RWO 的 PVC，K8s 不会拦，底层就是同一个目录/块设备被三个进程同时写。
-
-生产里真实踩过的例子：一个 Deployment 的 3 个副本共用一个 RWO 的 MySQL 数据盘 PVC，滚动更新时新旧 Pod 被调度到同一节点，两个 mysqld 同时打开同一份 `ibdata`，数据文件直接损坏。**K8s 的访问模式只是能力声明，不负责应用层的互斥**。
-
-要严格单 Pod 独占，用 `ReadWriteOncePod`；但更常见的做法是：有状态应用一律用 StatefulSet + 每副本独立 PVC，从根上避免共享。
 
 ### RWX 不是什么都能给
 
@@ -154,10 +146,11 @@ RWX 必须后端本身支持多节点并发读写。云盘 ESSD 普通盘**不�
 
 ### 一块 ESSD 云盘能同时挂多台 ECS 吗？
 
-- **普通 ESSD 云盘：不能。** 同一时刻只能挂到一台 ECS。可以卸载后挂到另一台，但绝不允许两台同时挂载并写。普通盘上如果是 ext4/xfs，两台机器同时挂会直接损坏文件系统——这两种文件系统没有集群锁机制。
-- **ESSD 共享盘（共享块存储）：可以挂多台，但不是"插上就能用"。** 云厂商的共享盘允许挂到多台 ECS（通常最多十几台，具体看规格），但必须搭配**集群文件系统**（GFS2、OCFS2）或应用层自己的并发控制（比如 Oracle RAC 的 ASM）。直接对共享盘 `mkfs.ext4` 再挂到两台机器，结果就是互相踩数据。
+**不能。** 普通 ESSD 是单挂载的块设备，同一时刻只能挂到一台 ECS，换机器必须先卸载再挂载。
 
-K8s 里不要试图用"共享盘 + RWX"来做共享目录，正确做法是用文件存储（NFS/CephFS/JuiceFS）。共享块存储是给 Oracle RAC、SAP HANA 这类特殊场景的，不是通用方案。
+限制来自文件系统层：云盘上一般是 ext4/xfs，它们不是集群文件系统，没有跨主机的锁和一致性机制。两台 ECS 同时挂载并写入，元数据会互相踩踏，文件系统直接损坏。
+
+所以 K8s 里普通云盘只能当 RWO 卷用，需要多机共享目录就用 CephFS/JuiceFS 这类文件存储。
 
 ## 回收策略：删了 PVC，数据留不留
 
@@ -167,15 +160,12 @@ K8s 里不要试图用"共享盘 + RWX"来做共享目录，正确做法是用�
 | --- | --- | --- | --- |
 | `Delete` | 删 PVC → 删 PV → 调 CSI 删后端存储（云盘、NFS 子目录等） | 无状态缓存、临时数据、可重建的数据 | 手滑删 PVC 数据直接没了；云盘删除有延迟，可能短暂计费 |
 | `Retain` | 删 PVC → PV 保留，状态变 `Released`，后端数据不动 | 数据库、etcd、Kafka 等一切不能丢的数据 | 不会自动清理，PV 不能自动被新 PVC 复用，云盘持续计费 |
-| `Recycle` | 清空卷内容后重新可用 | 已废弃，仅部分旧驱动支持 | 不要用，行为是 `rm -rf` |
 
 几条生产纪律：
 
 1. **数据库、消息队列、etcd 一律 `Retain`**。动态供应的 StorageClass 默认往往是 `Delete`，必须显式改。数据比磁盘钱贵得多。
-2. **`Retain` 的 PV 变成 `Released` 后绑不上新 PVC**。想复用这块盘，要么手工删 PV（后端盘还在），再手工建一个指向它的静态 PV；要么清掉旧 PV 的 `spec.claimRef` 让它变回 `Available`。直接新建 PVC 是绑不上的。
-3. **`Retain` 不等于备份**。它只防"误删 PVC"，防不了节点故障、误删云盘、机房事故。备份必须另做，通常是备份到对象存储。
-4. **改 StorageClass 的 `reclaimPolicy` 只影响之后新建的 PV**。已经存在的 PV 要在 PV 对象上逐个改，别以为改一次 StorageClass 就全生效。
-5. **StatefulSet 的 PVC 默认不随缩容/删除而删除**。较新版本可以用 `persistentVolumeClaimRetentionPolicy` 控制：
+2. **`Retain` 不等于备份**。它只防"误删 PVC"，防不了节点故障、误删云盘、机房事故。备份必须另做，通常是备份到对象存储。
+3. **改 StorageClass 的 `reclaimPolicy` 只影响之后新建的 PV**。已经存在的 PV 要在 PV 对象上逐个改，别以为改一次 StorageClass 就全生效。
 
 ```yaml
 apiVersion: apps/v1
@@ -223,7 +213,7 @@ CSI 规范把接口分成三个服务，记住每个服务管什么，排查问�
 
 1. `ControllerPublishVolume`：**把云盘挂到 ECS 上**（attach）。这一步是云 API 操作，盘会出现在节点的 `/dev/vdb`，但还没格式化、没挂到任何目录。
 2. `NodeStageVolume`：**格式化并挂到节点的全局目录**。比如把 `/dev/vdb` 格式化成 ext4，挂到 `/var/lib/kubelet/plugins/kubernetes.io/csi/.../globalmount`。同一个卷在节点上只 stage 一次。
-3. `NodePublishVolume`：**把全局目录 bind mount 到 Pod 的卷目录**。多个 Pod 用同一个卷时，每个 Pod 做一次 bind mount，底层指向同一个 global mount。
+3. `NodePublishVolume`：**把全局目录 bind mount 到 Pod 的卷目录**，即节点上的 `/var/lib/kubelet/pods/<pod-UID>/volumes/kubernetes.io~csi/<pv名>/mount`；之后容器运行时再把它 bind 进容器的 `mountPath`（如 `/var/lib/mysql`）。多个 Pod 用同一个卷时，每个 Pod 做一次 bind mount，底层指向同一个 global mount。
 
 卸载时反着来：`NodeUnpublishVolume` → `NodeUnstageVolume` → `ControllerUnpublishVolume`，最后才会 `DeleteVolume`。
 
@@ -317,7 +307,6 @@ mount | grep -i csi
 | CephFS | `cephfs.csi.ceph.com` | 文件存储，RWX |
 | NFS | `nfs.csi.k8s.io` | 文件存储，RWX，需单独部署 NFS CSI 驱动 |
 | JuiceFS | `csi.juicefs.com` | 基于对象存储的 POSIX 文件系统，RWX |
-| Longhorn | `driver.longhorn.io` | 带副本的块存储，适合中小集群 |
 
 注意：**`local-path` 不是 CSI 驱动**。它是 Rancher 的 `local-path-provisioner`，一个监听 PVC、在节点本地目录里建子目录、然后生成 hostPath/local PV 的外部 provisioner。它没有 CSI 的 attach/stage 流程，也不支持快照和扩容，这是后面 local-path 单独讲的原因。
 
@@ -380,7 +369,7 @@ kubectl get pvc mysql-data -w
 
 扩容分两步：CSI 先把云盘扩大，kubelet 再做文件系统 resize。ext4/xfs 都支持在线扩容，但**应用不一定能立刻感知**，有些场景需要重启 Pod 才会看到新容量；`subPath` 挂载的卷更是典型的重灾区，后面坑点会讲。
 
-缩容没有捷径：新建一块小盘 PVC，停业务，把数据拷过去，再切回来。数据库尤其麻烦，所以容量规划宁可一开始留 30% 余量。
+缩容没有捷径：新建一块小盘 PVC，停业务，把数据拷过去，再切回来。数据库尤其麻烦。
 
 ### 快照
 
@@ -474,35 +463,7 @@ spec:
               operator: In
               values: ["node1"]
 ```
-
-更强的方案是 **OpenEBS LocalPV、TopoLVM、Longhorn** 这类项目：TopoLVM 用 LVM 做容量管理和配额，Longhorn 在本地盘之上做多副本复制（但会牺牲一部分性能，适合中小集群，不适合核心数据库）。
-
 生产上本地盘的典型用法是：**本地 NVMe 给数据库/消息队列，应用层做副本，备份到对象存储**。本地盘坏了换节点，数据从副本重建，而不是指望盘不死。
-
-## NFS：简单够用的共享文件
-
-NFS 是最容易上手的 RWX 方案：一台服务器导出目录，K8s 里用静态 PV 直接写 `nfs.server/path`，或者部署 NFS CSI 驱动做动态供应。它的价值就是"多台机器共享同一个目录"，实现简单、成本低。
-
-**适合**：
-
-- 文件上传目录、多 Pod 共享的配置/模板/静态文件
-- CI 缓存、构建产物（丢了能重建）
-- 开发测试环境、日志暂存
-- 小规模镜像仓库（生产更推荐对象存储后端）
-
-**不适合**：
-
-- MySQL/PostgreSQL 数据目录：NFS 的 fsync 延迟、文件锁、服务端单点，事务提交性能差，异常时还可能损坏数据
-- Kafka：官方不支持 NFS，顺序写 + fsync 对延迟极其敏感
-- 高并发小文件写入：NFS 的元数据操作会被放大，性能容易塌
-
-**常见坑**：
-
-- **单点**：NFS server 挂了，所有挂载它的 Pod 一起 IO hang。生产用云 NAS，或 DRBD + Keepalived 做高可用。
-- **`root_squash`**：容器里的 root 被映射成 `nobody`，写文件直接 Permission denied。用 `securityContext.fsGroup` 或规划好 UID，别图省事开 `no_root_squash`。
-- **`hard` vs `soft` mount**：`hard` 在服务端不可用时进程会卡在 D 状态，但不会丢数据；`soft` 会返回 EIO，应用可能拿到半截数据。生产一般用 `hard` 配合理的 `timeo/retrans`。
-- **`stale file handle`**：服务端重启或目录被删后，客户端缓存的句柄失效，只能重新挂载。
-- **NFSv3 vs v4**：v4 是有状态协议，锁和 ACL 更完整，防火墙只需要 2049；v3 还要 rpcbind、lockd、statd 一堆端口。
 
 ## JuiceFS：对象存储之上的一层 POSIX
 
@@ -537,31 +498,20 @@ MinIO 是兼容 S3 API 的对象存储，支持纠删码、分布式部署、版
 
 ### S3 能不能像文件系统一样 mount，提供 POSIX？
 
-**原生的 S3 不能。** 但可以在上面套一层 FUSE，看起来像文件系统：
+**先明确什么是 POSIX 语义**：它是文件系统对上层应用承诺的一套标准行为——有真实的目录树和路径解析；能按字节偏移随机读、写、追加；`rename` 是原子操作；支持文件锁、`mmap`、软硬链接、权限位和属主；`fsync` 返回后数据真正落盘。数据库、Git、包管理器都是按这套契约写的，缺一条就可能出错。
 
-| 方案 | POSIX 完整度 | 适合 | 不适合 |
-| --- | --- | --- | --- |
-| s3fs / goofys / rclone mount | 部分兼容，很多语义是模拟的 | 只读数据集、归档、临时拷贝 | 数据库、日志热写、Git、CI workspace |
-| JuiceFS | POSIX 兼容 | 共享文件、AI 训练、大数据 | 数据库数据目录 |
-| AWS Mountpoint for S3 | 只读/顺序读优化，不是通用文件系统 | 数据湖分析、大文件顺序读 | 通用随机读写 |
+**原生的 S3 不能**，因为它根本不是文件系统，数据模型对不上：
 
-s3fs 这类工具的核心问题：
-
-- **写入通常是整个对象重写**，不支持真正的随机写和 append；改一个字节也可能要重传整个文件
-- **rename 不是原子操作**，通常是 copy + delete，Git、编辑器、包管理器这类依赖原子 rename 的程序容易出问题
-- **文件锁、mmap、硬链接**支持有限或没有
-- **小文件性能差**，每个文件都是一个对象，元数据操作放大
-- **一致性依赖缓存**，多客户端同时写同一文件容易互相覆盖
-
-所以结论很直接：**要 POSIX 就用文件存储（NFS/CephFS/JuiceFS）；要 S3 API 就用对象存储 SDK。不要用 s3fs 挂载后跑数据库、日志采集、Git、CI 工作目录。**
+- **没有目录**：只有 bucket + key，`/` 只是 key 里的一个字符，所谓"目录"是按前缀模拟的，没有真实层级、没有 inode
+- **权限模型不同**：bucket/前缀级的访问策略，不是文件的 POSIX 权限位
+- 
+所以结论很直接：**要 POSIX 语义就用文件存储（NFS/CephFS/JuiceFS），要对象存储就直接用 S3 SDK。** 
 
 对象存储最适合的位置是：备份仓库（Velero、数据库备份）、静态资源 + CDN、Harbor 镜像后端、Loki/Thanos 长期存储、数据湖、AI 只读数据集。
 
 MinIO 的坑：
-
 - **数据目录不要放 NFS**。MinIO 的纠删码和一致性假设要求本地盘/JBOD，NFS 上的锁和延迟会导致各种异常。
 - **生产至少 4 块盘起步做纠删码，最好多节点部署**，单机单盘只适合开发测试。
-- **S3 兼容有差异**。不同实现的 API 子集、分片上传、版本控制行为不完全一致，应用要按实际后端验证。
 - **权限最小化**。AK/SK 泄露等于整个 bucket 泄露，按 bucket/前缀做策略，定期轮换。
 
 ## 生产选型对照：MySQL、Redis、Kafka 怎么放
@@ -570,23 +520,21 @@ MinIO 的坑：
 
 | 组件 | 首选存储 | 访问模式 | reclaimPolicy | 关键理由 |
 | --- | --- | --- | --- | --- |
-| MySQL / PostgreSQL 主库 | 本地 NVMe（自建）或 ESSD PL2（云上） | RWO | Retain | 事务提交依赖 fsync，对延迟极敏感；主从/组复制做冗余，不要单实例 |
-| MySQL 从库 / 备份 | ESSD PL1 或对象存储 | RWO / 对象 | Retain / Delete | 从库可以放宽；备份直接写 S3/MinIO，不要挂成文件系统 |
-| Redis 纯缓存 | emptyDir 或不做持久化 | - | - | 缓存丢了能回源，不需要 PV，别浪费云盘 |
-| Redis 持久化 | 本地盘或 ESSD | RWO | Retain | AOF fsync 频繁，NFS 不可用；配主从 + Sentinel/Cluster |
-| Kafka | 本地 NVMe / local-path / 独立 ESSD | RWO | Retain | 顺序写 + page cache + fsync；NFS 不支持；副本 3 自带冗余 |
+| MySQL / PostgreSQL 主库 | ESSD PL2 | RWO | Retain | 事务提交依赖 fsync，对延迟极敏感；主从/组复制做冗余，不要单实例 |
+| MySQL 从库 | ESSD PL1 | RWO | Retain | 从库可以放宽；备份直接写 S3/MinIO，不要挂成文件系统 |
+| Redis 纯缓存 | emptyDir | - | - | 缓存丢了能回源，不需要 PV，别浪费云盘 |
+| Redis 持久化 | ESSD | RWO | Retain | AOF fsync 频繁，NFS 不可用；配主从 + Sentinel/Cluster |
+| Kafka | 本地 NVMe | RWO | Retain | 顺序写 + page cache + fsync；NFS 不支持；副本 3 自带冗余 |
 | etcd | 本地 SSD | RWO | Retain | fsync 延迟直接决定集群稳定性；容量不用大，IOPS 必须高 |
-| Elasticsearch / OpenSearch | 本地 NVMe + 副本，或 ESSD PL2 | RWO | Retain | 高吞吐；用副本保证可用性，不要共享存储 |
-| ClickHouse | 本地 NVMe 或 ESSD PL2/PL3 | RWO | Retain | 大扫描、高吞吐；靠副本表而不是共享盘 |
-| Prometheus | local-path 或 ESSD | RWO | Retain | TSDB 写本地盘；长期存储用 Thanos + S3 |
-| ZooKeeper | 本地盘或 ESSD | RWO | Retain | 数据量小，但写延迟敏感 |
-| RabbitMQ | 本地盘或 ESSD | RWO | Retain | 持久化消息；用 Quorum Queue |
-| 文件上传 / 共享 | NFS / CephFS / 云 NAS / JuiceFS | RWX | Retain | 多 Pod 共享；注意权限和目录隔离 |
-| CI 缓存 / 构建产物 | NFS / MinIO / S3 | RWX / 对象 | Delete | 可重建，允许清理 |
-| 日志（Loki / ES） | 本地盘 + 对象存储 | RWO / 对象 | Delete | 热数据本地，冷数据进对象存储 |
-| AI 训练数据集 | JuiceFS / 对象存储 + 本地缓存 | RWX / ROX | Retain | 大文件高吞吐；只读数据集用 ROX |
-| 备份 / 归档 | S3 / MinIO | 不挂载 | - | 应用直接写对象存储 |
-| 静态资源 | 对象存储 + CDN | 不挂载 | - | 根本不需要 PV |
+| Elasticsearch / OpenSearch | 本地 NVMe | RWO | Retain | 高吞吐；用副本保证可用性，不要共享存储 |
+| Prometheus | ESSD | RWO | Retain | TSDB 写本地盘；长期存储用 Thanos + S3 |
+| RabbitMQ | ESSD | RWO | Retain | 持久化消息；用 Quorum Queue |
+| 文件上传 / 共享 | 云 NAS（NFS） | RWX | Retain | 多 Pod 共享；注意权限和目录隔离 |
+| CI 缓存 / 构建产物 | 对象存储（S3/MinIO） | 对象 | Delete | 可重建，允许清理 |
+| 日志（Loki） | 对象存储（S3） | 对象 | Delete | 日志直接写对象存储，不需要本地热盘 |
+| AI 训练数据集 | JuiceFS | RWX | Retain | 大文件高吞吐；只读数据集用 ROX |
+| 备份 / 归档 | 对象存储（S3/MinIO） | 不挂载 | - | 应用直接写对象存储 |
+| 静态资源 | 对象存储（S3） | 不挂载 | - | 配合 CDN 分发，根本不需要 PV |
 
 ### 三个真实场景
 
@@ -614,33 +562,6 @@ volumeClaimTemplates:
 **共享上传目录**
 
 多 Pod 需要读写同一批用户上传文件，用 NFS/CephFS/JuiceFS 的 RWX PVC，按租户/业务分目录。这种场景不要用云盘——普通云盘挂不了多台，共享盘又要配集群文件系统，纯属给自己找麻烦。
-
-## 高频坑点清单
-
-前面散落提到的坑，这里集中收一遍。每一条都是生产里真实见过或者很容易踩的：
-
-| 坑 | 后果 | 规避 |
-| --- | --- | --- |
-| 多 AZ 集群用 `Immediate` 建卷 | 盘和 Pod 不在同一可用区，`FailedAttachVolume` | `WaitForFirstConsumer`，或按 AZ 拆 StorageClass |
-| 把 RWO 当成"单 Pod" | 同节点多个 Pod 同时写，数据库文件损坏 | StatefulSet 每副本独立 PVC；严格单 Pod 用 RWOP |
-| `Retain` 的 PVC 删了就不管 | PV 变 `Released`，云盘一直计费且绑不上新 PVC | 定期清理；复用要清 `claimRef` 或重建静态 PV |
-| 删 StatefulSet 没清 PVC | 留下一堆孤儿云盘 | `persistentVolumeClaimRetentionPolicy` + 定期巡检 |
-| 用 `subPath` 挂 PVC 后扩容 | 容器内 `df` 还是旧容量 | 重建 Pod；能不用 subPath 就不用 |
-| 想缩容 PVC | K8s 不支持 | 新建 PVC + 停业务迁数据 |
-| 节点上大量小 PVC | 云盘挂载槽位耗尽，新 Pod 挂不上盘 | 合并 PVC；共享文件用 NFS/JuiceFS |
-| 共享盘 `mkfs.ext4` 后多挂 | 文件系统互相踩踏，数据损坏 | 用 GFS2/OCFS2/ASM，或直接换文件存储 |
-| NFS 跑 MySQL/Kafka | 延迟高、锁异常，甚至数据损坏 | 数据库/消息队列用本地盘或 ESSD |
-| s3fs 跑数据库/日志/Git | rename、随机写、文件锁语义不对 | 用块/文件存储；对象存储走 SDK |
-| local-path 节点故障 | 数据留在坏节点，Pod 漂移后挂不上 | 应用层副本 + 备份；核心数据用 local PV/ESSD |
-| local-path 容量不隔离 | 一个 Pod 写满整个节点盘 | 监控 + 配额；需要隔离用 TopoLVM |
-| 集群里多个默认 StorageClass | PVC 绑定到哪个不确定 | 只保留一个 `is-default-class: "true"` |
-| 容量只按 PVC 数字算，忽略 GiB 换算和文件系统开销 | 实际可用空间比预期小 | 按 GiB 核算，预留 30% 余量 |
-| 把快照当备份 | 崩溃一致性、同区域，误删/区域性故障恢复不了 | 应用一致性备份 + 跨区对象存储 |
-| `hostPath` 直接挂节点目录 | 安全风险、Pod 漂移后数据不对 | 生产禁用；必须用时只读 + 严格 PSA |
-| 删 PVC 卡在 `Terminating` | Pod 还在用，或卸载失败 | 先删 Pod；查 kubelet 和 CSI node 日志 |
-| CSI Node 插件没就绪 | Pod `FailedMount` | 检查 DaemonSet、节点污点、驱动版本 |
-| RWX 多 Pod 写同一目录 | 文件互相覆盖 | 按 Pod/租户分目录，或加分布式锁 |
-| 静态 local PV 的 nodeAffinity 与调度冲突 | Pod 一直 Pending | 配 nodeSelector/反亲和，让 Pod 落到数据所在节点 |
 
 ## 最后：选型的决策顺序
 
