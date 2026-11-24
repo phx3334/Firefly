@@ -10,7 +10,6 @@ lang: '中文'
 ---
 
 
-
 ## 定义
 k8s是一个开源的容器编排平台，利用它可以非常方便，高效地管理多个容器。对比一下不用k8s的情况。
 | 痛点                      | k8s 的解法                                                      |
@@ -82,21 +81,47 @@ Pod中的所有容器使用同一个网络namespace，即相同的IP地址和Por
 localhost通信。同样的，这些容器可以共享存储，当Kubernetes挂载volume到Pod，本质上是将
 volume挂载到Pod中的每一个容器
 
+### 静态 Pod
+
+**静态 Pod 是由 kubelet 直接管理、不经过 API Server 创建的 Pod**：kubelet 监听节点本地目录（默认 `/etc/kubernetes/manifests/`），放进去一个 YAML 就拉起对应 Pod，改文件自动重建，删文件就删除。kubelet 启动时也会扫描该目录，所以节点重启后控制面能自动恢复。
+
+| 对比项 | 普通 Pod | 静态 Pod |
+| --- | --- | --- |
+| 管理者 | Deployment、ReplicaSet 等控制器 | **kubelet** |
+| 创建方式 | `kubectl apply -f xxx.yaml` | 把 YAML 放进 manifests 目录 |
+| 能否 `kubectl delete` | 能 | **不能**，删了会被 kubelet 立刻重建 |
+| 名字特征 | 随机后缀 | 带节点名后缀，如 `kube-apiserver-master01` |
+| 在 apiserver 中的形态 | 真实对象 | 只读的 Mirror Pod，`kubectl edit` 改不生效 |
+
+Mirror Pod 是 kubelet 在 apiserver 里为静态 Pod 创建的**只读影子对象**：名字是 `<静态Pod名>-<节点名>`，带 `kubernetes.io/config.mirror` 注解，作用只是让 `kubectl get/logs/describe` 能查到它。它的 spec 由 kubelet 单向同步，不受控制器和调度器管理，真正决定它跑不跑的是节点上的源文件。
+
+**为什么存在（自举）**：控制面组件 apiserver、etcd、scheduler、controller-manager 本身也是容器，但创建 Pod 又依赖 apiserver——集群初始化时这是个死循环。静态 Pod 让 kubelet 直接读本地文件拉起容器，绕过 apiserver，kubeadm 就是靠它自举控制面的。`kubectl get pods -n kube-system` 里名字带节点后缀的，基本就是静态 Pod。
+
+**别理解偏**："不经过 API Server"指的是**创建和管理的入口**，不是说静态 Pod 直接写 etcd。kubelet 从不直连 etcd（整个集群只有 apiserver 能读写 etcd），静态 Pod 的事实来源始终是节点上的 YAML 文件；apiserver 可达时，kubelet 会额外创建一个只读的 Mirror Pod 对象走正常 API 流程落进 etcd，作用只是让 `kubectl` 能查询和看日志。apiserver 挂了，静态 Pod 照常运行，只是集群里查不到。
+
+**两个操作坑**：
+
+- **删不掉**：`kubectl delete` 删的只是 apiserver 里的 Mirror Pod，kubelet 会立刻重建；要下线只能删 `/etc/kubernetes/manifests/` 里的源文件。
+- **改不动**：`kubectl edit` 改的是 Mirror Pod，会被 kubelet 覆盖回去；要改配置就改源文件，kubelet 检测到变化后自动重建。
+
+另外，静态 Pod 不能依赖其他 API 对象（ServiceAccount、ConfigMap、Secret 等），所以控制面组件的配置都是本地文件或启动参数，不靠 ConfigMap 下发。
+
 ## 核心组件简介
 ### 从节点上部署的组件
 #### 容器引擎
 负责具体后端容器运行时的软件，kubernetes支持多个容器运行环境：Docker，Containerd，CRI-O以
 及任何实现kubernetes CRI（容器运行环境接口）。
 #### kubelet
-kubelet有以下功能
-- Kubelet是Master节点安插在Node节点上的“眼线”，它会定时向API Server汇报自己Node
-节点上运行的服务的状态
-- kubelet会接收Master的指示来维护当前工作节点的Pod达到预期状态（比如运行什么容器、运
-行的副本数量、网络或者存储、容器的存活和健康检测等容器整个生命周期都归kubelet管）
-关于容器的创建：kubelet是通过CRI（container runtime interface）接口来调用容器引擎实现
-的，具体见docker文章  
-- kubelet还管理控制节点的静态pods 。
-kubelet的GC机制会负责定期清理工作节点上的镜像以及退出的容器
+
+kubelet 是跑在**每个节点**上的节点代理，负责把调度到本节点的 Pod 真正运行起来，并把节点和 Pod 的状态持续汇报给 apiserver。它不参与调度，只对自己的节点负责。
+核心功能就这几项：
+- **管 Pod 生命周期**：拉镜像、建 sandbox、调 CRI 起容器，按 `restartPolicy` 重启，处理删除。
+- **执行健康检查**：运行 liveness/readiness/startup 三类探针，liveness 失败重启容器，readiness 失败只摘流量。
+- **挂存储、配网络**：调 CSI 完成卷的格式化与挂载，调 CNI 给 Pod 分配 IP、接进网络。
+- **管资源和驱逐**：按 requests/limits 落到 cgroup，节点资源紧张时按 QoS 驱逐 Pod。
+- **镜像与容器 GC**：定期清理不再使用的镜像和已退出的容器。
+**边界**：不调度、不管 Service 转发规则、不采业务日志。所以 Pod 起不来时，先看 `kubectl describe pod` 的 events 和 `journalctl -u kubelet`。
+
 #### kube-proxy组件与service资源
 运行有kubelet的节点都会运行kube-proxy组件，kube-proxy负责管理service资源以实现pod的负载均
 衡代理，至于service资源为何种物，详解如下
@@ -406,7 +431,12 @@ K8s 原生资源（`Deployment`/`Service`/`Pod`/`ConfigMap` 这类内置 kind）
 6. **kube-scheduler** 调度器监听到未绑定节点的 Pod
    看 Pod 的资源请求、亲和、污点，走 Filter（过滤）+ Score（打分）选一个合适节点，把 nodeName 写回 etcd
 7. 目标节点上的 **kubelet** 一直 watch 分配给自己的 Pod
-   kubelet 发现有新 Pod 调度到本机 → 调用 CRI（containerd 等）拉镜像、调 CNI 配网络、创建并启动容器
+   kubelet 发现有新 Pod 调度到本机，按顺序落地（CRI/CNI/CSI 都由它调用）：
+   - **挂卷**：有 PVC 就调 CSI 完成 attach/stage 和挂载
+   - **拉镜像**：通过 CRI 的 ImageService 拉取镜像
+   - **建 sandbox**：调 CRI `RunPodSandbox` 创建 pause 容器，拿到 Pod 的 netns
+   - **配网络**：调 CNI 在 netns 里建 veth、分配 Pod IP
+   - **起容器**：调 CRI `CreateContainer` / `StartContainer`，依次启动 init 容器和业务容器
 8. 容器启动后，kubelet 持续上报 Pod 状态给 apiserver，更新 etcd 里 Pod 的 status
 
 每一步都是"**写 etcd → 下一个组件 watch 到变更 → 继续写**"，组件之间从不直接通信，全部经 apiserver 中转（list-watch 机制一节详述）。
@@ -546,43 +576,5 @@ kube-scheduler           → 调度（Schedule）：新 Pod 放哪个节点
 ```
 对应前面的 apply 完整流程：controller-manager 里的控制器生成"创建 Pod"的动作 → scheduler 选好节点 → 节点上的 kubelet 创建容器。两者分工不同、缺一不可。
 
-## csi,cni,cri
-
-k8s 自己不干"搬砖"的活——它把容器怎么跑、网络怎么通、存储怎么挂这三件事**接口化**，交给真正的实现方。三个接口名字都是"Container + 领域 + Interface"：
-
-| 接口 | 全称 | 管什么 | 常见实现 |
-|---|---|---|---|
-| **CRI** | Container Runtime Interface | 容器怎么创建/启动/停止 | containerd、CRI-O |
-| **CNI** | Container Network Interface | Pod 网络怎么通 | flannel、calico、cilium |
-| **CSI** | Container Storage Interface | 卷怎么挂/卸载 | ceph-csi、云厂商 EBS/CBS 驱动 |
-
-**为什么要搞这三套接口**：k8s 是通用编排平台，不可能自己内置所有运行时、所有网络方案、所有存储驱动。接口化的好处和"USB 标准化"一样——**kubelet 只管调接口，换实现不用改 k8s 一个字**：containerd 换 CRI-O、flannel 换 calico、自建存储换云盘，都是装插件的事。
-
-**调用关系**（对应前面 apply 完整流程的第 7 步）：
-
-```text
-kubelet（每节点代理，唯一的"总调用方"）
-  ├── CRI → 调容器运行时：创建 Pause 沙箱、起业务容器
-  ├── CNI → 调网络插件二进制：给 Pause 的 netns 配网（veth、IP、路由）
-  └── CSI → 卷挂载时调存储驱动：attach 盘 → 格式化/挂载到 Pod 目录
-```
-
-三者分工用一个"给 Pod 挂云盘 + 起容器 + 通网络"的完整例子串起来：
-
-```text
-1. kubelet 调 CRI（containerd）：创建 Pause 容器 → 拿到 netns
-2. kubelet 调 CNI（calico 二进制）：把 netns 交给它 → 配好 veth + Pod IP
-3. Pod 里有 PVC？kubelet 调 CSI（ceph-csi）：向存储集群申请卷 → 挂到节点 → 绑进容器目录
-4. 最后 CRI 再起业务容器（加入 Pause 的 netns），挂上第 3 步的目录
-```
-
-几个容易混淆的点：
-
-- **三个接口的调用方都是 kubelet**（网络和存储的"实际动作"也可能经插件的 DaemonSet 补充，如 calico 的 Felix、ceph-csi 的 sidecar），但"决策方"在控制平面——调度结果写进 Node 对象，kubelet 照单执行
-- **CNI 插件是一堆二进制 + 配置文件**，kubelet 读 `/etc/cni/net.d/` 决定调哪个（post23 详写过流程）；CSI 驱动则是以一组 Deployment/StatefulSet + DaemonSet 形式部署的 Pod，通过 gRPC 长连接服务 kubelet——形态不同，接口本质相同
-- **CRI 之前是 docker 的天下**，k8s 早期直接内嵌 docker（DockerShim）；后来 docker 出于商业利益不肯实现 CRI 标准，k8s 1.24 移除 DockerShim 转向 containerd——containerd 本就是 docker 内部拆出来的容器运行时，比 docker 更轻（砍掉了 build/CLI 这些编排不需要的东西），**这就是"k8s 弃用 docker"事件的全部含义：不是不能跑 docker 镜像，而是不再经由 docker 这个运行时**
-- **CSI 是三个里最年轻的**之前驱动代码编译在 k8s 二进制里，加一种存储要改 k8s 源码重发版；CSI 把存储实现也拉出成独立插件，从此存储厂商只维护自己的驱动
-
-一句话总结：**CRI 管容器生命周期、CNI 管 Pod 网络、CSI 管存储卷——三套 gRPC/二进制接口 + kubelet 这一个总调用方，把"编排逻辑"和"具体实现"解耦，k8s 的整个生态插件体系就建立在它们之上**。
 
 **更深层次剖析请看[这篇博客](https://bbs.huaweicloud.com/blogs/334436)**

@@ -176,28 +176,7 @@ K8S的资源有Pod、Service、Volume、Namespace、ReplicaSet、Deployment、St
 | 配置与存储         | Volume、PersistentVolume、CSI、ConfigMap、Secret                                         |
 | 集群资源           | Namespace、Node、Role、ClusterRole、RoleBinding、ClusterRoleBinding                      |
 | 元数据资源         | HPA（HorizontalPodAutoscaler）、PodTemplate、LimitRange                                  |
-**强调**：我们通常不会只拉起一个裸pod（怎么叫裸pod就是没有任何管理者的pod，注意静态pod是有管理者的它的管理者是kubelet）
-#### 什么是静态Pod
-**静态 Pod** 是指由 **kubelet 直接管理、不经过 API Server** 的 Pod。kubelet 会自动监听节点上的固定目录：
-```bash
-/etc/kubernetes/manifests/
-```
-往这个目录放 YAML 文件，kubelet 就自动创建对应 Pod；改文件自动重启；删文件自动删除。整个生命周期由 kubelet 管理，不经过 API Server。
-| 对比项                | 普通 Pod                        | 静态 Pod                                         |
-| --------------------- | ------------------------------- | ------------------------------------------------ |
-| 管理者                | Deployment、ReplicaSet 等控制器 | **kubelet**                                      |
-| 创建方式              | `kubectl apply -f xxx.yaml`     | 文件放进 manifests 目录                          |
-| 能否 `kubectl delete` | 能                              | **不能**（kubelet 会重建）                       |
-| 名字特征              | 随机后缀                        | **后面带节点名**（如 `kube-apiserver-master01`） |
-**为什么存在（自举）**：控制面组件 apiserver、etcd 等本身也是容器，但需要 API Server 才能创建——集群初始化时 API Server 还不存在，怎么办？静态 Pod 绕开这个死循环：**kubelet 直接读文件拉起控制面，不依赖 API Server**。所以 `kubectl get pods -n kube-system` 里名字带节点名后缀的就是静态 Pod。
-**两个坑**：
-```bash
-# 1. 删不掉：kubectl delete 会被 kubelet 立刻重建，只能删源文件
-rm /etc/kubernetes/manifests/kube-apiserver.yaml
-# 2. 改不了：kubectl edit 改的是副本，会被覆盖回去，要改就改源文件
-vim /etc/kubernetes/manifests/kube-apiserver.yaml   # 保存后 kubelet 自动重启
-```
-小结：**静态 Pod = kubelet 根据 manifests 目录文件自动管理的 Pod**，不经过 API Server、删不掉、只能改文件控制，核心用途是自举控制面组件。
+**强调**：我们通常不会只拉起一个裸pod（怎么叫裸pod就是没有任何管理者的pod）；静态pod的管理者是kubelet，完整介绍见 post20。
 
 ### Secret和配置管理
 secret在K8S中表示一个存储在etcd中的配置，通常用Base64编码，此配置可以通过挂载卷或者环境变量的方式供Pod访问，通常用来放各种凭证，例如数据库密码，TLS证书，镜像仓库拉取凭证。注意手动创建的 TLS 证书 Secret 会过期（Let's Encrypt 只有 90 天），生产上这类证书由 cert-manager 控制器自动签发和续期，详见 post20。
@@ -574,7 +553,6 @@ kubectl get pv
 # NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM                    STORAGECLASS   AGE
 # pvc-3d5f8c2a-9b4e-4c1d-a7f2-6e8d0b1c2a3e   1Gi        RWX            Delete           Bound    default/my-pvc-dynamic   nfs-sc         5s
 ```
-注意对比静态供应的输出差异：PV 的名字不再是手写的 `my-pv`，而是 `pvc-` 加一串随机 ID——这个 PV 是 CSI 驱动自动生成的，名字和生命周期都跟 PVC 绑定。VolumeName 那串 ID 实际也是后端存储（这里是 NFS 子目录）的标识，删 PVC 时 CSI 驱动顺着它去后端把对应资源也清掉（reclaimPolicy: Delete 的效果）。
 
 ### 服务发现与负载均衡
 Service 的定位：**给一组 Pod 提供稳定的访问入口**。Pod 的 IP 是临时的（删了重建就变），但 Service 的 IP 是稳定的——客户端只认 Service，不用关心后端 Pod 是谁、在哪、什么时候换过。
@@ -680,7 +658,6 @@ pod-a (前端) ──请求 web:80──> Service web (ClusterIP 10.96.0.5)
 - **DNS 服务发现**：集群内置 CoreDNS，任何 Service 自动获得 `服务名.命名空间.svc.cluster.local` 域名，同命名空间内直接用服务名即可
 - **Endpoints**：Service 通过 Endpoints 对象记录"当前有哪些后端 Pod IP"。`kubectl get endpoints web` 可查看
 - **无头服务（Headless Service）**：`clusterIP: None` 的 Service 不分配 ClusterIP，DNS 直接返回所有 Pod IP，配合 StatefulSet 给每个 Pod 一个稳定域名（如 `pod名.服务名`）
-
 
 ### 自我修复
 故障的分类：

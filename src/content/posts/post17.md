@@ -33,55 +33,13 @@ PV 是集群里的一块实际存储，PVC 是用户对存储的申请，Pod 只
 
 ### 静态 PVC 挂载：管理员先建 PV，用户再申请
 
-静态供应的 PV 是手工写的，PVC 按条件去"认领"。最常见的场景是接一台已有的 NFS：
+静态供应是管理员手工写好 PV，PVC 按条件去匹配认领。生产中**极少用**，只在两类场景出现：一是接入存量存储——已有 NFS、本地盘或从别的集群迁移过来的卷，CSI 创建不出来，只能手写 PV 接进来；二是需要人工精确控制后端参数或容量、把某块盘预留给指定业务的场景。
 
-```yaml
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pv-nfs-share
-spec:
-  capacity:
-    storage: 100Gi
-  accessModes: ["ReadWriteMany"]
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: manual
-  nfs:
-    server: 192.168.10.10
-    path: /data/share
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: pvc-nfs-share
-spec:
-  storageClassName: manual
-  accessModes: ["ReadWriteMany"]
-  resources:
-    requests:
-      storage: 50Gi
-```
+要注意的坑点：
 
-PVC 能绑上 PV，要同时满足几个条件：
-
-- `storageClassName` 完全一致（PVC 不写时会被默认 StorageClass 接管；没有默认类则只匹配没有 storageClassName 的 PV）
-- PV 的 `accessModes` 覆盖 PVC 申请的模式
-- PV 容量 ≥ PVC 申请容量
-- PV 没被别的 PVC 绑定（**一个 PV 只能绑一个 PVC**），且 `claimRef` 没占用
-- 两边 `volumeMode` 一致（Filesystem / Block）
-
-没有匹配的 PV，PVC 就一直 Pending。静态供应适合存量 NFS、本地盘、需要特殊参数或从别的集群迁过来的卷；缺点是容量靠管理员预估，建多了闲置、建少了不够，规模一大基本不可维护。
-
-生产上手工建 PV 时，建议直接预置 `claimRef`（pre-binding），把这块 PV 钉死给目标 PVC：
-
-```yaml
-spec:
-  claimRef:
-    namespace: default
-    name: pvc-nfs-share
-```
-
-预绑定后，这块 PV 只会被指定的 PVC 认领，其他 PVC 条件再匹配也抢不走。典型事故是集群里同时有多个"50Gi RWX"的申请，PV 被别的 PVC 先绑走，业务挂上的其实是别人的数据目录。反过来，`claimRef` 的 namespace 或名字写错，这块 PV 就永远绑不上，只能改 `claimRef` 或者删掉重建 PV；从别的集群迁移时，先核对目标 PVC 的名字和 namespace 再建 PV。
+- 匹配条件必须全部满足：`storageClassName` 一致、PV 的 `accessModes` 覆盖 PVC 申请、PV 容量 ≥ 申请量、`volumeMode` 相同（默认都是 `Filesystem`，静态场景一般不用写，只有给应用裸块设备时才显式配 `Block`）、PV 未被占用。缺前面任何一条，PVC 就永远 Pending。
+- 一个 PV 只能绑一个 PVC，也没有按需扩缩：容量估大了闲置，估小了只能重建。
+- 建议建 PV 时预置 `claimRef`，把卷钉给目标 PVC。不预置的话，多个条件匹配的申请会抢卷，业务可能挂上别人的数据目录；反过来 namespace 或名字写错，这块 PV 就一直绑不上，只能改 `claimRef` 或删掉重建。
 
 ### 动态 PVC 挂载：StorageClass + CSI 按需造卷
 
@@ -120,17 +78,15 @@ PVC 绑定后（`WaitForFirstConsumer` 时要等 Pod 创建），`kubectl get pv
 - `Immediate`：PVC 一创建立刻建卷。云盘是**可用区级**资源，CSI 驱动按自己的策略挑一个可用区建盘；如果 Pod 因为资源或亲和性被调度到别的可用区，就会挂不上，报 `FailedAttachVolume` 或一直 Pending。
 - `WaitForFirstConsumer`：等 Pod 调度到某个节点后，再在节点所在可用区建卷。多可用区集群**必须用它**，顺带还能避免"卷建好了但 Pod 因为资源不足永远调度不上去"的浪费。
 
-### 两种方式怎么选
+### 为什么生产几乎都采用动态供应
 
-| 维度 | 静态供应 | 动态供应 |
-| --- | --- | --- |
-| PV 谁创建 | 管理员手工 | CSI 驱动自动 |
-| 适合场景 | 存量 NFS/本地盘、特殊后端、迁移 | 云环境、按需申请、多租户 |
-| 容量规划 | 靠人预估，容易浪费或不足 | PVC 写多少申请多少 |
-| 运维成本 | 高，PV 要逐个维护 | 低，只维护 StorageClass |
-| 回收 | 手工清理 | 按 `reclaimPolicy` 自动或保留 |
+- **容量按需**：动态供应按 PVC 的申请量**精确创建**；静态供应则是从预先建好的固定大小 PV 里挑一块，PVC申请 50Gi 只能绑 ≥50Gi 的整块 PV，多出来的容量用不满也拆不给别人。
+- **生命周期闭环**：卷由 CSI 驱动创建、绑定、回收，删 PVC 后按 `reclaimPolicy` 自动清理后端盘，不需要人工维护"PV 对应哪块云盘"的登记表。静态 PV 的账本只能靠人记，人一换就断。
+- **参数收敛在 StorageClass**：`fsType`、性能档位、加密、可用区策略写一次，所有 PVC 继承，不会出现手写 PV 时 zone 写错、参数漂移；平台也能按 StorageClass 做准入策略和成本分账。
+- **多租户自助**：用户只提交 PVC，不碰 PV 和后端 API，RBAC 收在 PVC/StorageClass 这一层。申请不用开单找管理员，CI 临时环境、Helm Chart、GitOps 才能真正自动化。
+- **编排模型的硬要求**：StatefulSet 的 `volumeClaimTemplates`、有状态应用的扩缩容，前提都是"声明即创建"，静态 PV 支撑不了。
 
-生产上主流是动态供应；静态供应留给"接不进来的存量存储"和"必须精确控制后端参数"的场景。
+代价只有一个：回收动作也一起自动化了。所以数据库、消息队列这类不能丢数据的 StorageClass 必须显式设 `Retain`，并另外做备份——`Retain` 只防误删 PVC，防不了盘和机房故障。
 
 ### StatefulSet 用 volumeClaimTemplates
 
@@ -197,8 +153,6 @@ RWX 必须后端本身支持多节点并发读写。云盘 ESSD 普通盘**不�
 而且 RWX 只解决"能同时挂"，不解决"同时写不冲突"。NFS 上的文件锁、JuiceFS 的 POSIX 语义都只是提供机制，业务仍要按目录隔离——比如每个 Pod 写自己的子目录，或者用分布式锁。
 
 ### 一块 ESSD 云盘能同时挂多台 ECS 吗？
-
-这是面试和实战都高频的问题，答案分两种情况：
 
 - **普通 ESSD 云盘：不能。** 同一时刻只能挂到一台 ECS。可以卸载后挂到另一台，但绝不允许两台同时挂载并写。普通盘上如果是 ext4/xfs，两台机器同时挂会直接损坏文件系统——这两种文件系统没有集群锁机制。
 - **ESSD 共享盘（共享块存储）：可以挂多台，但不是"插上就能用"。** 云厂商的共享盘允许挂到多台 ECS（通常最多十几台，具体看规格），但必须搭配**集群文件系统**（GFS2、OCFS2）或应用层自己的并发控制（比如 Oracle RAC 的 ASM）。直接对共享盘 `mkfs.ext4` 再挂到两台机器，结果就是互相踩数据。

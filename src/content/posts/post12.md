@@ -197,18 +197,6 @@ int main()
 → 内核返回给容器进程  
 
 ## docker
-### 安装docker前需要做的一些准备工作
-```bash
-#需要将selinux和防火墙关掉，减少实验测试过程中出现的奇怪问题
-sudo sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
-#使当前会话立刻生效
-setenforce 0
-sudo systemctl stop firewalld      # 立即停止
-sudo systemctl disable firewalld   # 禁止开机自启
-#关掉swap分区，因为这个会影响Cgroup设定的内存设置无法严格生效，不过实际生产环境中，某些特定容器需要灵活控制swap分区使用，这里简化操作。
-#立即关闭。注释/etc/fab文件中的Swap分区自动挂载防止开机自启
-swapoff -a
-```
 ### 常用命令（不重要，基本现在都用k8s了）
 #### docker及其容器的信息查看
 ```bash
@@ -313,7 +301,6 @@ docker run -p 8888:80 -d -v /test:/aaa --name test centos:7 tail -f /dev/null
 - **数据卷挂载**：仅针对 `UpperDir` 中的部分关键数据做持久化，不导出整体文件系统。
 因此，commit 适合"定制镜像"，挂载卷适合"持久化数据"，二者不可互相替代。更高效的定制镜像方式是用 **Dockerfile** 编写构建流程，而非手动 commit 这种"笨方法"（下载基础镜像 → 安装修改 → commit）
 
-
 ### 容器内网络
 本质：四种模式 = 容器网络命名空间与宿主机网络栈的不同组合方式。
 #### None模式
@@ -364,7 +351,6 @@ docker run -p 8888:80 -d -v /test:/aaa --name test centos:7 tail -f /dev/null
 - 容器**直接使用宿主机网络命名空间**：没有独立 IP，直接用宿主机 IP 和端口。
 - 优点：性能最好，无网桥/NAT 转发开销；缺点：端口易与宿主机冲突，隔离性最差。
 - 命令：`--network host`
-
 
 ### dockerfile编写
 ```Dockerfile
@@ -424,7 +410,6 @@ ENTRYPOINT ["/app/worker"]
 - 多次FROM即多阶段构建，这样可以大幅减少镜像体积，比如说构建go可执行文件需要下载go环境，但是构建完成后其实只需要可执行文件就行，多阶段构建只引用之前构建的有用的东西
 - “COPY --from=builder /src/server/configs /app/configs”实际上最终的镜像也只会保存/app/configs这一份文件，最终阶段前构建的文件都会自动删除
 - ENTRYPOINT ["/app/api"]表示用exec（shell的内置命令）的方式运行容器内的第一个进程，如果不采用[]形式，而是ENTRYPOINT /app/api那么会隐式地转交给shell解释器执行，第一个进程就是shell解释器。也可以ENTRYPOINT ["sh", "-c", "exec /app/api --port $PORT"]这样既可以用shell解释器能够执行的变量展开（比如$HOME），管道符，第一个进程又是/app/api。信号可以不经过shell解释器直达/app/api
-
 
 ## FAQ
 ### sh、bin/bash、exec三者执行命令的区别
