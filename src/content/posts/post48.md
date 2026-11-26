@@ -1,7 +1,7 @@
 ---
 title: k8s企业级架构设计
 published: 2026-10-28T20:11:23+08:00
-description: 学习k8s高可用的企业级架构的关键点以及一些实践过程的注意事项，还有keepalived机制的学习与应用
+description: 企业级 k8s 高可用架构落地：SLB/EIP 接入、keepalived VIP、硬件与磁盘规划、三网段隔离设计，以及节点下线、扩容与版本升级的完整实践
 image: './images/a48.avif'
 tags: [k8s,keepalived]
 category: '计算机技术'
@@ -13,195 +13,67 @@ lang: '中文'
 
 ## 整体架构：高可用到底解决什么问题
 
-先看一张典型的企业级 k8s 高可用架构图：
+先看一张典型的企业级 k8s 高可用架构图（云原生方案）：
 
-![k8s企业级高可用架构](./images/k8s-arch.png)
+![k8s企业级高可用架构](./images/k8s-arch.svg)
 
-整个架构从上到下分四层，每一层解决的问题都不一样：
+整个架构从上到下分六层，每一层解决的问题都不一样：
 
 | 层 | 组件 | 解决的问题 |
 | ---- | ---- | ---- |
-| 接入层 | keepalived + nginx（VIP） | apiserver 有 3 个副本，客户端到底连谁？ |
-| 控制层 | 3 × Master（apiserver / controller-manager / scheduler） | 控制平面单点故障 |
+| 公网接入 | 运维终端 → EIP → 堡垒机 / VPN | 外部怎么安全地进来，公网只开一跳 |
+| 控制面接入 | 内网 SLB / CLB（4 层 TCP 6443） | apiserver 有 3 个副本，客户端到底连谁？ |
+| 控制层 | 3 × Master（跨可用区，apiserver / controller-manager / scheduler） | 控制平面单点故障 |
 | 数据层 | Etcd 集群（3 或 5 节点） | 集群"状态"的持久化，丢了 etcd 等于丢了整个集群 |
-| 工作层 | N × Node（kubelet / kube-proxy） | 真正跑业务的地方，坏了不影响集群控制面 |
+| 工作层 | N × Node（kubelet / kube-proxy / CNI） | 真正跑业务的地方，坏了不影响集群控制面 |
+| 集群出网 | NAT 网关 + EIP | Node / Pod 拉镜像、调外部 API 的固定出口 |
 
-**高可用的核心矛盾在接入层**：apiserver 可以多副本，controller-manager 和 scheduler 自身有选主机制（多副本只有Leader在干活），etcd 靠 Raft 保证一致性——但客户端（kubectl、kubelet、controller）需要一个**永远不变的入口地址**。总不能在每台 kubelet 的配置里写"连 192.168.0.11 失败了就换 192.168.0.12"。
+**高可用的核心矛盾在接入层**：apiserver 可以多副本，controller-manager 和 scheduler 自身有选主机制（多副本只有 Leader 在干活），etcd 靠 Raft 保证一致性——但客户端（kubectl、kubelet、controller）需要一个**永远不变的入口地址**。总不能在每台 kubelet 的配置里写"连 192.168.0.11 失败了就换 192.168.0.12"。
 
-解法就是架构图中间那条橙色横条：**Load Balancer (keepalived + nginx)**。在生产上最常用的组合是：
+云原生环境下的主流解法是**云厂商托管的负载均衡**
 
-- **keepalived**：负责一个虚拟 IP（VIP）在三台机器之间漂移，VIP 永远指向活着的机器；
-- **nginx**：监听 VIP 上的 6443 端口，把流量反向代理到三台 apiserver。
+**CLB 是怎么解决"入口不变"的**：CLB 实例创建后会分到一个**固定的内网 VIP**，这个地址由云平台持有，不属于任何一台 master。kubeconfig 里只写这个 VIP（或解析到它的域名），客户端永远只和它建立连接；CLB 按四层把连接转发到后端某一台 master 的 6443，三台 master 在它眼里只是"后端成员"——某台健康检查失败就自动摘除，恢复后自动加回。相当于把 keepalived 那套"VIP 在机器之间漂移"的活搬到了平台内部：客户端只认 VIP，永远不用关心后面是谁在干活。
 
-两个组件都**直接部署在 3 台 master 上**，不额外加机器。kubeconfig 里写的 server 地址永远是 `https://192.168.0.100:6443`（假设这是 VIP），后面哪台 master 挂了都无感。
+- **SLB / CLB（Server Load Balancer，各云叫法不同：阿里云 CLB/SLB、腾讯云 CLB、AWS NLB）**：四层 TCP 监听 6443，后端挂 3 台 master 的 apiserver，多可用区部署，SLA 由云厂商兜底。
+- **EIP（弹性公网 IP）**：提供固定的公网地址。两种典型用法——绑在堡垒机 / NAT 网关上（运维入口、集群出网）；或直接绑公网型 SLB（把 apiserver 暴露到公网，**生产不推荐**）。
+- **NAT 网关 + EIP**：节点和 Pod 出公网统一走 NAT 网关，不用给每台节点绑 EIP——出口固定、可审计、安全组收敛。
 
-顺带说下 F5：金融、运营商这类传统企业确实有，一台几十万，稳是稳，但互联网公司基本用软件方案——keepalived + nginx/haproxy 零成本达到同等效果，为什么不用。
+> **为什么云上基本不用 keepalived**：VPC 默认禁组播（VRRP 通告走的是 `224.0.0.18` 组播），并校验源 IP / ARP，用户不能随便拿一个未分配的地址当 VIP 去响应 ARP。
 
-### 重点：keepalived 的原理（VRRP）
+### 自建机房方案：keepalived 简版
 
-keepalived 本质是 **VRRP 协议（Virtual Router Redundancy Protocol，RFC 2338）的用户态实现**，加上一套自己的健康检查框架。
+没有云 LB 的 IDC 里，用**keepalived + nginx/haproxy**，直接装在 3 台 master 上，不额外加机器。两者分工正好对应云上的 CLB：keepalived 负责"固定的 VIP"，nginx/haproxy 负责"转发 + 后端健康检查"。
 
-#### 组播
-VRRP 通告的默认投递方式是组播，讲 keepalived 之前先把组播本身说清。网络通信按「一个发送方对应几个接收方」分三类：
+- **keepalived（对应 CLB 的 VIP）**：VRRP（虚拟路由冗余协议）的用户态实现。三台 master 配同一个虚拟路由器 ID（VRID），组成一个虚拟路由器，对外只暴露一个 VIP + 虚拟 MAC。同一时刻只有一台是 **Master**（持有 VIP、实际转发流量），其余2个都是 **Backup**；优先级分别 100/90/80，最高的成为 Master，默认每秒发一次通告；Backup 超过约 3 秒收不到通告，就认为 Master 挂了，由优先级最高的 Backup 接管 VIP，并主动发 gratuitous ARP，让交换机和网关把 VIP 对应的 MAC 更新到自己身上。旧 Master 恢复后默认会抢回 VIP，生产上一般关掉抢占（nopreempt），避免来回抖动。
+- **nginx / haproxy（对应 CLB 的转发和后端管理）**：监听 VIP 的 6443，把连接反向代理到三台 master 的 apiserver，并持续做健康检查；哪台 apiserver 挂了就暂时从后端列表里摘掉，恢复后自动加回。
+- **客户端**：kubeconfig、kubelet、controller-manager 里的 server 地址都写 `https://<VIP>:6443`，只认这个固定地址，不关心当前 Master 是哪台。
 
-| 方式 | 地址形态 | 一份数据的投递 | 典型例子 |
-| ---- | ---- | ---- | ---- |
-| 单播 Unicast | 普通单播 IP/MAC | 有几个接收方就复制几份，逐个发送 | 访问网站、SSH |
-| 广播 Broadcast | MAC `FF:FF:FF:FF:FF:FF` | 一定范围内所有人都收 | ARP 请求、DHCP 发现 |
-| 组播 Multicast | IP `224.0.0.0~239.255.255.255`（D 类）/ MAC `01:00:5E` 开头 | **只发一份**，仅「订阅过」的主机收 | VRRP 通告、OSPF、IPTV |
+**为什么还要单独做健康检查**：VRRP 只看"机器"的心跳，不看"服务"是否活着。机器正常、但 nginx 或 apiserver 已经挂了时，VIP 不会漂移，流量会持续打向一台"僵尸网关"。所以要让 keepalived 定期访问本机的 6443 健康接口，检查不过就降低优先级、主动让出 VIP，把流量逼到健康的节点上。
 
-组播的定位夹在两者中间：**单播**给 100 台机器发同一份数据要发 100 份，带宽和发送方 CPU 都浪费；**广播**虽然只发一份，但同广播域里不关心的主机也被迫收下并打断 CPU 处理，且路由器不转发、范围只能限一个网段。**组播两者兼顾**——发送方只发一份，交换机/路由器顺着「订阅关系」把数据送到且只送到订阅者的端口，没订阅的主机网卡在硬件层就丢帧，几乎零打扰。
-
-**工作原理**是一条「订阅-分发」链路：
-
-`1`**接收方入组**：应用向内核声明加入某个组播组（如 keepalived 加入 224.0.0.18），内核把对应组播 MAC 写进网卡过滤表，同时（对非 224.0.0.x 的普通组播）发 IGMP report 告知交换机「我这个端口要收这个组」。
-
-`2`**交换机维护订阅表**：开着 IGMP snooping 的交换机监听这些 report，在 MAC 地址表之外维护一张「组播组 → 成员端口」的表，转发时只往成员端口发。
-
-`3`**发送方只发一份**：源把数据发往组播地址，网络里每条链路最多出现一次这份数据，由组播路由协议（PIM 等）在跨网段时复制分发。
-
-IPv4 组播地址段有明确的用途划分，VRRP 用到的 `224.0.0.x` 是其中的特殊块：
-
-| 地址段 | 用途 | 是否跨网段 |
-| ---- | ---- | ---- |
-| `224.0.0.0/24` | 本地网络控制块：OSPF 224.0.0.5、VRRP 224.0.0.18 等 | 否，TTL=1，不入组播路由 |
-| `224.0.1.0/24` | 网间控制块（如 NTP 224.0.1.1） | 可跨网段 |
-| `232.0.0.0/8` | SSM 指定源组播 | 可跨网段 |
-| `239.0.0.0/8` | 私有组播段（相当于组播界的 RFC 1918） | 企业内部自用 |
-
-对 keepalived 而言，组播的价值一句话概括：**Master 只发一份通告，所有 Backup 自动收到，新增 Backup 零配置入组**——这就是后文「组播成组靠同听一个频道」的根基。代价是依赖二层环境支持组播泛洪/IGMP，一旦交换机策略禁了它，就要退到单播模式（见后文生产选型）。
-
-#### VRRP 要解决的问题
-
-VRRP 解决的是比 k8s 更古老的问题：**默认网关是单点**。内网里所有机器的网关都是 192.168.0.1，这台路由器挂了全网断网。VRRP 的思路是把"路由"抽象成一个虚拟的东西：
+最小配置（三台 master 各一份，priority 100/90/80）：
 
 ```text
-物理拓扑：
-  R1（优先级 100）──┐
-  R2（优先级 90） ──┼── 虚拟路由器 VRID=1 → VIP: 192.168.0.1
-  R3（优先级 80） ──┘
-  局域网内所有机器的网关都指向 VIP，感知不到后面是谁在实际干活
-```
-
-多台物理设备组成一个**虚拟路由器**（用 VRID 标识），对外暴露一个 **VIP（虚拟 IP）+ 虚拟 MAC 地址（00:00:5E:00:01:VRID）**。同一时刻只有一台设备实际持有 VIP 并转发流量，它叫 **Master**，其余是 **Backup**。
-
-**优先级**：取值 1~255，决定两个事——谁平时当 Master、Master 挂了谁先接管。数值越大越优先（配置里的 `priority 100/90/80` 就是三台机器的座次）。两个特殊值：**0** 不是最低而是信号——Master 主动放弃时发优先级 0 的通告，Backup 秒级接管；**255** 是最高，若某台机器的接口 IP 恰好就是 VIP（IP Owner），自动持有 255，恒为 Master。生产中不用 255，就是为了让 VIP 的归属由配置控制（优先级 + 健康检查权重），而不是被拓扑绑死。
-
-#### 选举机制：靠组播通告"我还活着"
-
-VRRP 的运行机制简单到可以用三句话说清：
-
-1. **Master 周期性向组播地址 `224.0.0.18` 发 VRRP 通告**（Advertisement），报文里带着自己的优先级，默认每 1 秒一次；
-2. **Backup 一直在监听224.0.0.18**，只要通告还在来，就知道 Master 活着，自己继续待命；
-3. **通告停了**（超过 `Master_Down_Interval`），Backup 们认为 Master 挂了，**优先级最高者**接管 VIP，通过 ARP 广播宣告"VIP 在我这"，开始接流量。
-
-#### 二层网络通信流程
-
-VRRP 通告从 Master 的 keepalived 进程发出，到 Backup 的 keepalived 进程收到，中间经过网卡、交换机、内核协议栈三层。先讲默认的**组播模式**，完整链路如下：
-
-```text
-【第 0 步：启动时登记——为什么后面能命中】
-keepalived 启动，setsockopt(IP_ADD_MEMBERSHIP) 加入组播组 224.0.0.18
-  ↓ 内核在该接口登记组成员，并按映射规则生成链路层地址 01:00:5e:00:00:12
-  ↓ 内核调驱动的 set_rx_mode，把这个组播 MAC 写进网卡硬件的组播过滤表
-
-Master (192.168.0.11)                              Backup (192.168.0.12/13)
-keepalived 构造 VRRP 报文（IP 协议号 112，不是 TCP/UDP）
-  ↓ 网络层：IP 目的地址 = 224.0.0.18
-  ↓ 由组播 IP 推导出目标 MAC = 01:00:5e:00:00:12（映射规则：01:00:5e + IP 低 23 位）
-  ↓ 数据链路层封装以太网帧，从网卡发出
-交换机（VLAN 内泛洪——注意 224.0.0.x 不走 IGMP snooping，见细节 2）
-  ↓
-Backup 网卡收帧：目标 MAC 01:00:5e:00:00:12 命中第 0 步写入的组播过滤表 → 放行到内核
-  （网卡只做哈希粗筛，一个 MAC 对应 32 个组播 IP；内核收到后还会按已加入的组播组精筛一次）
-  ↓ 内核：驱动收到 → 网络层解析 IP 头 → Protocol = 112（VRRP）
-  ↓ 内核把报文投递给注册了「监听协议号 112」的 raw socket
-  ↓
-keepalived 用户态进程收到通告，更新 VRRP 状态机
-```
-
-验证登记是否成功：`ip maddr show dev ens192` 应看到 `224.0.0.18`；`tcpdump -i ens192 vrrp` 能抓到通告，就是网卡放行生效的实证。
-
-三个关键细节：
-
-`1`**组播 MAC 的推导规则**：IPv4 组播地址映射到 MAC `01:00:5E` 开头的地址段，取组播 IP 的低 23 位填入。`224.0.0.18` → `01:00:5e:00:00:12`。注意别和前文虚拟路由器的 MAC（`00:00:5E:00:01:VRID`）搞混——**`01:00:5e:00:00:12` 只承载 VRRP 通告**，而客户端访问 VIP 的业务流量走的是虚拟 MAC。
-
-`2`**网卡为什么收组播帧 / 交换机为什么不用配**：以太网网卡默认只收「目标 MAC 是自己」的单播帧和广播帧。keepalived 启动时内核把 `01:00:5e:00:00:12` 写进**网卡的组播过滤列表**（`ip maddr show dev ens192` 可查看），列表里没有这个 MAC 的网卡会在硬件层直接丢帧。交换机侧则是另一回事：`224.0.0.0/24` 属于**本地网络控制块**（OSPF 的 224.0.0.5、VRRP 的 224.0.0.18 都在此列），协议规定主机加入这个范围的组**不发 IGMP report**，所以交换机的 IGMP snooping 对它学不到端口——按 RFC 4541，开着 snooping 也在 VLAN 内泛洪。这就是 VRRP 在默认配置的交换机上开箱即用的原因；同理，这也解释了「交换机禁组播/IGMP 会脑裂」的真正机制：多数情况下不是通告被 snooping 拦掉，而是 ACL/策略直接丢弃了组播报文或限制了泛洪范围。
-
-`3`**内核怎么知道交给 keepalived**：VRRP 没有端口号的概念，keepalived 启动时打开一个 `IPPROTO_VRRP(112)` 的 raw socket，内核收到 Protocol=112 的 IP 报文就投递给这个 socket。所以抓包时看到的通告是「IP 直载」，不涉及任何端口。
-
-**单播模式**的链路只在第一环节不同。配置 `unicast_src_ip` + `unicast_peer` 后：
-
-```text
-通告的 IP 目的地址 = 对端真实 IP（如 192.168.0.12）
-目标 MAC = 对端真实 MAC（走普通 ARP 解析，和任意两台机器通信一样）
-```
-
-对端网卡按普通单播帧接收（MAC 匹配本机即可，不需要组播过滤列表），之后的内核路径与组播完全一致：协议号 112 → raw socket → keepalived。交换机全程只做普通二层转发，对组播/IGMP 零感知。
-
-**生产选型**：
-
-| 维度 | 组播 | 单播 |
-| ---- | ---- | ---- |
-| 配置成本 | 零配置，装完即用 | 每个节点都要维护完整 peer 列表，加/删节点需改全部配置 |
-| 交换机要求 | 需放行组播和 IGMP | 无任何特殊要求 |
-| 故障模式 | 交换机禁组播 → 互相收不到通告 → 双 VIP 脑裂（坑二） | peer 配漏/写错 → 单节点误判 Master 挂了 |
-| 云环境 | 公有云 VPC 基本都禁组播和 gratuitous ARP | 可用（部分云连 VRRP 都不支持，只能用云 LB） |
-
-选型结论：**自有机房、交换机自己管 → 组播**（零配置，天然支持任意数量 Backup）；**交换机策略禁组播、或公有云环境 → 单播**。无论哪种，上线前必须实抓一遍：`tcpdump -i ens192 vrrp -nn`——组播模式应看到目的 `224.0.0.18`、单播模式应看到对端真实 IP；**抓不到对端通告的集群，运行起来就是定时脑裂**。排查双 VIP 问题时，这一条抓包命令也是第一现场证据。
-
-#### keepalived 在 VRRP 之上补的两块拼图
-
-原版 VRRP 有个致命盲区：**它只检测"机器"是否存活，不检测"服务"是否存活**。机器活着，但网关进程挂了，VRRP 照样不切换——VIP 纹丝不动，流量继续打向一台"僵尸网关"。
-
-keepalived 就是冲着这个盲区来的，它加了两块东西：
-
-**1. 健康检查（track script）**。keepalived 可以跟踪任意脚本，脚本失败就把本机优先级降为 0 或直接让出 VIP。k8s 场景下经典配置就是**跟踪 nginx 进程**：
-
-```bash
-# /etc/keepalived/check_nginx.sh
-#!/bin/bash
-# nginx 6443 端口不通就返回非 0，触发 VIP 漂移
-if ! curl -sk https://127.0.0.1:6443/healthz >/dev/null 2>&1; then
-    systemctl kill keepalived   # 或降低权重
-    exit 1
-fi
-exit 0
-```
-
-```text
-! /etc/keepalived/keepalived.conf 核心片段
-vrrp_script check_nginx {
-    script "/etc/keepalived/check_nginx.sh"
-    interval 2          # 每 2 秒执行一次
-    weight -30          # 失败则优先级 -30
+vrrp_script check_apiserver {          # 服务级健康检查，VRRP 心跳替代不了
+    script "/usr/bin/curl -sk https://127.0.0.1:6443/healthz"
+    interval 2                         # 每 2 秒执行一次
+    weight -30                         # 失败则优先级 -30
 }
 vrrp_instance VI_1 {
-    state MASTER        # 节点A为MASTER，B/C为BACKUP
-    interface ens192
-    virtual_router_id 51        # 三台必须一致
-    priority 100                # 节点A=100，B=90，C=80
-    advert_int 1
-    virtual_ipaddress {
-        192.168.0.100/24        # 这就是 kubeconfig 里写的 VIP
-    }
-    track_script {
-        check_nginx
-    }
+    state BACKUP
+    interface eth0
+    virtual_router_id 51              # 三台必须一致
+    priority 100                      # A=100 B=90 C=80
+    nopreempt                         # 非抢占，减少恢复后的来回抖动
+    unicast_src_ip 192.168.0.11       # 交换机禁组播时用单播模式
+    unicast_peer { 192.168.0.12 192.168.0.13 }
+    virtual_ipaddress { 192.168.0.100/24 }
+    track_script { check_apiserver }
 }
 ```
-
-**2. 故障切换时的 ARP 处理**。接管方主动发 gratuitous ARP 刷新交换机的 MAC 表，让 VIP → MAC 的映射立即指向新 Master，避免流量继续走旧路径。
-
-#### 生产上的三个坑
-
-**坑一：VIP 不漂移，流量黑洞**。某次 master01 的 nginx 进程异常退出，但机器本身好好的——VRRP 通告照常发送，keepalived 认为 Master 活着，VIP 不切换。三台 master 里正好 Master01 持有 VIP，结果 nginx 挂了等于整个集群入口挂了，kubectl 全部卡死。**根因就是没配 track script，VRRP 只看机器不看进程**。教训：keepalived 必须检查它"承载的服务"，而不是只检查自己。
-
-**坑二：双 VIP（脑裂）**。机房交换机层面把组播协议禁了（安全策略禁 IGMP/组播报文），三台机器互相收不到对方的通告，结果都认为 Master 挂了，**同时持有 VIP**。这种情况下时通时断，极难排查（ARP 表在两台机器间来回震荡）。排查手段：在交换机上抓 ARP、对比三台机器 `ip addr` 的输出。预防手段：keepalived 支持用 **单播（unicast）代替组播**，`unicast_src_ip` + `unicast_peer` 显式指定对端，绕开组播限制。
-
-**坑三：抢占抖动**。Master01 恢复后会抢回 VIP（抢占模式默认开启），如果它启动瞬间 nginx 还没 ready，就会出现"VIP 抢过来 → 检查失败 → 让出去"的抖动。生产上建议配 `nopreempt`（非抢占）：只要当前有 Master 在正常干活，恢复的旧 Master 就不抢回来，把切换次数降到最少——**切换本身就是风险**。
-
-一句话总结 keepalived：**VRRP 管机器间的 VIP 漂移，健康检查脚本管"漂移的触发条件"，gratuitous ARP 管"切换后流量跟上"**。三者缺一不可。
+三个常见坑：
+- **VIP 不漂移，流量黑洞**：机器活着，但 nginx 或 apiserver 已经挂了。VRRP 只探测机器心跳，所以要让它定期访问本机的 6443 健康检查接口，检查不过就主动让出 VIP；
+- **脑裂（双 VIP）**：交换机禁了组播，三台互相收不到通告，都以为自己是 Master。改成单播模式——三台互相写死对方的真实 IP，不依赖组播；上线前确认三台能互相收到通告；
+- **抢占抖动**：旧 Master 恢复后抢回 VIP，但服务还没 ready，于是抢过来又让出去。开启非抢占模式（nopreempt），让正在干活的 Master 继续干，恢复的机器先待命，把切换次数降到最少。
 
 ## 硬件配置：规模决定架构形态
 
@@ -360,7 +232,6 @@ k8s 集群里有三种 IP，它们来自三个不同网段，**必须完全隔�
 
 极端情况：如果公司内网把 `10/8`、`172.16/12`、`192.168/16` 全部占满了（不少传统企业真会这样），没有干净的网段可用时，**正确做法是向网络组申请新网段**，而不是硬找一个"看起来没用到"的网段凑合——今天没用到不代表明年没用到，网段冲突的排查成本远高于提前申请的成本。
 
-
 ## 实践中的一些注意事项
 
 ### 如何平滑下线一个节点
@@ -400,7 +271,7 @@ Deployment 类的关键服务用 rollout 迁移，比直接 drain 更可控：
 kubectl rollout restart deployment my-gateway -n prod
 ```
 
-生产实例：某团队下线一个 master 兼 Ingress 节点，直接 drain 了事，结果集群就这**一个 ingress-nginx controller 副本**，drain 瞬间全站南北向流量 502，等 controller 在新节点拉起来已经过去了两分钟。教训：**如果是 Ingress 入口节点，必须先确认入口冗余**——controller Deployment 有其他健康副本，且上层 LB（如 F5 / DNS 轮询）把流量指到活着的入口。唯一入口就得先迁移：改上层代理的 upstream，或让 keepalived VIP 漂到新入口，确认流量切换完成再动节点。
+生产实例：某团队下线一个 master 兼 Ingress 节点，直接 drain 了事，结果集群就这**一个 ingress-nginx controller 副本**，drain 瞬间全站南北向流量 502，等 controller 在新节点拉起来已经过去了两分钟。教训：**如果是 Ingress 入口节点，必须先确认入口冗余**——controller Deployment 有其他健康副本，且上层 LB（SLB / F5 / DNS 轮询）把流量指到活着的入口。唯一入口就得先迁移：改 SLB 后端或上层代理的 upstream，确认流量切换完成再动节点。
 
 #### 第四步：drain 驱逐剩余 Pod
 
@@ -645,7 +516,7 @@ kubeadm join 192.168.0.100:6443 --token abcdef.0123456789abcdef \
 
 注意两点：
 
-- join 命令里的地址是 **VIP（keepalived 入口）** 而不是某一台 master 的 IP——这样即使生成命令时 master01 挂了，新节点照样能加入；
+- join 命令里的地址是 **SLB 内网地址（IDC 则是 keepalived VIP）** 而不是某一台 master 的 IP——这样即使生成命令时 master01 挂了，新节点照样能加入；
 - **token 只有 24 小时有效期**，过期重新 `kubeadm token create` 生成即可，不用慌。
 
 #### 6）执行 join 命令
@@ -703,7 +574,7 @@ yum install -y kubelet-1.34.2 kubectl-1.34.2
 systemctl daemon-reload && systemctl restart kubelet
 ```
 
-master01、master02 依次来，**升完一台验证一台再动下一台**——controller-manager/scheduler 多副本会自动选主，apiserver 靠 VIP 负载，单台下线不影响服务。
+master01、master02 依次来，**升完一台验证一台再动下一台**——controller-manager/scheduler 多副本会自动选主，apiserver 靠 SLB 负载，单台下线不影响服务。
 
 #### 升级工作节点
 

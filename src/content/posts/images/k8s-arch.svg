@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 780" role="img" aria-labelledby="title desc">
+  <title id="title">Kubernetes 企业级高可用架构（云原生方案）</title>
+  <desc id="desc">公网运维入口经 EIP 与堡垒机进入 VPC 内的 SLB，SLB 将 6443 流量分发到跨可用区的三台 Master；控制面之下是工作节点池，集群与 Pod 出网经 NAT 网关和 EIP。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      text { font-family: "PingFang SC","Microsoft YaHei","Noto Sans SC","Helvetica Neue",Arial,sans-serif; }
+    </style>
+  </defs>
+
+  <rect x="20" y="20" width="920" height="740" rx="18" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="480" y="58" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">Kubernetes 企业级高可用架构（云原生方案）</text>
+  <text x="480" y="84" text-anchor="middle" font-size="13" fill="#64748b">EIP + 堡垒机接入 · SLB 托管控制面入口 · 3 Master 跨可用区 · NAT 网关统一出网</text>
+
+  <!-- 公网入口（VPC 外） -->
+  <rect x="40" y="104" width="880" height="80" rx="10" fill="#fff7ed" stroke="#fdba74" stroke-dasharray="6 4"/>
+  <rect x="64" y="124" width="220" height="44" rx="8" fill="#ffedd5" stroke="#fb923c"/>
+  <text x="174" y="143" text-anchor="middle" font-size="13.5" font-weight="600" fill="#9a3412">运维终端</text>
+  <text x="174" y="159" text-anchor="middle" font-size="11" fill="#c2410c">kubectl · CI/CD · 控制台</text>
+
+  <rect x="344" y="124" width="220" height="44" rx="8" fill="#ffedd5" stroke="#fb923c"/>
+  <text x="454" y="143" text-anchor="middle" font-size="13.5" font-weight="600" fill="#9a3412">EIP 弹性公网 IP</text>
+  <text x="454" y="159" text-anchor="middle" font-size="11" fill="#c2410c">固定公网地址</text>
+
+  <rect x="624" y="124" width="272" height="44" rx="8" fill="#ffedd5" stroke="#fb923c"/>
+  <text x="760" y="143" text-anchor="middle" font-size="13.5" font-weight="600" fill="#9a3412">堡垒机 / VPN（推荐）</text>
+  <text x="760" y="159" text-anchor="middle" font-size="11" fill="#c2410c">公网只开这一跳，不直接暴露 6443</text>
+
+  <line x1="284" y1="146" x2="338" y2="146" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="564" y1="146" x2="618" y2="146" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 进入 VPC -->
+  <path d="M760 168 V196 H480 V234" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- VPC 边界 -->
+  <rect x="40" y="210" width="880" height="510" rx="14" fill="#eff6ff" fill-opacity="0.45" stroke="#93c5fd" stroke-dasharray="8 5"/>
+  <text x="56" y="232" font-size="12" font-weight="600" fill="#1d4ed8">VPC（可用区 AZ-A / AZ-B / AZ-C）</text>
+
+  <!-- 控制面接入：SLB -->
+  <rect x="300" y="240" width="360" height="62" rx="10" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="480" y="266" text-anchor="middle" font-size="15" font-weight="700" fill="#1e40af">内网 SLB / CLB（4 层）</text>
+  <text x="480" y="287" text-anchor="middle" font-size="11.5" fill="#1d4ed8">TCP:6443 · 健康检查 · 多可用区托管</text>
+
+  <path d="M480 302 V324 H205 V346" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M480 302 V346" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M480 302 V324 H755 V346" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 控制层 -->
+  <rect x="80" y="352" width="250" height="112" rx="10" fill="#ede9fe" stroke="#8b5cf6"/>
+  <text x="205" y="378" text-anchor="middle" font-size="14" font-weight="700" fill="#5b21b6">master-01（AZ-A）</text>
+  <text x="205" y="400" text-anchor="middle" font-size="12" fill="#6d28d9">kube-apiserver</text>
+  <text x="205" y="420" text-anchor="middle" font-size="11.5" fill="#7c3aed">controller-manager / scheduler</text>
+  <text x="205" y="444" text-anchor="middle" font-size="11.5" fill="#7c3aed">etcd（stacked，与控制面同机）</text>
+
+  <rect x="355" y="352" width="250" height="112" rx="10" fill="#ede9fe" stroke="#8b5cf6"/>
+  <text x="480" y="378" text-anchor="middle" font-size="14" font-weight="700" fill="#5b21b6">master-02（AZ-B）</text>
+  <text x="480" y="400" text-anchor="middle" font-size="12" fill="#6d28d9">kube-apiserver</text>
+  <text x="480" y="420" text-anchor="middle" font-size="11.5" fill="#7c3aed">controller-manager / scheduler</text>
+  <text x="480" y="444" text-anchor="middle" font-size="11.5" fill="#7c3aed">etcd（stacked，与控制面同机）</text>
+
+  <rect x="630" y="352" width="250" height="112" rx="10" fill="#ede9fe" stroke="#8b5cf6"/>
+  <text x="755" y="378" text-anchor="middle" font-size="14" font-weight="700" fill="#5b21b6">master-03（AZ-C）</text>
+  <text x="755" y="400" text-anchor="middle" font-size="12" fill="#6d28d9">kube-apiserver</text>
+  <text x="755" y="420" text-anchor="middle" font-size="11.5" fill="#7c3aed">controller-manager / scheduler</text>
+  <text x="755" y="444" text-anchor="middle" font-size="11.5" fill="#7c3aed">etcd（stacked，与控制面同机）</text>
+
+  <text x="90" y="490" font-size="11" fill="#64748b">注：节点规模 &gt; 250 时，etcd 拆为独立 5 节点集群（跨故障域部署）</text>
+
+  <path d="M480 464 V514" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="492" y="494" font-size="10.5" fill="#64748b">调度 Pod / 状态上报</text>
+
+  <!-- 工作层 -->
+  <rect x="80" y="520" width="800" height="110" rx="12" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="96" y="544" font-size="12.5" font-weight="600" fill="#166534">工作节点池（N × Node，跑业务 Pod）</text>
+
+  <rect x="96" y="556" width="240" height="56" rx="8" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="216" y="579" text-anchor="middle" font-size="12.5" font-weight="600" fill="#166534">node-01</text>
+  <text x="216" y="597" text-anchor="middle" font-size="11" fill="#15803d">kubelet · kube-proxy / CNI · Pod</text>
+
+  <rect x="376" y="556" width="240" height="56" rx="8" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="496" y="579" text-anchor="middle" font-size="12.5" font-weight="600" fill="#166534">node-02</text>
+  <text x="496" y="597" text-anchor="middle" font-size="11" fill="#15803d">kubelet · kube-proxy / CNI · Pod</text>
+
+  <rect x="656" y="556" width="208" height="56" rx="8" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="760" y="579" text-anchor="middle" font-size="12.5" font-weight="600" fill="#166534">node-N</text>
+  <text x="760" y="597" text-anchor="middle" font-size="11" fill="#15803d">kubelet · kube-proxy / CNI · Pod</text>
+
+  <!-- 出网 -->
+  <path d="M750 630 V644" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="620" y="650" width="260" height="56" rx="10" fill="#ffedd5" stroke="#f97316"/>
+  <text x="750" y="674" text-anchor="middle" font-size="13" font-weight="600" fill="#9a3412">NAT 网关 + EIP</text>
+  <text x="750" y="692" text-anchor="middle" font-size="10.5" fill="#c2410c">Node / Pod 出公网：拉镜像、调外部 API</text>
+
+  <!-- 图例 -->
+  <text x="96" y="682" font-size="11" fill="#475569">实线箭头 = 管理 / API 流量</text>
+  <text x="96" y="702" font-size="11" fill="#475569">橙色区域 = 公网（VPC 外）</text>
+</svg>

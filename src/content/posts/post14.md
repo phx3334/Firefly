@@ -1,7 +1,7 @@
 ---
-title: Linux常见文件系统介绍
+title: Linux文件系统介绍
 published: 2026-08-07T20:00:21+08:00
-description: '从inode、超级块、分区三方面理解ext4与xfs'
+description: '从inode、超级块、分区理解ext4与xfs，再看FUSE的作用、性能代价与生产排障'
 image: './images/a14.avif'
 tags: [linux,文件系统]
 category: '计算机技术'
@@ -106,15 +106,49 @@ cat /sys/fs/cgroup/memory.max           # cgroup 的限制，本质也是 sysfs 
 ```
 #### /dev/fuse：一个字符设备，不是文件系统
 `/dev` 目录本身是 devtmpfs（设备注册时内核自动建节点），但**里面的节点是设备，不是文件**。`ls -l /dev/fuse` 看到 `c 10, 229`：主 / 次设备号是驱动注册表里的索引，`open/read/write` 它等于调 FUSE 内核模块的回调，而不是读磁盘。
-它干的事是把"实现一个文件系统"从内核搬到用户态：
-```bash
-# 用户态进程先 open("/dev/fuse") 拿到 fd，再用这个 fd 把自己注册成某路径的文件系统实现
-mount -t fuse-overlayfs fuse-overlayfs /merged -o lowerdir=...,upperdir=...,workdir=...
-```
-之后所有对 `/merged` 的 IO 都由内核打包成 FUSE 请求，经 `/dev/fuse` 队列交给那个用户态进程处理——sshfs、s3fs、fuse-overlayfs（rootless 容器）能存在，靠的就是这套机制。
+它是用户态文件系统的入口：进程 `open("/dev/fuse")` 拿到一个 fd，mount 时把这个 fd 交给内核，之后该挂载点的所有 IO 都由内核打包成请求、经这个 fd 交给用户态进程处理。sshfs、s3fs、JuiceFS、fuse-overlayfs（rootless 容器）能存在，靠的就是这套机制——完整的原理、性能与排障见下一章。
 #### tmpfs：不算"纯虚拟"，但也没落盘
 tmpfs 有真正的 inode 和数据页，只是页只存在内存（可换出到 swap），`df -h` 的大小约等于可用内存，重启即失。`/run`、`/dev/shm` 都是它。
 - 生产坑：容器 `/dev/shm` 默认只有 64MB，Chromium、Python 多进程共享内存之类的程序会莫名崩溃，需要 `--shm-size` 调大。
+
+## FUSE：把文件系统搬到用户态
+
+### 存在作用：为什么需要 FUSE
+一句话：**它把"实现一个文件系统"从内核开发变成普通应用开发。**
+
+没有 FUSE 时，想给系统加一种新文件系统（数据在对象存储上、透明加密、压缩后落盘），只有两条路：**写内核模块**（C 语言、跟着内核版本走、一个空指针就 panic 整机），或者**让每个应用自己适配**（等于放弃 POSIX 语义）。FUSE 给出第三条路：**内核只保留一层转发**，真正的 `lookup/open/read/write/readdir` 由用户态 daemon 实现。
+
+由此得到的能力：
+- **零内核改动**：压缩、加密、去重、版本化、对象存储语义都在用户态拼装，发布节奏跟应用走，不受内核版本和发行版约束。
+- **叠加层**：不必重写底层，就能在现有文件系统之上叠一层（加密层、审计层、镜像层）。
+- **微内核化方向**：把非核心能力从内核移到用户态，内核只保留最小职责——FUSE 是这条路线最成功的实践之一。
+
+代价同样明确：**每次 IO 都要穿两次内核边界**。所以选型原则一句话：**FUSE 用来解决"本地盘没有这个能力"，不用来解决"本地盘不够快"。**
+
+### 工作流程（以 rootless BuildKit 为例）
+分两步：先挂载注册，再逐次转发 IO。用 **rootless 模式的 BuildKit** 走一遍最直观。
+
+**第一步，挂载注册。** 普通用户拿不到初始 user namespace 的 CAP_SYS_ADMIN，直接挂内核 overlayfs 会失败，所以 rootless 的 buildkitd 由 rootlesskit 放进 user namespace，存储层改用 fuse-overlayfs：snapshotter 需要把 lower/upper/work 三组目录叠成一个视图，于是由 fuse-overlayfs 进程打开 `/dev/fuse` 拿到 fd，再以这个 fd 完成挂载。内核随之建立一条 FUSE 连接，这个挂载点下的所有路径操作都记在这条连接名下，内核不再亲自处理。这里要分清角色：**真正的常驻 daemon 是 buildkitd**，fuse-overlayfs 只是按需拉起、卸载即退的服务进程；但只要它死了，挂载点照样卡死。
+
+**第二步，一次读请求的往返。** 某个 RUN 步骤里，编译器去读源码文件：
+
+```text
+编译器 read() → VFS → fuse 内核模块
+                 → 请求打包进这条连接的队列（挂在 /dev/fuse 上）
+                 → fuse-overlayfs 从 fd 取走请求
+                 → 它在用户态判断文件在 upper 还是 lower 层，再去对应目录读
+                 → 把结果写回 fd → 内核唤醒编译器
+```
+
+- VFS 只认接口、不关心实现跑在内核还是用户态——这就是一个普通进程能"造"出文件系统的原因。
+- **每个操作都是一次完整往返**：`open`、`stat`、`readdir`、`read` 各算一次。构建场景里 `RUN npm install`、解压依赖动辄几万个小文件，每个文件都要走一次 `lookup` + `getattr` 往返——这就是 rootless 构建比内核 overlayfs 慢一截的直接原因。
+
+### 性能：主要代价在哪
+| 环节 | 开销来源 |
+| --- | --- |
+| 上下文切换 | 每次 IO 至少两次用户态 ⇄ 内核态往返，加请求/响应两次队列拷贝、加 daemon 调度延迟 |
+| 元数据放大 | 单个 syscall 变成一次跨边界往返，小文件密集时被成倍放大 |
+| 缓存责任转移 | 内核 page cache 只剩很薄一层，命中率主要靠 daemon 自建的本地缓存目录 |
 
 ## 生产运维：扩容、缩容与常见故障
 ### LVM：多盘池化与在线伸缩
