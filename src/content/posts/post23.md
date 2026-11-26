@@ -9,11 +9,14 @@ draft: false
 lang: '中文'
 ---
 
+
 ## 先立主线：云上 k8s 网络要管什么
 
 上云之后，物理交换机、VLAN、BGP 这些手段基本用不上了，但网络问题只会更多：网段规划、ENI 配额、安全组、跨 VPC、出网、策略治理，每一项都直接决定集群能不能稳定扩容。
 
 全文按一条主线走：**地址 → 连通（含跨 VPC）→ 入口 → 出网 → 隔离治理**。自建机房的 VLAN/VXLAN/BGP 原理保留，但只作为理解云上数据面的对照，不占主线。
+
+任何网络问题最终都能归到四条流量路径：**Pod → Pod**（同节点 / 跨节点）、**Pod → Service**（ClusterIP DNAT）、**Pod → 公网**（NAT / EIP 出站）、**外部 → Pod**（NodePort / LB / Ingress 入口）。后面的章节就是按这四条路径展开，再叠加跨 VPC 和治理。
 
 ### 分层地图：出了问题先找谁
 
@@ -378,7 +381,7 @@ calico 的 BGP 模式是自建机房的性能王者，但云上基本用不了�
 - `always`：全程封装，最稳；
 - `cross-subnet`：同网段发裸包、跨网段才封装——在 VPC 上会直接不通，因为裸包要求 VPC 认识 PodCIDR，而 VPC 不允许。
 
-以 `always` 为例：Pod 包到宿主机后，由 `tunl0` 设备在外面再套一个节点 IP 头（协议号 4），经物理网络送到对端节点，对端 `tunl0` 解封装后按 /32 路由送到 Pod。没有 UDP、没有 VXLAN 头，也没有 VNI，所以做不了多租户隔离；云上安全组默认常丢弃协议号 4，必须显式放行；MTU 一般 1480。
+以 `always` 为例：Pod 包到宿主机后（`calixxx` 是宿主机侧 veth 对的一端），由 `tunl0` 设备在外面再套一个节点 IP 头（协议号 4），经物理网络送到对端节点，对端 `tunl0` 解封装后按 /32 路由送到 Pod。没有 UDP、没有 VXLAN 头，也没有 VNI，所以做不了多租户隔离；云上安全组默认常丢弃协议号 4，必须显式放行；MTU 一般 1480。
 
 #### calico 的优缺点
 
@@ -387,36 +390,63 @@ calico 的 BGP 模式是自建机房的性能王者，但云上基本用不了�
 
 ### cilium：eBPF 数据面，云上可观测性最好
 
-cilium 换了一个玩法：数据面不用内核现成的 iptables / 路由，而是由 Agent 现场生成 eBPF 程序注入内核。
+**是什么**：Cilium 是一个基于 eBPF 的开源云原生网络、安全与可观测性平台，同时也是一个 CNI 插件。它由 Isovalent 发起，是 CNCF 毕业项目，现在由 Cisco 支持。flannel / calico 更多是"把 Pod 网络打通"（calico 额外提供策略），Cilium 则把网络转发、Service 负载均衡、NetworkPolicy、L3-L7 策略和流量观测放在同一个 eBPF 数据面上。
 
-eBPF 是内核里的一台**字节码虚拟机**：程序经校验后加载进内核，挂到网络栈的固定钩子（收包、发包、socket 层）上执行，可以在内核态完成过滤、转发、改写、监控——不用改内核源码、不用写内核模块。传统 CNI 是"用内核已有的模块拼装转发逻辑"，cilium 是"把需求编译成专属程序，让内核现学现卖"。
+**能做什么**：
+
+- 网络：CNI、overlay / native routing、ENI 直通、多集群（Cluster Mesh）；
+- 安全：基于 identity 的 NetworkPolicy，支持 L3/L4 和 L7（HTTP / gRPC / Kafka），可做透明加密（WireGuard / IPsec）；
+- 服务：eBPF 替代 kube-proxy，支持 DSR、XDP 加速；
+- 可观测：Hubble 提供实时流量、策略裁决和 metrics；
+- 服务网格：Cilium Service Mesh 可选，不一定非要上 Istio。
+
+**和传统 CNI 的根本区别**：传统 CNI 用内核现成的网桥、路由、iptables 拼装转发逻辑；Cilium 用 eBPF 程序挂到网络栈钩子上执行转发和策略，规则存在 BPF Map 里，查找是 O(1)。代价是内核要求（高级特性要 5.x），以及一套新的心智模型。官方定义和最新能力以 [Cilium 官方文档](https://docs.cilium.io/) 为准。
+
+#### eBPF 是什么
+
+eBPF（extended Berkeley Packet Filter）是内核里的一台**字节码虚拟机**：把验证过的程序加载进内核，挂到网络栈的固定钩子（收包、发包、socket 层）上执行，可以在内核态直接完成**过滤、转发、改写、监控**——不用改内核源码、不用写内核模块。可以理解为"给内核做 JIT 编程"：
+
+- 传统 CNI：需求固定 → 用内核已有的 iptables / 路由 / 隧道模块**拼装**转发逻辑；
+- Cilium：需求任意 → Agent 把需求**编译成 eBPF 程序**，注入内核网络栈的关键路径，数据包在内核态一路被"程序化"处理。
+
+这个差异带来几个质变：eBPF 程序运行在内核态，没有 iptables 那种逐规则遍历；很多路径直接绕过 netfilter，socket 层就能完成转发；还能看到 L7（HTTP 路径、gRPC 方法）——这是 iptables 做不到的。
+
+#### 架构与组件
 
 ![cilium架构：Node 内 Agent 守护进程经 BPF Tools 管理 Maps 和 BPF 程序，Watchers watch apiserver；Cilium Operator 集群级组件](./images/cilium-overview.png)
 
 | 组件 | 位置 | 职责 |
 | --- | --- | --- |
-| cilium-agent | 每节点 DaemonSet | watch apiserver，把 Pod / Service / 策略编译成 BPF 程序和 Map |
-| Cilium Operator | 集群级 | 分配 PodCIDR、处理节点事件，不参与转发 |
-| CNI 插件 | 每节点 | kubelet 调它配网，向 Agent 要 IP、注册 Endpoint |
-| Hubble | 附加组件 | 实时流量、策略命中 / 丢弃原因，相当于 eBPF 的行车记录仪 |
+| cilium-agent | 每节点 DaemonSet | 核心大脑：watch apiserver 拿 Pod / Service / NetworkPolicy，把策略编译成 BPF 程序写入内核，管理 BPF Map |
+| Cilium Operator | 集群级 Deployment | 干"每集群一次"的活：给节点分配 PodCIDR（写进 CiliumNode CRD）、处理节点事件；不参与转发，短暂挂掉集群照常跑 |
+| CNI 插件 | 每节点 /opt/cni/bin | kubelet 调它配网，它通过 REST API 找本节点 Agent 要 IP、注册 Endpoint |
+| Hubble | 附加组件 | 可观测层：实时看服务间流量、策略命中的 drop，相当于给 eBPF 装了个"行车记录仪" |
 
-两个核心抽象：
+Agent 的核心数据结构是两样东西：**BPF Map**（内核哈希表，存 endpoint、service、策略规则，查找 O(1)）和 **BPF 程序**（挂在网卡 tc 层 / 容器 veth 上，每个包执行）。
 
-- **Endpoint**：一个 Pod 的 netns，veth 两端都挂 BPF 程序，进出 Pod 的第一站就是 cilium；
-- **Identity**：把 Pod 标签哈希成 16 位身份，策略写"允许 prod-frontend"，不写 IP——Pod 重建、IP 变了策略照旧生效。
+#### Endpoint 与 Identity：Cilium 怎么"认"一个 Pod
 
-数据怎么走（Pod A node1 → Pod B node2）：
+Cilium 不按 IP 管理对象，而是两个抽象：
+
+- **Endpoint**：一组共享网络身份的容器（约等于一个 Pod 的 netns），每个 Endpoint 有自增 ID。Agent 在 veth 两端都挂 BPF 程序——进 Pod 和出 Pod 的流量，第一站就是 Cilium 的程序；
+- **Identity**：把 Endpoint 的标签（namespace、app、version...）哈希成一个 16 位身份 ID。策略不写"允许 10.244.1.5"，写"允许身份为 prod-frontend 的"——IP 漂了无所谓，身份跟着标签走。
+
+这就是 Cilium 策略最大的卖点：以身份为中心，而不是以 IP 为中心。Pod 重建、IP 变了，标签没变，策略自动跟上。
+
+#### 数据面：BPF 程序挂在哪、数据怎么走
 
 ![cilium数据面：Daemon 生成 BPF 程序，字节码注入到 eth0 和各容器 veth 上](./images/cilium.png)
 
 ```text
+Pod A(10.244.1.2, node1) → Pod B(10.244.2.3, node2)：
+
 Pod A eth0
-  ▼ veth 出端 lxc-xxx 的 eBPF 程序
+  ▼ veth 出端：lxc-xxx 的 BPF 程序（egress）
   │ 查 endpoint map：目的 IP → Pod B 的 identity
-  │ 查 policy map：源 identity → 目的 identity 是否放行（L3/L4 决策）
+  │ 查 policy map：源 identity → 目的 identity 是否放行（L3/L4 决策，内核态完成）
   ▼ node1 路由：下一跳 node2（native routing 或 VXLAN 隧道）
   ▼
-node2 入站：lxc-yyy 的 eBPF 程序再做一次策略检查 → 直送 Pod B
+node2 入站：lxc-yyy 的 BPF 程序（ingress）再做一次策略检查 → 直送 Pod B
 ```
 
 和 flannel / calico 的差异：
@@ -430,11 +460,22 @@ node2 入站：lxc-yyy 的 eBPF 程序再做一次策略检查 → 直送 Pod B
 
 Service 这一层也一样：Cilium 连劫持规则都不写，ClusterIP 只是 BPF Map 里的一个 key，既不需要 kube-ipvs0，也没有 KUBE 规则链。
 
-- 优点：大规模下延迟稳定；身份制策略；Hubble 可观测性强；可替代 kube-proxy；
-- 缺点：内核要求 4.19+（高级特性要 5.x）；eBPF / identity 一套新心智模型；小集群收益不明显；
-- 云上：支持 tunnel 和 native routing（配合 ENI 直通），GKE Dataplane V2 就是 cilium 内核。
+#### 优缺点
 
-趋势上 cilium 是明确的下一代方向（eBPF 数据面也被各家吸收），但落地前先确认内核版本和团队学习成本。
+**优点**：
+
+- 性能最好的一档：数据面全在内核态编程，无逐规则遍历、无用户态切换；大规模 Service / 策略下延迟几乎不涨；
+- 以身份为中心的策略 + L7 支持：能按 HTTP 路径、gRPC 方法做访问控制；
+- 可观测性极强：Hubble 能看到每条流量的 policy verdict（放行 / 丢弃原因），排障从"猜 iptables 链"变成"看结构化事件"；
+- 替代 kube-proxy，原生支持带宽管理、加密等，组件越并越少。
+
+**缺点**：
+
+- 内核版本门槛：4.19+，高级特性（快速路径、socket-level LB）要 5.x；
+- 学习曲线陡峭：eBPF、BPF Map、identity 一套新心智模型；排障要用 bpftool / cilium-cli / Hubble，传统 tcpdump 只能看到表层；
+- 资源消耗：每节点 Agent 常驻 + 编译 BPF 程序的 CPU 开销，小集群上收益不明显。
+
+**怎么选**：普通业务、追求稳 → calico（成熟、策略够用）；云原生深度玩家、微服务安全治理、大规模高性能诉求 → Cilium。趋势上 Cilium 是明确的下一代方向，但落地前先确认内核版本和团队学习成本。
 
 ### 云厂商 CNI：省事，但绑定云
 
@@ -471,7 +512,7 @@ ClusterIP 不属于任何网卡、任何主机，它只是"被劫持的目的地
 
 iptables 模式下，每个新连接的首包都要从 `KUBE-SERVICES` 链第 1 条开始逐条匹配，复杂度 O(n)；Service 一多规则就爆炸（1000 个 Service × 10 个后端 ≈ 上万条规则），负载均衡也只有随机概率一种。
 
-IPVS 换成内核哈希表：每个 Service 是一个虚拟服务，每个后端是一个 real server，按 `ClusterIP:Port` 哈希直接命中，O(1)；调度算法有 rr（轮询）、lc（最少连接）、sh（源地址哈希）等 10+ 种。**DNAT 只发生在连接的第一个包**，后续包和回包靠 conntrack 转换；SNAT、filter、NetworkPolicy 仍靠 iptables。`ipvsadm` 和 kube-proxy 只是用户态工具，真正干活的是内核的 `ip_vs`、`ip_vs_rr`、`nf_conntrack` 等模块。
+IPVS 换成内核哈希表：每个 Service 是一个虚拟服务，每个后端是一个 real server，按 `ClusterIP:Port` 哈希直接命中，O(1)；调度算法有 rr（轮询）、lc（最少连接）、sh（源地址哈希）等 10+ 种。**DNAT 只发生在连接的第一个包**，后续包和回包靠 conntrack 转换；剩下的全是 iptables 的活——MASQUERADE（SNAT，外部访问 NodePort、hairpin 场景）、filter 放行、配合 ipset 的跳转规则、NetworkPolicy；没有 iptables，IPVS 模式跑不完整，两者是配合不是替代。`ipvsadm` 和 kube-proxy 只是用户态工具，真正干活的是内核的 `ip_vs`、`ip_vs_rr`、`nf_conntrack` 等模块。
 
 kube-proxy 和 CNI 是两个独立层次：把 calico 换成 flannel VXLAN，IPVS 的 DNAT 逻辑一字不变，只是"DNAT 之后怎么送到后端"从 BGP 直路由变成走隧道。
 
@@ -586,6 +627,10 @@ Service 虚拟 IP 只在本集群的 kube-proxy / eBPF 里有意义，对端集�
 
 网络 ACL 是无状态的：放行入方向不代表放行回程，必须双向都配，生产上很容易在这里漏掉临时端口。
 
+### 本质：声明式的 L3/L4 白名单
+
+NetworkPolicy 只是一个 API 对象，描述"谁可以访问谁"的期望状态，自己不执行任何东西；真正把规则落进内核的是 CNI——calico 的 Felix 翻译成 iptables + ipset，Cilium 翻译成 BPF Map。所以第一条排查方向永远是 CNI 支不支持：flannel 原生不支持，写了也不生效。
+
 ### NetworkPolicy 的四条关键语义
 
 | 语义 | 说明 |
@@ -668,7 +713,60 @@ spec:
             except: [10.20.5.0/24]
 ```
 
-另外两类高频策略：**同 namespace 互访**——`podSelector: {}` 选中本 ns 所有 Pod，`from` 里只写一个 `podSelector: {}`，就等于"只允许本 namespace 内任意 Pod 进来"，数据库最典型；**监控抓取**——只允许 monitoring 命名空间里 `app=prometheus` 的 Pod 访问业务暴露 metrics 的端口。数据库则是"只允许 `app=api` 访问 `app=postgres` 的 5432"。套路一致，不再重复贴 YAML。
+还有三类高频策略，套路相同，直接看 YAML：
+
+```yaml
+# ④ 同 namespace 互访：只允许本 ns 内任意 Pod
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: prod
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+# ⑤ 数据库：只允许 app=api 访问 5432
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-api
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels: {app: postgres}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: api}
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# ⑥ 监控抓取：只允许 monitoring 里的 Prometheus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus
+  namespace: prod
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels: {app: prometheus}
+      ports:
+        - protocol: TCP
+          port: 8080
+```
 
 `ipBlock` 的硬限制：**它是静态 CIDR，不认 DNS 解析结果**。要按域名放行（对象存储、第三方 API），标准 NetworkPolicy 做不到，只有 CiliumNetworkPolicy 的 `toFQDNs` 能。
 
@@ -689,7 +787,9 @@ spec:
 | kubelet 探针被误杀 | Pod 一直 NotReady，事件里 probe 超时 | 探针从节点 IP 发起，部分 CNI 的 default-deny 会挡住；视实现决定是否放行节点 CIDR |
 | hostNetwork Pod 逃逸 | 宿主机网络的 Pod 不受策略约束 | 标准 NetworkPolicy 只作用于 Pod 网络，host 侧要 CNI 的 host firewall 能力 |
 
-### Cilium 的扩展：只记两条
+一句话总结：**白名单、被选中才受限、策略叠加取并集；落地先 default-deny 兜底，再按标签逐条开口子。**
+
+### Cilium 的扩展
 
 - **按 identity 匹配**：策略选中标签而非 IP，Pod 重建、IP 变了照旧生效；
 - **按域名出站（`toFQDNs`）**：Agent 通过 DNS 代理把解析结果动态映射成 IP 集合，解决"对象存储 IP 天天变"的问题。
@@ -724,8 +824,6 @@ L7 策略（按 HTTP 方法 / 路径放行）Cilium 也支持，但要把流量�
 - **Hubble / cilium monitor**：看 Pod 级流量和策略裁决，排障效率最高；
 - **SLB 访问日志**：看状态码、后端响应时间、健康检查；
 - **成本**：跨 AZ 流量、NAT 处理费、LB 规格、flow log 存储，四项最容易在账单上失控。
-
-
 
 ## 速查：几个容易混的概念
 
