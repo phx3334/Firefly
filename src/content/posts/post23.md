@@ -673,11 +673,201 @@ Pod A 收到"来自 10.96.10.10 的回复"——全程只跟 ClusterIP 说话
 - **回包不走 Service IP**：Pod B 的回包目的就是 Pod A 的真实 IP，靠 conntrack 在 node1 上把源 IP"改回去"，Pod A 才以为是 ClusterIP 回的
 - **kube-proxy 和 CNI 是两个独立层次**：把 calico 换成 flannel VXLAN，ipvs 的 DNAT 逻辑一字不变，只是"DNAT 之后包怎么送到 node3"变成走隧道
 
+#### 同一请求的第三种实现：Cilium（eBPF 替代 kube-proxy）
+
+前面两种实现的共同点是：**ClusterIP 不属于任何一块网卡、任何一台主机，只是一个"被劫持的目的地址"**。Cilium 连劫持规则都不写：**ClusterIP 只是 BPF Map 里的一个 key**，Pod 内 `connect()` 时由 socket 层 eBPF 程序直接查表并改写目的地址——包还没生成，DNAT 已完成，所以既不需要 kube-ipvs0，也没有 KUBE 规则链，更没有逐条遍历。
+
+```bash
+cilium status | grep KubeProxyReplacement   # True = Service 全走 eBPF，节点上没有 kube-proxy
+cilium service list                         # Service → 后端，相当于 ipvsadm -Ln
+iptables-save | grep KUBE-SERVICES          # 无输出
+```
+
+对照记一句就够：iptables 把 ClusterIP 放在规则链里，ipvs 把它放在哈希表 + 哑网卡上，Cilium 把它放在 Map 里——三种实现、同一个本质：**Service CIDR 里的地址从不会被分配给任何网卡**。
+
+> 顺带说明 cilium 的其他常用能力：作为 CNI 提供 Pod 网络（BGP/VXLAN 数据面）、基于 identity 的 NetworkPolicy、Hubble 可观测性——前两项就是本节和下一节的内容，Hubble 在 eBPF 那篇已经展开。
+
 #### 哪些场景 iptables 依然必不可少
 
 1. **ipvs 模式自身就离不开 iptables**：IPVS 只做"DNAT + 选后端"这一件事，剩下全是 iptables 的活——MASQUERADE（SNAT，如外部流量访问 NodePort、hairpin 场景 Pod 访问自己的 ClusterIP）、filter 表的放行/丢弃规则、配合 ipset 的跳转规则。没有 iptables，ipvs 模式跑不完整
-2. **NetworkPolicy 完全依赖 iptables**：calico 的 Felix 实现网络策略靠的就是 iptables 规则链 + ipset（存策略涉及的目的地址集合）。你选 ipvs 还是 iptables 模式，策略这层照旧
-3. **内核模块缺失的环境**：ipvs 需要加载 `ip_vs`、`ip_vs_rr` 等模块，最小化镜像、老内核、部分嵌入式/边缘节点没有——iptables 是保底方案，且任何内核都支持
-4. **小规模集群没必要换**：几十个 Service 时 iptables 模式的 O(n) 毫无感知，规则简单、排障直接（`iptables-save` 一把梭），ipvs 的哈希表优势体现不出来，反而多一套 `ipvsadm` 的心智负担
+2. **NetworkPolicy 在传统 CNI 下完全依赖 iptables**：calico 的 Felix 实现网络策略靠的就是 iptables 规则链 + ipset（存策略涉及的目的地址集合）。你选 ipvs 还是 iptables 模式，策略这层照旧；只有 Cilium 换成了 BPF Map（见下节）
 
 小结：**iptables 模式把"VIP→Pod"翻译成逐包线性匹配的 NAT 规则，规模大了必炸；ipvs 用内核哈希表做 L4 负载均衡，O(1) 查找 + 丰富调度算法，是大集群标配——但它只管 DNAT 这一步，SNAT、NetworkPolicy、兜底规则仍靠 iptables，两者是配合而非替代关系。**
+
+## NetworkPolicy
+
+前面讲了"包怎么走通"，这一节讲"包该不该走"。
+
+### 本质：声明式的 L3/L4 白名单，自己不执行任何东西
+
+NetworkPolicy 只是一个 API 对象，**描述"谁可以访问谁"的期望状态，真正把规则落进内核的是 CNI**：Calico 的 Felix 把它翻译成 iptables 链 + ipset（策略里的地址集合丢进 ipset，匹配 O(1)）；Cilium 把它翻译成 BPF Map + eBPF 程序（按 identity 查 policy map）。所以排查的第一方向永远是：**CNI 支不支持**——flannel 原生不支持 NetworkPolicy，写了也不会生效（需要 canal / calico / cilium 这类带策略引擎的 CNI）。
+
+四条最容易被误解的语义：
+
+| 语义 | 说明 |
+|---|---|
+| **没有策略 = 全通** | 只有被策略 `podSelector` 选中的 Pod 才受限；一旦被某条 Ingress 策略选中，它的入站就变成"默认拒绝，只放开规则里写的" |
+| **只能 allow，没有 deny** | 多条策略选中同一 Pod 时取并集。"拒绝"只能靠不写 allow 来实现——所以落地顺序永远是先铺一把"默认拒绝"的伞 |
+| **namespaceSelector 匹配的是标签，不是名字** | 1.21+ 每个 namespace 自动带 `kubernetes.io/metadata.name=<名字>` 标签；`namespaceSelector: {}` 匹配所有 namespace（含 kube-system） |
+| **同一 from 元素内是 AND，多个元素是 OR** | `namespaceSelector` + `podSelector` 写在同一个 `from` 元素里 = "那个 ns 里带这个标签的 Pod"；拆成两个元素 = 两种来源都放行。这是最高频的配置事故 |
+
+有一个和 Service 的联动点：**策略检查的是 DNAT 之后的真实 Pod IP**。所以 `ipBlock` 里写 ClusterIP 网段没有意义（那个网段里根本没有地址），要写后端 Pod 的 CIDR，或者直接用 `podSelector`。
+
+### 常见场景：需要自己按业务写的六类策略
+
+NetworkPolicy 没有"模板"这一说，每条都得贴着你的 namespace 划分、标签体系和流量方向写。下面是复用率最高的几类。
+
+#### ① 基座：namespace 默认拒绝入站
+
+先把口子全部关上，再逐条开。没有这一条，后面写得再细也等于没写。
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: prod
+spec:
+  podSelector: {}       # 空 = 选本 namespace 所有 Pod
+  policyTypes: [Ingress]
+```
+
+#### ② 只允许同 namespace 内互访
+
+微服务之间要互通，但不对命名空间外开放（数据库最典型）：
+
+```yaml
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}      # 本 namespace 内任意 Pod
+```
+
+#### ③ 跨命名空间：只放行带指定标签的 namespace
+
+```yaml
+spec:
+  podSelector:
+    matchLabels: {app: api}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: frontend   # 只有 frontend 这个 ns
+          podSelector:
+            matchLabels: {app: web}                  # 且必须是 web 这个 Pod（同一元素 = AND）
+      ports:
+        - protocol: TCP
+          port: 8080
+```
+
+#### ④ 数据库：只允许指定应用访问指定端口
+
+```yaml
+spec:
+  podSelector:
+    matchLabels: {app: postgres}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: api}
+      ports:
+        - protocol: TCP
+          port: 5432
+```
+
+#### ⑤ 出站白名单：DNS 是必须项
+
+Egress 一旦被限制，**第一件事是放行 DNS**，否则域名解析、所有外部调用一起挂：
+
+```yaml
+spec:
+  podSelector:
+    matchLabels: {app: api}
+  policyTypes: [Egress]
+  egress:
+    # 1) DNS 是所有出站的前置依赖，必须先放行
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # 2) 允许访问同 ns 的数据库
+    - to:
+        - podSelector:
+            matchLabels: {app: postgres}
+    # 3) 允许访问外部网段（如对象存储/中间件），并抠掉不该放行的子网
+    - to:
+        - ipBlock:
+            cidr: 10.20.0.0/16
+            except: [10.20.5.0/24]
+```
+
+注意 `ipBlock` 的硬限制：**它是静态 CIDR，不认 DNS 解析结果**。要按域名放行（比如 S3），标准 NetworkPolicy 做不到，只有 CiliumNetworkPolicy 的 `toFQDNs` 能——这是两者能力边界上最实用的一条差别。
+
+#### ⑥ 监控抓取：只让 Prometheus 进来
+
+```yaml
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels: {app: prometheus}
+      ports:
+        - protocol: TCP
+          port: 8080        # 改成业务暴露 metrics 的端口
+```
+
+### 验证：别只看 "apply 成功"
+
+`kubectl apply` 成功只代表对象存进了 etcd，不代表生效。三层验证：
+
+```bash
+# ① 用策略里的 selector 反查，确认选中了预期的 Pod（选不中 = 策略悄悄失效）
+kubectl -n prod get pods -l app=api --show-labels
+
+# ② 实测连通性：从另一个 Pod 发起
+kubectl exec -n frontend deploy/web -- nc -zv -w 2 api.prod 8080
+
+# ③ Cilium 环境直接看裁决结果（比"能不能连"信息更全：哪条策略、什么原因）
+hubble observe --namespace prod --verdict DROPPED
+```
+
+### 常见坑一览
+
+| 坑 | 现象 | 原因 |
+|---|---|---|
+| CNI 不支持策略 | apply 成功，一切照旧全通 | flannel 只做转发不做策略，要有 Calico/Cilium 这类策略引擎 |
+| selector 选不中 | 策略"看起来"没生效 | 标签写错 → 选中 0 个 Pod → 策略等于不存在，而且不会报错 |
+| 限制 Egress 后 DNS 全挂 | 域名访问超时，IP 直连正常 | 忘了放行 kube-dns 的 UDP/TCP 53 |
+| 跨 ns 的 AND 写成 OR | 放行了整个 namespace，比预期宽 | `namespaceSelector` 和 `podSelector` 拆成了两个 `from` 元素 |
+| `policyTypes` 省略 | Egress 没被限制住 | 不写 `policyTypes` 时，只有出现 `egress` 规则才启用 Egress；要"默认拒绝出站"必须显式写 `policyTypes: [Egress]` 且不给规则 |
+| 来源 IP 对不上 | `ipBlock` 规则匹配不到 | NodePort/LB 默认 `externalTrafficPolicy: Cluster`，源地址被 SNAT 成节点 IP；改 `Local` 才保留真实源 IP |
+| kubelet 探针被误杀 | Pod 一直 NotReady，事件里 probe 超时 | 探针从节点 IP 发起，部分 CNI 的 default-deny 会挡住；视实现决定是否放行节点 CIDR |
+| hostNetwork Pod 逃逸 | 宿主机网络的 Pod 不受策略约束 | 标准 NetworkPolicy 只作用于 Pod 网络，host 侧要 CNI 的 host firewall 能力 |
+
+### Cilium 的差异：只记两条
+
+标准 NetworkPolicy 的能力边界是 L3/L4 + 静态 IP，CiliumNetworkPolicy 常用到的扩展只有两条：
+
+- **按 identity 匹配**：策略选中标签而非 IP，Pod 重建、IP 变了照旧生效（cilium 一节讲的原则）；
+- **按域名出站（`toFQDNs`）**：解决 `ipBlock` 永远写不对"对象存储 IP 天天变"的问题，Agent 通过 DNS 代理把解析结果动态映射成 IP 集合。
+
+> L7 策略（按 HTTP 方法/路径放行）Cilium 也支持，但要把命中规则的流量转给节点上的 Envoy 校验，有性能和排障成本——生产里 L7 治理通常交给服务网格（Istio/Linkerd），Cilium 只做 L3/L4 兜底，这正是前面说的"eBPF 广而不深"的边界。
+
+小结：**NetworkPolicy 的心智只有三条——白名单、被选中才受限、策略叠加取并集；真正执行靠 CNI。落地顺序永远是"先 default-deny 兜底，再按 namespace 标签体系逐条开口子"，最后用 hubble 看 DROPPED 验证，而不是信 kubectl apply 的返回码。**
