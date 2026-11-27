@@ -246,7 +246,7 @@ node2 Pod(网段A) ─veth→ br-A ─→ eth0.100(VLAN 100 tag) ─┘
 | 额外开销 | 约 24 字节 | 约 50 字节（Pod MTU 常见 1450） |
 | 现状 | 较老，生产少用 | 主流（flannel、calico 的 VXLAN 模式都用它） |
 
-跨节点通信时，Pod 的原始二层帧在宿主机上的 **VTEP**（VXLAN 隧道端点，flannel 里就是 flannel.1 设备）被封装成"节点 IP + UDP 4789 + VXLAN 头 + 原始帧"，经物理网络送到对端节点，再由对端 VTEP 解封装、交给本节点网桥送到目标 Pod。封解包都在内核里完成，Pod 完全无感知。外层用 UDP 是为了穿透性好：UDP 普遍被防火墙 / NAT 放行，而 IPIP（协议号 4）常被中间设备丢弃。
+跨节点通信时，Pod 的原始二层帧在宿主机上的 **VTEP**（VXLAN 隧道端点，flannel 里就是 flannel.1 设备）被封装成"节点 IP + UDP + VXLAN 头 + 原始帧"，经物理网络送到对端节点，再由对端 VTEP 解封装、交给本节点网桥送到目标 Pod。封解包都在内核里完成，Pod 完全无感知。外层用 UDP 是为了穿透性好：UDP 普遍被防火墙 / NAT 放行，而 IPIP（协议号 4）常被中间设备丢弃。
 
 flanneld 会把"Pod 网段 → 对端 VTEP → 真实节点 IP"的映射写进内核。其中 ARP 是静态写死的：如果让内核自己发 ARP 广播，overlay 会把广播头端复制给所有 VTEP，节点一多就放大成广播风暴。
 
@@ -342,7 +342,7 @@ ENI 直通：Pod 包 = [Pod IP 就是 VPC IP]      ← VPC 原生路由，无封
 | 10250/TCP | kubelet API | apiserver 反连 exec / logs / metrics |
 | 2379-2380/TCP | etcd | 仅自建控制面；托管集群不需要 |
 | 6443/TCP | apiserver | 仅自建控制面；托管集群走云厂商 ENI |
-| 4789/UDP | VXLAN | overlay 模式的节点间隧道 |
+| 4789/UDP 或 8472/UDP | VXLAN | overlay 模式的节点间隧道；RFC 分配 4789，flannel Linux 默认 8472，按实际 CNI 后端确认 |
 | IP 协议号 4 | IP-in-IP | calico IP-in-IP；安全组默认常丢弃 |
 | 179/TCP | BGP | 云上一般用不到 |
 | 53/UDP + TCP | DNS | NodeLocal DNSCache、节点侧解析需要 |
@@ -379,7 +379,7 @@ calico 的 BGP 模式是自建机房的性能王者，但云上基本用不了�
 外层再套一个 IP 头，协议号 4，没有 UDP、没有 VXLAN 头，比 VXLAN 轻量。它的路由同样由 BGP 学习——节点之间宣告 Pod 网段，只是转发时多套一个 IP 头。两种策略：
 
 - `always`：全程封装，最稳；
-- `cross-subnet`：同网段发裸包、跨网段才封装——在 VPC 上会直接不通，因为裸包要求 VPC 认识 PodCIDR，而 VPC 不允许。
+- `cross-subnet`：同网段发裸包、跨网段才封装——裸包要求 VPC 路由表认识 PodCIDR。阿里云 VPC 无法由实例注入路由，同网段裸包会不通，选 `always` 最稳；而 AWS 支持 PodCIDR→节点 ENI 路由，Calico 官方反而推荐云上用 `cross-subnet`（配合关闭源/目的地址检查），按云厂商定。
 
 以 `always` 为例：Pod 包到宿主机后（`calixxx` 是宿主机侧 veth 对的一端），由 `tunl0` 设备在外面再套一个节点 IP 头（协议号 4），经物理网络送到对端节点，对端 `tunl0` 解封装后按 /32 路由送到 Pod。没有 UDP、没有 VXLAN 头，也没有 VNI，所以做不了多租户隔离；云上安全组默认常丢弃协议号 4，必须显式放行；MTU 一般 1480。
 
@@ -429,7 +429,7 @@ Agent 的核心数据结构是两样东西：**BPF Map**（内核哈希表，存
 Cilium 不按 IP 管理对象，而是两个抽象：
 
 - **Endpoint**：一组共享网络身份的容器（约等于一个 Pod 的 netns），每个 Endpoint 有自增 ID。Agent 在 veth 两端都挂 BPF 程序——进 Pod 和出 Pod 的流量，第一站就是 Cilium 的程序；
-- **Identity**：把 Endpoint 的标签（namespace、app、version...）哈希成一个 16 位身份 ID。策略不写"允许 10.244.1.5"，写"允许身份为 prod-frontend 的"——IP 漂了无所谓，身份跟着标签走。
+- **Identity**：把 Endpoint 的标签（namespace、app、version...）映射成一个 16 位范围内的身份 ID。策略不写"允许 10.244.1.5"，写"允许身份为 prod-frontend 的"——IP 漂了无所谓，身份跟着标签走。
 
 这就是 Cilium 策略最大的卖点：以身份为中心，而不是以 IP 为中心。Pod 重建、IP 变了，标签没变，策略自动跟上。
 
@@ -471,7 +471,7 @@ Service 这一层也一样：Cilium 连劫持规则都不写，ClusterIP 只是 
 
 **缺点**：
 
-- 内核版本门槛：4.19+，高级特性（快速路径、socket-level LB）要 5.x；
+- 内核版本门槛随版本水涨船高：早期要求 4.19+，当前 stable 已要求 ≥5.10，以官方 system requirements 为准；
 - 学习曲线陡峭：eBPF、BPF Map、identity 一套新心智模型；排障要用 bpftool / cilium-cli / Hubble，传统 tcpdump 只能看到表层；
 - 资源消耗：每节点 Agent 常驻 + 编译 BPF 程序的 CPU 开销，小集群上收益不明显。
 
@@ -481,7 +481,7 @@ Service 这一层也一样：Cilium 连劫持规则都不写，ClusterIP 只是 
 
 | CNI | 云 | 模式 | 特点 |
 | --- | --- | --- | --- |
-| Terway | 阿里云 | ENI 直通 / 混合 | Pod 用 ENI 或辅助 IP，支持 NetworkPolicy，性能好 |
+| Terway | 阿里云 | ENI 直通 / 混合 | Pod 用 ENI 或辅助 IP，支持 NetworkPolicy（仅共享 ENI 模式，独占 ENI 直通不支持），性能好 |
 | VPC CNI | AWS | ENI 辅助 IP | Pod IP 即 VPC IP，配合 Security Groups for Pods |
 | Azure CNI | Azure | 子网直通 / overlay | 与 Azure 网络深度集成 |
 | GKE Dataplane V2 | GCP | eBPF（cilium） | 托管 kube-proxy 替代与可观测性 |
@@ -512,7 +512,7 @@ ClusterIP 不属于任何网卡、任何主机，它只是"被劫持的目的地
 
 iptables 模式下，每个新连接的首包都要从 `KUBE-SERVICES` 链第 1 条开始逐条匹配，复杂度 O(n)；Service 一多规则就爆炸（1000 个 Service × 10 个后端 ≈ 上万条规则），负载均衡也只有随机概率一种。
 
-IPVS 换成内核哈希表：每个 Service 是一个虚拟服务，每个后端是一个 real server，按 `ClusterIP:Port` 哈希直接命中，O(1)；调度算法有 rr（轮询）、lc（最少连接）、sh（源地址哈希）等 10+ 种。**DNAT 只发生在连接的第一个包**，后续包和回包靠 conntrack 转换；剩下的全是 iptables 的活——MASQUERADE（SNAT，外部访问 NodePort、hairpin 场景）、filter 放行、配合 ipset 的跳转规则、NetworkPolicy；没有 iptables，IPVS 模式跑不完整，两者是配合不是替代。`ipvsadm` 和 kube-proxy 只是用户态工具，真正干活的是内核的 `ip_vs`、`ip_vs_rr`、`nf_conntrack` 等模块。
+IPVS 换成内核哈希表：每个 Service 是一个虚拟服务，每个后端是一个 real server，按 `ClusterIP:Port` 哈希直接命中，O(1)；调度算法有 rr（轮询）、lc（最少连接）、sh（源地址哈希）等 10+ 种。**DNAT 只发生在连接的第一个包**，后续包和回包靠 conntrack 转换；剩下的全是 iptables 的活——MASQUERADE（SNAT，外部访问 NodePort、hairpin 场景）、filter 放行、配合 ipset 的跳转规则、NetworkPolicy；没有 iptables，IPVS 模式跑不完整，两者是配合不是替代。`ipvsadm` 和 kube-proxy 只是用户态工具，真正干活的是内核的 `ip_vs`、`ip_vs_rr`、`nf_conntrack` 等模块。**时效性提示**：kube-proxy 的 IPVS 模式已被官方标注弃用（v1.35 起 Deprecated，v1.40 默认禁用、v1.43 移除），新部署应选 nftables 模式；这里保留 IPVS 是因为它最清楚地解释了"哈希查找 + conntrack"的原理。
 
 kube-proxy 和 CNI 是两个独立层次：把 calico 换成 flannel VXLAN，IPVS 的 DNAT 逻辑一字不变，只是"DNAT 之后怎么送到后端"从 BGP 直路由变成走隧道。
 
@@ -522,8 +522,82 @@ kube-proxy 和 CNI 是两个独立层次：把 calico 换成 flannel VXLAN，IPV
 | --- | --- | --- | --- |
 | ClusterIP | 集群内 | 服务间调用 | 跨集群不可达 |
 | NodePort | 节点 IP:30000-32767 | 临时调试、自建 LB 后端 | 端口范围固定，暴露面大，生产少用 |
-| LoadBalancer | 云 SLB / CLB / NLB | 生产南北向入口 | 每个 Service 一个 LB，数量和费用要控制 |
+| LoadBalancer | 云 CLB / NLB（公网型自带公网地址，私网型纯内网） | 生产南北向入口 | 每个 Service 一个 LB，数量和费用要控制 |
 | Ingress / Gateway | 一个 LB + 七层路由 | 多域名、多服务共享入口 | TLS 卸载、限流、WAF 都在这一层 |
+
+### CLB 的本质：分布式软件转发服务，不是一台机器
+
+阿里云 CLB（Classic Load Balancer）和 VPC、NAT 一样是虚拟设备：是云厂商网络里一组分布式软件负载均衡服务——控制面把配置下发到整个可用区的转发集群，数据面由大量转发节点协同工作，任何一台物理设备上都看不到这个 VIP 的完整归属。你在控制台创建的"CLB 实例"只是这份转发服务的一个逻辑对象，真正能感知到的只有四样东西：**一个 VIP、若干监听器、后端服务器、健康检查**。
+
+"控制面、数据面、转发集群"这三个词，指的都是**阿里云自己机房里的内部基础设施**
+
+工作模型是**监听器 + 转发规则**：一个 CLB 实例挂一个 VIP，按协议 / 端口切监听器（TCP / UDP 做四层转发，HTTP / HTTPS 做七层路由），监听器里配转发规则（按域名、路径分发）和后端服务器组，健康检查负责把坏后端摘除、恢复后加回。
+
+| | 公网 CLB | 私网 CLB |
+| --- | --- | --- |
+| 地址 | 系统自带固定公网 IP（与实例强绑定，不是 EIP），互联网可直达 | 只有 vSwitch 网段内的私网 IP，不绑 EIP |
+| 谁能访问 | 任何公网客户端（必须靠安全组收口） | 只有 VPC 内网客户端 |
+| 计费 | 公网带宽 / 流量费 + 实例费 | 只有实例费，无公网流量费 |
+| 典型场景 | 对外业务入口、开放 API | 内网分层、apiserver、管理面 |
+
+**绑 EIP 与不绑 EIP 的场景**：
+
+- 要对公网提供服务（官网、开放平台、第三方回调）→ 公网 CLB，系统自带固定公网 IP，DNS 解析到它即可；或者私网 CLB 绑 EIP——EIP 可换绑、可进共享带宽，阿里云文档更推荐这种；
+- 只给 VPC 内部消费（内网微服务分层、管理后台、集群控制面）→ 私网 CLB，不绑 EIP，地址只在 VPC 路由里可达，天然不出公网，暴露面最小、也没有公网流量费；
+- 底线是**能私网就私网**：必须上公网的，CLB 安全组只放行已知来源，绝不全网段开放；
+- EIP 可以换绑，但换绑瞬间入口地址就变了，DNS 未刷新期间连接会丢——公网入口的 EIP 一旦对外承诺就当资产管理，变更走流程。
+
+集群里会遇到两类 CLB，职责完全不同：
+
+| | apiserver CLB | 业务 CLB |
+| --- | --- | --- |
+| 谁创建 | 创建托管集群时自动建，你不管 | 你自己建（LoadBalancer Service / Ingress） |
+| 位置 | 默认是集群 VPC 内的**私网 CLB（不绑 EIP）**，后端是托管 apiserver 节点的 6443；只有显式开"公网访问"才额外开公网 CLB（自带公网 IP） | 随 Service / Ingress 创建，公网还是私网由你选 |
+| 谁在连 | kubelet、kubectl、CI/CD、控制面组件 | 外部用户和调用方 |
+| 作用 | 给集群一个稳定的 API 入口，多 apiserver 挂在同一个 VIP 后面做 HA | 业务流量的南北向入口 |
+
+**CLB VIP 的作用**：VIP 是这个实例的"服务地址"，不绑定在任何网卡上——**它是内网还是公网取决于实例类型，别一概当成内网 IP**：
+
+- **私网 CLB**：VIP 是 vSwitch 网段里分的内网 IP，只在 VPC 内可达，外网连不进来。要让外网访问，给它绑一个 EIP——外网客户端连 EIP，EIP 把流量转进这个内网 VIP，这才是"内网 VIP + 外网 EIP"的模型；
+- **公网 CLB**：VIP 就是系统分配的固定公网 IP（与实例强绑定，不是 EIP，不能换绑），外网客户端直接连 VIP，中间没有 EIP 这一层。
+
+无论哪种地址，客户端只连这一个 VIP，CLB 的转发集群负责把连接摊到健康后端，坏节点被健康检查自动摘除。你只需在 DNS 和客户端配置里写这一个地址，后端扩缩容、换节点都不用改配置——这和 Service 的 ClusterIP 是同一个思想，只是 CLB 在集群外面、ClusterIP 在集群里面；ClusterIP 只在集群内有意义，CLB VIP 是给集群外客户端用的稳定入口。
+
+两条完整链路。
+
+apiserver CLB（控制面；默认私网、不绑 EIP）：
+
+```text
+kubelet / kubectl / CI-CD（VPC 内直连，或本地经 VPN / 专线进来）
+  → apiserver CLB VIP:6443
+  → 监听器健康检查，挑一台健康的 apiserver
+  → 托管 apiserver 节点
+回包原路返回；某台 apiserver 挂掉 → 健康检查摘除 → 自动摊到剩下的，客户端无感知
+```
+**运维怎么够到这个内网 VIP**：apiserver CLB 只在 VPC 内可达，办公网里直接 `kubectl` 必然超时——所有手段的本质都是**把人"送进 VPC"**（先路由可达、再安全组放行），apiserver 本身从头到尾只监听内网：
+
+| 手段 | 原理 | 适用 |
+| --- | --- | --- |
+| VPN 网关 | 笔记本 / 办公网设备与云端 VPN 网关建加密隧道：IPsec 是两端子网协商互通，办公网拿到去 VPC 网段的路由；SSL VPN 是拨号后给笔记本分一个 VPC 内 IP 并下发路由——之后连私网 VIP 就和在机房里一样 | 个人临时访问、办公网常态访问 |
+| 堡垒机（跳板机） | VPC 里放一台办公网可 SSH 的 ECS：先登堡垒机，再从它内网跑 kubectl；或本机 kubectl 用 SSH 端口转发，把私网 VIP 转到本地 `localhost`。两段连接——人 → 堡垒机走公网 / 专线，堡垒机 → apiserver 全程内网 | 要账号托管、命令审计、会话录像的团队 |
+| 专线 / CEN | 公司 IDC 拉物理专线接入 VPC，路由直接打通，不经公网、不建隧道 | 数据中心常态互通，延迟低、稳定 |
+
+配套两件事：kubeconfig 的 `server` 写私网 VIP（或 PrivateZone 内网域名，公网根本解析不到）；apiserver CLB 安全组只放行堡垒机网段、VPN 分配网段、CI/CD 出口 IP。**VPN / 专线解决"路由到得了"，安全组解决"放不放行"，两样凑齐 kubectl 才通**——排查"kubectl 连不上"就按这两段走，先 `ping / curl` 验证网络可达，再看安全组。
+
+业务 CLB（数据面；公网 CLB + kube-proxy 模式）：
+
+```text
+客户端 → DNS 解析到 CLB 的公网地址（公网 CLB 的固定公网 IP，或私网 CLB 绑的 EIP）
+  → 安全组放行 → CLB 监听器（L4 转发；要七层路由就交给 Ingress Controller Pod）
+  → 节点 NodePort（externalTrafficPolicy 决定要不要 SNAT）
+  → kube-proxy DNAT：NodePort → Pod IP
+  → Pod
+回包原路返回：Pod → 节点 → CLB 公网地址 → 客户端
+```
+
+链路长，排障按段切：DNS 解析对不对 → CLB 健康检查和安全组 → NodePort 通不通 → Service Endpoints 里有没有 Pod。
+
+**入站用 CLB、出站用 NAT 网关**是云上标准分工，方向相反、各解各的问题，但公网身份都来自公网地址：入站是"公网 CLB 的固定公网 IP（或私网 CLB 绑的 EIP），让外网稳定找到你"，出站是"NAT 网关绑 EIP，让一堆内网地址共享一个可白名单的公网出口"；私网 CLB 不绑 EIP 的场景管的是第三类流量——根本不该出公网的内网流量，全程留在 VPC 里。托管集群的 apiserver CLB 默认私网不绑 EIP，即便开了公网访问，也只应放行运维网段和 CI/CD 出口 IP，公网全开等于把集群管理面暴露出去。
 
 **externalTrafficPolicy** 是云上最容易踩的坑：
 
@@ -572,7 +646,7 @@ Service 虚拟 IP 只在本集群的 kube-proxy / eBPF 里有意义，对端集�
 ### 对 k8s 的三个关键点
 
 1. **网段不能重叠是硬约束**：两个集群的 Pod CIDR、Service CIDR、节点网段都要全局唯一。Peering 会直接拒绝重叠网段；即使 CEN 打通，重叠地址也没法路由。这是多集群组网规划的第一件事；
-2. **overlay 模式：跨 VPC 通的是节点 IP**：Pod 包封在"节点 IP → 节点 IP"的隧道里，外层是节点的 VPC 地址。只要节点 IP 跨 VPC 可达（Peering / CEN + 两端路由表 + 安全组放行 4789/UDP），Pod 就能通；对端 VPC 不需要认识 Pod 网段；
+2. **overlay 模式：跨 VPC 通的是节点 IP**：Pod 包封在"节点 IP → 节点 IP"的隧道里，外层是节点的 VPC 地址。只要节点 IP 跨 VPC 可达（Peering / CEN + 两端路由表 + 安全组放行 VXLAN UDP 端口，flannel Linux 默认 8472、RFC 分配 4789），Pod 就能通；对端 VPC 不需要认识 Pod 网段；
 3. **ENI 模式：Pod IP 就是 VPC 地址**：跨 VPC 时对端路由表必须有回程路由指向 Pod 所在子网，否则请求能过去、响应回不来；Pod IP 消耗 vSwitch 地址，子网要预留够大。
 
 多集群规划建议：每个集群分配独立的 Pod / Service 段（例如按环境、地域、集群编号切分），统一登记；不要把 CNI 默认网段直接用于生产；CEN 打通前先做一次全局网段冲突扫描。
@@ -581,9 +655,20 @@ Service 虚拟 IP 只在本集群的 kube-proxy / eBPF 里有意义，对端集�
 
 ### Pod 怎么访问公网
 
-节点默认没有公网 IP，Pod 出公网的标准路径是 **Pod → 节点 → NAT 网关 → EIP**：
+节点默认没有公网 IP，Pod 出公网的标准路径是 **Pod → 节点 → NAT 网关 → EIP**。
 
-- NAT 网关做 SNAT，所有 Pod 共享出口 IP，适合拉镜像、调外部 API；
+**NAT 网关也是虚拟的**：和 CLB、VPC 路由表一样，它不是机房里一台物理盒子，而是云厂商网络里一组分布式软件 NAT 设备。你在控制台"创建"它，实际是在云厂商的转发集群里划出一份带状态表的服务，再在 VPC 路由表里加一条"默认路由指向它"——从此所有出 VPC 的流量都被引到这组设备上处理。能感知到的实体只有两个：控制台里的对象和它绑定的 EIP。
+
+**NAT 网关自己没有公网地址，必须绑定 EIP 才有公网身份**：绑定这个动作，就是给这组转发服务指定"对外用哪个公网 IP"，之后 SNAT 转换出来的源地址永远是这个绑定的 EIP。EIP 可以换绑到另一个 NAT 网关，但换绑瞬间出口 IP 就变，对端白名单立刻失效——生产上把"NAT ↔ EIP 绑定关系"当对外承诺管理，变更走流程。SNAT 条目按"源网段 → EIP"配置：默认整个 VPC 网段共享这一个 EIP，也可以按 vSwitch、按 ECS 拆条目、绑多个 EIP 分流，例如镜像仓库节点段绑 EIP-1、业务段绑 EIP-2，出口互不干扰，白名单和限速各配各的。
+
+它做的事情是 **SNAT**，把"内网 IP:端口"转换成"绑定的 EIP:端口"：
+
+- 出方向：源地址从 `10.1.1.5:54321` 改成 `EIP:随机端口`，记录在状态表里；
+- 回方向：云端对端只认 EIP，回包到 `EIP:该端口`，NAT 查状态表改回 `10.1.1.5:54321` 送进 VPC——**整个 VPC 里的 Pod / 节点可以共用一个 EIP**，对端看到的始终是同一个出口 IP；
+- 端口是稀缺资源：一个 EIP 只有约 6.5 万个端口，Pod 共用出口时按连接分配、连接释放才回收，大流量 / 短连接场景要留意端口耗尽（云厂商一般按端口段分配来缓解）。
+
+其他要点：
+
 - 给每个节点绑 EIP 既增加暴露面又浪费地址，不推荐；给 Pod 直接绑 EIP 更不要做；
 - 需要固定出口做白名单时，用 NAT 网关的 EIP + 出口白名单，不要用节点 EIP；
 - NAT 网关按流量和处理能力计费，大流量拉镜像 / 备份会明显推高账单，能走 VPC 端点就走端点。
@@ -637,10 +722,10 @@ NetworkPolicy 只是一个 API 对象，描述"谁可以访问谁"的期望状�
 | --- | --- |
 | 没有策略 = 全通 | 只有被策略 `podSelector` 选中的 Pod 才受限；一旦被某条 Ingress 策略选中，入站就变成"默认拒绝，只放开规则里写的" |
 | 只能 allow，没有 deny | 多条策略选中同一 Pod 时取并集。"拒绝"只能靠不写 allow 实现——所以落地顺序永远是先铺"默认拒绝"的伞 |
-| namespaceSelector 匹配标签，不是名字 | 1.21+ 每个 namespace 自动带 `kubernetes.io/metadata.name=<名字>`；`namespaceSelector: {}` 匹配所有 namespace（含 kube-system） |
+| namespaceSelector 匹配标签，不是名字 | 每个 namespace 带 `kubernetes.io/metadata.name=<名字>`；`namespaceSelector: {}` 匹配所有 namespace（含 kube-system） |
 | 同一 from 元素内 AND，多个元素 OR | `namespaceSelector` + `podSelector` 写在同一个 `from` 元素里 = "那个 ns 里带这个标签的 Pod"；拆成两个元素 = 两种来源都放行。这是最高频的配置事故 |
 
-还有一个联动点：**策略检查的是 DNAT 之后的真实 Pod IP**。`ipBlock` 里写 ClusterIP 网段没有意义（那个网段里根本没有地址），要写后端 Pod 的 CIDR，或者直接用 `podSelector`。
+还有一个联动点：**别拿 ClusterIP 去匹配 `ipBlock`**——官方明确 DNAT 发生在策略处理之前还是之后"未定义"，不同 CNI 实现不一致，不能依赖；而且 ClusterIP 网段里根本没有可路由的地址，要写后端 Pod 的 CIDR，或者直接用 `podSelector`。
 
 ### 落地顺序：先关门，再开窗
 
@@ -785,7 +870,7 @@ spec:
 | `policyTypes` 省略 | Egress 没被限制住 | 不写 `policyTypes` 时，只有出现 `egress` 规则才启用 Egress；要"默认拒绝出站"必须显式写 `policyTypes: [Egress]` 且不给规则 |
 | 来源 IP 对不上 | `ipBlock` 规则匹配不到 | NodePort / LB 默认 `externalTrafficPolicy: Cluster`，源地址被 SNAT 成节点 IP；改 `Local` 才保留真实源 IP |
 | kubelet 探针被误杀 | Pod 一直 NotReady，事件里 probe 超时 | 探针从节点 IP 发起，部分 CNI 的 default-deny 会挡住；视实现决定是否放行节点 CIDR |
-| hostNetwork Pod 逃逸 | 宿主机网络的 Pod 不受策略约束 | 标准 NetworkPolicy 只作用于 Pod 网络，host 侧要 CNI 的 host firewall 能力 |
+| hostNetwork Pod 绕过策略 | 宿主机网络的 Pod 行为异常 | 官方标注 hostNetwork 连接的行为未定义（常按节点流量处理）；host 侧要靠 CNI 的 host firewall 能力 |
 
 一句话总结：**白名单、被选中才受限、策略叠加取并集；落地先 default-deny 兜底，再按标签逐条开口子。**
 
@@ -830,7 +915,7 @@ L7 策略（按 HTTP 方法 / 路径放行）Cilium 也支持，但要把流量�
 - **veth 对**：纯软件模拟的网线，两端各在一个 netns。Pod 有自己的 netns，宿主机是另一个 netns，靠 veth 对打通；
 - **隧道**：把一种网络包整个塞进另一种网络包的"数据"部分，让内层流量借外层网络的路走，从而跨越原本走不通、或不该感知它的网络；
 - **cni0 vs veth 直连**：cni0 是网桥，同节点走二层、有广播域、路由粒度是整段 /24；veth 直连是三层、每 Pod 一条 /32 路由、没有广播域；
-- **ClusterIP ping 不通**：它是虚拟地址，不落在任何网卡上，只处理 TCP / UDP 的 DNAT，不响应 ICMP；
+- **ClusterIP ping 不通**：它是虚拟地址，不落在任何网卡上，只处理 TCP / UDP 的 DNAT；iptables 模式下 ICMP 没有对应规则，通常不通——这是常见现象，不是协议保证；
 - **Pod CIDR vs Service CIDR**：前者是真实分配到 Pod 网卡的地址，后者是纯虚拟的 Service 地址，两段不能重叠；
 - **overlay vs ENI**：前者 VPC 只看到节点 IP，后者 Pod IP 就是 VPC IP；
 - **安全组 vs NetworkPolicy**：前者绑网卡、云平台管、有状态；后者绑 Pod、k8s 管、只有 allow，两者串联生效。
